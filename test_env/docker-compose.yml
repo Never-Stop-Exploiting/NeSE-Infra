@@ -1,0 +1,10 @@
+services:
+  flagserver:
+    build:
+      context: ./flagserver
+      dockerfile: Dockerfile
+    container_name: flagserver
+    ports:
+      - "5000:5000"
+    image: flagserver:latest
+    pull_policy: never

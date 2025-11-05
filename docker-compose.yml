@@ -1,0 +1,71 @@
+services:
+  postgres:
+    image: postgres:15
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: awd
+      POSTGRES_USER: awd
+      POSTGRES_PASSWORD: awd
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+
+  control-plane:
+    build:
+      context: .
+      dockerfile: docker/control-plane.Dockerfile
+    env_file:
+      - .env.example
+    depends_on:
+      - postgres
+      - redis
+    ports:
+      - "8080:8080"
+
+  scheduler:
+    build:
+      context: .
+      dockerfile: docker/scheduler.Dockerfile
+    env_file:
+      - .env.example
+    depends_on:
+      - control-plane
+
+  flag-submitter:
+    build:
+      context: .
+      dockerfile: docker/flag-submitter.Dockerfile
+    env_file:
+      - .env.example
+    depends_on:
+      - redis
+
+  runner:
+    build:
+      context: .
+      dockerfile: docker/runner.Dockerfile
+    env_file:
+      - .env.example
+    environment:
+      RUNNER_SECRET: ${RUNNER_SECRET:-dev-runner-secret}
+    depends_on:
+      - scheduler
+
+  web:
+    build:
+      context: .
+      dockerfile: docker/web.Dockerfile
+    depends_on:
+      - control-plane
+    ports:
+      - "5173:80"
+
+volumes:
+  postgres-data:

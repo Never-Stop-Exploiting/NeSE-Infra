@@ -1,0 +1,99 @@
+export interface Challenge {
+  id: string;
+  name: string;
+  category?: string;
+  serviceType?: string;
+}
+
+export interface Target {
+  id: string;
+  challengeId: string;
+  teamName: string;
+  ip: string;
+  port: number;
+  status?: string;
+  concurrencyLimit: number;
+  labels?: Record<string, string>;
+}
+
+export interface Exploit {
+  id: string;
+  challengeId: string;
+  name: string;
+  description?: string;
+  enabled: boolean;
+  runnerTags: string[];
+  scheduleWeight: number;
+  timeoutSeconds?: number;
+  metadata?: Record<string, unknown>;
+  updatedAt?: string;
+}
+
+export interface ExploitRevision {
+  id: string;
+  exploitId: string;
+  digest: string;
+  createdAt: string;
+  notes?: string;
+}
+
+export interface RunSummary {
+  id: string;
+  exploitId: string;
+  exploitName?: string;
+  targetId: string;
+  targetLabel?: string;
+  runnerId?: string;
+  status: "pending" | "running" | "succeeded" | "failed" | "timeout";
+  queuedAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+}
+
+export interface RunDetail extends RunSummary {
+  stdout?: string;
+  stderr?: string;
+  flagId?: string;
+  errorMessage?: string;
+}
+
+export interface FlagRecord {
+  id: string;
+  value: string;
+  challengeId: string;
+  targetId: string;
+  status: "new" | "submitting" | "accepted" | "rejected" | "retry" | "dropped";
+  submissionCount: number;
+  attempts: SubmissionAttempt[];
+}
+
+export interface SubmissionAttempt {
+  id: string;
+  submitterId: string;
+  statusCode: number;
+  error?: string;
+  submittedAt: string;
+  nextRetryAt?: string;
+}
+
+export interface RunnerInfo {
+  id: string;
+  type: string;
+  hostname?: string;
+  maxParallel: number;
+  activeJobs: number;
+  status: "online" | "offline" | "degraded";
+  lastHeartbeat?: string;
+  labels?: Record<string, string>;
+}
+
+export interface LogEntry {
+  id: string;
+  timestamp: string;
+  level: "debug" | "info" | "warn" | "error";
+  source: string;
+  message: string;
+  runId?: string;
+  flagId?: string;
+  fields?: Record<string, unknown>;
+}
