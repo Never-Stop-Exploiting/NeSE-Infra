@@ -189,34 +189,16 @@ tr.active {
   resize: vertical;
 }
 
-.detail ul {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
+.attempts-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
 }
 
-.detail li {
-  border: 1px solid rgba(148, 163, 184, 0.2);
-  border-radius: 8px;
-  padding: 0.75rem;
-  background: rgba(15, 23, 42, 0.6);
-}
-
-.detail li div {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-.detail small {
-  color: #94a3b8;
-}
-
-.detail p {
-  margin: 0.25rem 0 0;
+.attempts-table th,
+.attempts-table td {
+  padding: 0.5rem;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.15);
 }
 
 @media (max-width: 960px) {

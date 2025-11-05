@@ -24,6 +24,8 @@ export const useFlagStore = defineStore("flags", () => {
 
   async function retry(id: string) {
     await retryFlag(id);
+    await load();
+    delete logCache.value[id];
   }
 
   async function loadLogs(id: string) {

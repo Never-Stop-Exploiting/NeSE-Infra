@@ -108,7 +108,11 @@ func (s *Server) handleChallenges(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to list challenges")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"items": challenges})
+		items := make([]map[string]any, 0, len(challenges))
+		for _, challenge := range challenges {
+			items = append(items, marshalChallenge(challenge))
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items})
 	case http.MethodPost:
 		var req struct {
 			Name        string         `json:"name"`
@@ -137,7 +141,7 @@ func (s *Server) handleChallenges(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to create challenge")
 			return
 		}
-		writeJSON(w, http.StatusCreated, map[string]any{"challenge": created})
+		writeJSON(w, http.StatusCreated, map[string]any{"challenge": marshalChallenge(created)})
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
@@ -156,7 +160,7 @@ func (s *Server) handleChallengeDetail(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "challenge not found")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"challenge": challenge})
+		writeJSON(w, http.StatusOK, map[string]any{"challenge": marshalChallenge(challenge)})
 	case http.MethodPatch, http.MethodPut:
 		var req struct {
 			Name        string         `json:"name"`
@@ -181,7 +185,7 @@ func (s *Server) handleChallengeDetail(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "challenge not found")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"challenge": updated})
+		writeJSON(w, http.StatusOK, map[string]any{"challenge": marshalChallenge(updated)})
 	case http.MethodDelete:
 		if err := s.repository.DeleteChallenge(r.Context(), id); err != nil {
 			writeError(w, http.StatusNotFound, "challenge not found")
@@ -507,6 +511,10 @@ func (s *Server) handleFlags(w http.ResponseWriter, r *http.Request) {
 	responses := make([]map[string]any, 0, len(flags))
 	for _, flag := range flags {
 		attempts, _ := s.repository.ListFlagAttempts(r.Context(), flag.ID)
+		cleanAttempts := make([]map[string]any, 0, len(attempts))
+		for _, attempt := range attempts {
+			cleanAttempts = append(cleanAttempts, marshalAttempt(attempt))
+		}
 		responses = append(responses, map[string]any{
 			"id":              flag.ID,
 			"value":           flag.Value,
@@ -514,7 +522,7 @@ func (s *Server) handleFlags(w http.ResponseWriter, r *http.Request) {
 			"targetId":        flag.TargetID,
 			"status":          flag.Status,
 			"submissionCount": flag.SubmissionCount,
-			"attempts":        attempts,
+			"attempts":        cleanAttempts,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": responses})
@@ -674,7 +682,11 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to list logs")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": logs})
+	items := make([]map[string]any, 0, len(logs))
+	for _, entry := range logs {
+		items = append(items, marshalLog(entry))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
 func (s *Server) handleRunners(w http.ResponseWriter, r *http.Request) {
@@ -688,7 +700,11 @@ func (s *Server) handleRunners(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to list runners")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": runners})
+	items := make([]map[string]any, 0, len(runners))
+	for _, runner := range runners {
+		items = append(items, marshalRunner(runner))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
 func marshalExploit(exploit domain.Exploit) map[string]any {
@@ -735,6 +751,57 @@ func marshalTarget(target domain.Target) map[string]any {
 		"status":           target.Status,
 		"concurrencyLimit": target.ConcurrencyLimit,
 		"labels":           target.Labels,
+	}
+}
+
+func marshalChallenge(ch domain.Challenge) map[string]any {
+	return map[string]any{
+		"id":          ch.ID,
+		"name":        ch.Name,
+		"category":    ch.Category,
+		"serviceType": ch.ServiceType,
+		"description": ch.Description,
+		"metadata":    ch.Metadata,
+		"createdAt":   ch.CreatedAt,
+		"updatedAt":   ch.UpdatedAt,
+	}
+}
+
+func marshalAttempt(attempt domain.SubmissionAttempt) map[string]any {
+	return map[string]any{
+		"id":          attempt.ID,
+		"flagId":      attempt.FlagID,
+		"submitterId": attempt.SubmitterID,
+		"statusCode":  attempt.StatusCode,
+		"error":       attempt.Error,
+		"submittedAt": attempt.SubmittedAt,
+		"nextRetryAt": attempt.NextRetryAt,
+	}
+}
+
+func marshalLog(entry domain.LogEntry) map[string]any {
+	return map[string]any{
+		"id":        entry.ID,
+		"timestamp": entry.Timestamp,
+		"level":     entry.Level,
+		"source":    entry.Source,
+		"message":   entry.Message,
+		"runId":     entry.RunID,
+		"flagId":    entry.FlagID,
+		"fields":    entry.Fields,
+	}
+}
+
+func marshalRunner(runner domain.Runner) map[string]any {
+	return map[string]any{
+		"id":            runner.ID,
+		"type":          runner.Type,
+		"hostname":      runner.Hostname,
+		"labels":        runner.Labels,
+		"maxParallel":   runner.MaxParallel,
+		"lastHeartbeat": runner.LastHeartbeat,
+		"status":        runner.Status,
+		"registeredAt":  runner.RegisteredAt,
 	}
 }
 

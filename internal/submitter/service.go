@@ -1,13 +1,9 @@
 package submitter
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
-	"net/http"
 	"time"
 
 	"awdinfra/internal/config"
@@ -22,17 +18,18 @@ type Service struct {
 	log    *slog.Logger
 	repo   storage.Repository
 	broker queue.Broker
-	client *http.Client
+	plugin Plugin
 }
 
 // New constructs a new submitter service.
 func New(cfg config.Config, log *slog.Logger, repo storage.Repository, broker queue.Broker) *Service {
+	plugin := NewHTTPPlugin(cfg.FlagSubmitter)
 	return &Service{
 		cfg:    cfg,
 		log:    log,
 		repo:   repo,
 		broker: broker,
-		client: &http.Client{Timeout: cfg.FlagSubmitter.RequestTimeout},
+		plugin: plugin,
 	}
 }
 
@@ -85,66 +82,62 @@ func (s *Service) processMessage(ctx context.Context, msg queue.Message) error {
 		return fmt.Errorf("invalid payload")
 	}
 
-	reqBody, err := json.Marshal(map[string]string{"flag": payload.FlagValue})
-	if err != nil {
-		return err
+	request := SubmissionRequest{
+		FlagID:      payload.FlagID,
+		FlagValue:   payload.FlagValue,
+		ChallengeID: payload.ChallengeID,
+		TargetID:    payload.TargetID,
+		Metadata:    payload.Metadata,
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.FlagSubmitter.Endpoint, bytes.NewReader(reqBody))
-	if err != nil {
-		return err
+	result := s.plugin.Submit(ctx, request)
+	status := result.StatusCode
+	message := result.Message
+	if message == "" && result.Err != nil {
+		message = result.Err.Error()
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
+	s.log.Info("flag submitted", slog.String("flag_id", payload.FlagID), slog.Int("status", status), slog.String("message", message))
 
-	resp, err := s.client.Do(httpReq)
-	if err != nil {
-		s.recordAttempt(ctx, payload.FlagID, 0, err.Error(), time.Now().Add(s.cfg.FlagSubmitter.RetryBackoff))
-		return err
+	retryAfter := time.Time{}
+	if result.RetryAfter != nil {
+		retryAfter = time.Now().Add(time.Duration(*result.RetryAfter) * time.Second)
 	}
-	defer resp.Body.Close()
-	bodyBytes, _ := io.ReadAll(resp.Body)
-	bodyStr := string(bodyBytes)
 
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		s.log.Info("flag accepted", slog.String("flag_id", payload.FlagID), slog.Int("status", resp.StatusCode))
-		submittedAt := s.recordAttempt(ctx, payload.FlagID, resp.StatusCode, bodyStr, time.Time{})
-		flag, err := s.repo.GetFlag(ctx, payload.FlagID)
-		if err == nil {
+	submittedAt := s.recordAttempt(ctx, payload.FlagID, status, message, retryAfter)
+
+	flag, err := s.repo.GetFlag(ctx, payload.FlagID)
+	s.log.Info("fetched flag for update", slog.String("flag_id", payload.FlagID), slog.Any("err", err))
+	if err == nil {
+		if status >= 200 && status < 300 {
 			flag.Status = domain.FlagStatusAccepted
-			flag.LastSubmittedAt = submittedAt
-			_ = s.repo.UpdateFlag(ctx, &flag)
+		} else {
+			flag.Status = domain.FlagStatusRetry
 		}
-		_ = s.repo.AppendLog(ctx, domain.LogEntry{
-			Level:   "info",
-			Source:  "flag-submitter",
-			Message: fmt.Sprintf("flag %s submitted successfully", payload.FlagID),
-			FlagID:  payload.FlagID,
-			Fields:  map[string]any{"response": bodyStr},
-			RunID:   "",
-		})
+		flag.LastSubmittedAt = submittedAt
+		// s.log.Info("updating flag after submission", slog.String("flag_id", payload.FlagID), slog.String("status", string(flag.Status)), slog.Any("flag", flag))
+		_ = s.repo.UpdateFlag(ctx, &flag)
+	}
+
+	logEntry := domain.LogEntry{
+		Level:   "info",
+		Source:  "flag-submitter",
+		Message: fmt.Sprintf("flag %s submitted", payload.FlagID),
+		FlagID:  payload.FlagID,
+		Fields:  map[string]any{"status": status, "message": message},
+	}
+	if status < 200 || status >= 300 {
+		logEntry.Level = "warn"
+		if result.Err != nil {
+			logEntry.Fields["error"] = result.Err.Error()
+		}
+	}
+	_ = s.repo.AppendLog(ctx, logEntry)
+
+	if status >= 200 && status < 300 {
 		return nil
 	}
 
-	message := bodyStr
-	if message == "" {
-		message = resp.Status
-	}
-	retryAt := time.Now().Add(s.cfg.FlagSubmitter.RetryBackoff)
-	submittedAt := s.recordAttempt(ctx, payload.FlagID, resp.StatusCode, message, retryAt)
-	flag, err := s.repo.GetFlag(ctx, payload.FlagID)
-	if err == nil {
-		flag.Status = domain.FlagStatusRetry
-		flag.LastSubmittedAt = submittedAt
-		_ = s.repo.UpdateFlag(ctx, &flag)
-	}
-	_ = s.repo.AppendLog(ctx, domain.LogEntry{
-		Level:   "warn",
-		Source:  "flag-submitter",
-		Message: fmt.Sprintf("flag %s submission failed", payload.FlagID),
-		FlagID:  payload.FlagID,
-		Fields:  map[string]any{"status": resp.StatusCode, "response": bodyStr},
-	})
-	return fmt.Errorf("submit status %d", resp.StatusCode)
+	return fmt.Errorf("submit status %d", status)
 }
 
 func (s *Service) recordAttempt(ctx context.Context, flagID string, status int, message string, next time.Time) time.Time {

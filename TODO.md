@@ -27,7 +27,7 @@
 - **前端**：Pinia 管理状态、Axios 统一客户端、表格/表单使用暗色主题；依赖 pnpm 安装，开发端口 5173。
 
 ## 待办 / 下一步
-1. **持久化实现**：将内存仓库替换为 PostgreSQL/Redis 版本，实现 targets/exploits/runs/logs 等真实读写。
+1. **持久化实现**：将内存仓库替换为 PostgreSQL/Redis 版本，实现 targets/exploits/runs/logs 等真实读写。 
 2. **Scheduler/Runner 集成**：在 Redis 队列上实现完整任务生命周期（重试、超时、死信等），完善 RunWorkItem 生成、并发调度与结果回写。
 3. **Flag Submitter 插件**：实现提交插件加载机制（Go plugin / gRPC / HTTP），补全 Flag 提交状态流转。
 4. **日志/指标收集**：接入 Loki/Prometheus/OpenTelemetry，完善日志落地与指标暴露。
