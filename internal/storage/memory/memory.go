@@ -748,14 +748,47 @@ func (r *Repository) AddFlagAttempt(ctx context.Context, flagID string, attempt 
 	return ctx.Err()
 }
 
-func (r *Repository) ListRuns(ctx context.Context) ([]domain.Run, error) {
+func (r *Repository) ListRuns(ctx context.Context, limit int, cursor string) ([]domain.Run, string, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	items := make([]domain.Run, 0, len(r.runs))
 	for _, run := range r.runs {
 		items = append(items, run)
 	}
-	return items, ctx.Err()
+	sort.Slice(items, func(i, j int) bool {
+		ti := runReferenceTime(items[i])
+		tj := runReferenceTime(items[j])
+		if !ti.Equal(tj) {
+			return ti.After(tj)
+		}
+		return items[i].ID > items[j].ID
+	})
+
+	start := 0
+	if cursor != "" {
+		for idx, run := range items {
+			if run.ID == cursor {
+				start = idx + 1
+				break
+			}
+		}
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if start > len(items) {
+		start = len(items)
+	}
+	end := start + limit
+	if end > len(items) {
+		end = len(items)
+	}
+	chunk := append([]domain.Run(nil), items[start:end]...)
+	nextCursor := ""
+	if end < len(items) && len(chunk) > 0 {
+		nextCursor = chunk[len(chunk)-1].ID
+	}
+	return chunk, nextCursor, ctx.Err()
 }
 
 func (r *Repository) GetRun(ctx context.Context, id string) (domain.Run, error) {
@@ -1141,4 +1174,17 @@ func jobHintsFromMetadata(meta map[string]any) (string, string, time.Duration) {
 		}
 	}
 	return flagRegex, flagFile, timeout
+}
+
+func runReferenceTime(run domain.Run) time.Time {
+	if !run.QueuedAt.IsZero() {
+		return run.QueuedAt
+	}
+	if !run.StartedAt.IsZero() {
+		return run.StartedAt
+	}
+	if !run.FinishedAt.IsZero() {
+		return run.FinishedAt
+	}
+	return time.Time{}
 }

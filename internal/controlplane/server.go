@@ -774,7 +774,17 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	runs, err := s.repository.ListRuns(r.Context())
+	limit := 50
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		if value, err := strconv.Atoi(raw); err == nil && value > 0 {
+			if value > 200 {
+				value = 200
+			}
+			limit = value
+		}
+	}
+	cursor := strings.TrimSpace(r.URL.Query().Get("cursor"))
+	runs, nextCursor, err := s.repository.ListRuns(r.Context(), limit, cursor)
 	if err != nil {
 		s.logger.Error("list runs failed", slog.Any("err", err))
 		writeError(w, http.StatusInternalServerError, "failed to list runs")
@@ -793,7 +803,13 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 			"finishedAt": run.FinishedAt,
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": responses})
+	var result = map[string]any{"items": responses}
+	if nextCursor != "" {
+		result["nextCursor"] = nextCursor
+	} else {
+		result["nextCursor"] = nil
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {

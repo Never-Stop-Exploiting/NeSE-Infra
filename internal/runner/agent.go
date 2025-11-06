@@ -38,10 +38,18 @@ type Agent struct {
 	lastHeartbeat time.Time
 	brokerStatus  string
 	baseLabels    map[string]string
+	runnerTagsSet map[string]struct{}
 }
 
 // New constructs an Agent.
 func New(cfg config.Config, log *slog.Logger, broker queue.Broker, control *ControlPlaneClient, brokerStatus string) *Agent {
+	tagSet := make(map[string]struct{}, len(cfg.Runner.Tags))
+	for _, tag := range cfg.Runner.Tags {
+		value := strings.ToLower(strings.TrimSpace(tag))
+		if value != "" {
+			tagSet[value] = struct{}{}
+		}
+	}
 	return &Agent{
 		cfg:           cfg,
 		log:           log,
@@ -49,6 +57,7 @@ func New(cfg config.Config, log *slog.Logger, broker queue.Broker, control *Cont
 		controlClient: control,
 		brokerStatus:  brokerStatus,
 		baseLabels:    map[string]string{"broker": brokerStatus},
+		runnerTagsSet: tagSet,
 	}
 }
 
@@ -146,6 +155,14 @@ func (a *Agent) handleMessage(ctx context.Context, msg queue.Message) error {
 	runID := payload.RunID
 	runnerIdent := runnerID(a.cfg.Runner.ID)
 
+	if !a.supportsTags(payload.RunnerTags) {
+		a.log.Info("skipping job due to runner tag mismatch",
+			slog.String("run_id", runID),
+			slog.Any("required_tags", payload.RunnerTags),
+			slog.Any("runner_tags", a.cfg.Runner.Tags))
+		return fmt.Errorf("runner lacks required tags")
+	}
+
 	artifact, err := a.resolveArtifact(ctx, payload)
 	if err != nil {
 		a.log.Error("resolve artifact failed",
@@ -186,11 +203,11 @@ func (a *Agent) handleMessage(ctx context.Context, msg queue.Message) error {
 		}
 		return nil
 	}
-	// defer func() {
-	// 	if err := os.RemoveAll(workspace); err != nil {
-	// 		a.log.Warn("failed to cleanup workspace", slog.Any("err", err), slog.String("workspace", workspace))
-	// 	}
-	// }()
+	defer func() {
+		if err := os.RemoveAll(workspace); err != nil {
+			a.log.Warn("failed to cleanup workspace", slog.Any("err", err), slog.String("workspace", workspace))
+		}
+	}()
 
 	if err := a.ensureRunScript(workspace, payload); err != nil {
 		a.log.Error("prepare run script failed",
@@ -633,4 +650,23 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func (a *Agent) supportsTags(required []string) bool {
+	if len(required) == 0 {
+		return true
+	}
+	if len(a.runnerTagsSet) == 0 {
+		return false
+	}
+	for _, tag := range required {
+		value := strings.ToLower(strings.TrimSpace(tag))
+		if value == "" {
+			continue
+		}
+		if _, ok := a.runnerTagsSet[value]; !ok {
+			return false
+		}
+	}
+	return true
 }

@@ -91,7 +91,7 @@ async function refreshAll() {
     exploitStore.load(),
     targetStore.load(),
     flagStore.load(),
-    runStore.load(),
+    runStore.refresh(),
     runnerStore.load()
   ]);
   busy.value = false;

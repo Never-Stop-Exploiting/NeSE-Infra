@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"awdinfra/internal/config"
@@ -92,8 +93,23 @@ func (s *Scheduler) tick(ctx context.Context, limit int) error {
 		return nil
 	}
 
+	runners, err := s.repo.ListRunners(ctx)
+	if err != nil {
+		s.log.Warn("failed to load runners for tag matching", slog.Any("err", err))
+		runners = nil
+	}
+
 	dispatched := 0
 	for _, item := range workItems {
+		if !supportsRunnerTags(runners, item.Exploit.RunnerTags) {
+			if len(item.Exploit.RunnerTags) > 0 {
+				s.log.Debug("no matching runner tags",
+					slog.String("run_id", item.RunID),
+					slog.String("exploit_id", item.Exploit.ID),
+					slog.Any("required_tags", item.Exploit.RunnerTags))
+			}
+			continue
+		}
 		if err := s.enqueueRun(ctx, item); err != nil {
 			s.log.Warn("failed to enqueue run",
 				slog.String("run_id", item.RunID),
@@ -137,6 +153,9 @@ func (s *Scheduler) enqueueRun(ctx context.Context, item domain.RunWorkItem) err
 	if item.Timeout > 0 {
 		payload.TimeoutSeconds = int(item.Timeout.Seconds())
 	}
+	if len(item.Exploit.RunnerTags) > 0 {
+		payload.RunnerTags = item.Exploit.RunnerTags
+	}
 	payload.ArtifactBase64 = base64.StdEncoding.EncodeToString(item.Artifact)
 	payload.ArtifactURI = fmt.Sprintf("/api/v1/exploits/%s/artifact", item.Exploit.ID)
 
@@ -147,4 +166,46 @@ func (s *Scheduler) enqueueRun(ctx context.Context, item domain.RunWorkItem) err
 
 	_, err = s.broker.Publish(ctx, s.cfg.RunQueue.Name, body)
 	return err
+}
+
+func supportsRunnerTags(runners []domain.Runner, required []string) bool {
+	if len(required) == 0 {
+		return true
+	}
+	requiredSet := make(map[string]struct{}, len(required))
+	for _, tag := range required {
+		value := strings.ToLower(strings.TrimSpace(tag))
+		if value != "" {
+			requiredSet[value] = struct{}{}
+		}
+	}
+	if len(requiredSet) == 0 {
+		return true
+	}
+	for _, runner := range runners {
+		if len(runner.Tags) == 0 {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(runner.Status)) != "online" {
+			continue
+		}
+		tagSet := make(map[string]struct{}, len(runner.Tags))
+		for _, tag := range runner.Tags {
+			value := strings.ToLower(strings.TrimSpace(tag))
+			if value != "" {
+				tagSet[value] = struct{}{}
+			}
+		}
+		match := true
+		for tag := range requiredSet {
+			if _, ok := tagSet[tag]; !ok {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
 }

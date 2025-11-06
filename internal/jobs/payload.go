@@ -9,19 +9,20 @@ import (
 
 // JobPayload represents the scheduler message runners consume.
 type JobPayload struct {
-	RunID          string `json:"run_id"`
-	ExploitID      string `json:"exploit_id"`
-	ExploitName    string `json:"exploit_name"`
-	TargetID       string `json:"target_id"`
-	TargetIP       string `json:"target_ip"`
-	TargetPort     int    `json:"target_port"`
-	TimeoutSeconds int    `json:"timeout_seconds"`
-	ArtifactBase64 string `json:"artifact_base64"`
-	ArtifactURI    string `json:"artifact_uri,omitempty"`
-	FlagRegex      string `json:"flag_regex"`
-	FlagFile       string `json:"flag_file"`
-	RunScript      string `json:"run_script,omitempty"`
-	Entrypoint     string `json:"entrypoint,omitempty"`
+	RunID          string   `json:"run_id"`
+	ExploitID      string   `json:"exploit_id"`
+	ExploitName    string   `json:"exploit_name"`
+	TargetID       string   `json:"target_id"`
+	TargetIP       string   `json:"target_ip"`
+	TargetPort     int      `json:"target_port"`
+	TimeoutSeconds int      `json:"timeout_seconds"`
+	ArtifactBase64 string   `json:"artifact_base64"`
+	ArtifactURI    string   `json:"artifact_uri,omitempty"`
+	FlagRegex      string   `json:"flag_regex"`
+	FlagFile       string   `json:"flag_file"`
+	RunScript      string   `json:"run_script,omitempty"`
+	Entrypoint     string   `json:"entrypoint,omitempty"`
+	RunnerTags     []string `json:"runner_tags,omitempty"`
 }
 
 // DecodeJobPayload parses a queue message body into JobPayload.

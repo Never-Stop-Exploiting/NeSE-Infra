@@ -1645,13 +1645,44 @@ func (r *Repository) AddFlagAttempt(ctx context.Context, flagID string, attempt 
 	return tx.Commit()
 }
 
-func (r *Repository) ListRuns(ctx context.Context) ([]domain.Run, error) {
-	rows, err := r.db.QueryContext(ctx, `
-		SELECT id, exploit_id, exploit_revision, target_id, runner_id, status, queued_at, started_at, finished_at, log_uri, flag_id, error_message
-		FROM runs
-		ORDER BY COALESCE(queued_at, started_at, finished_at, NOW()) DESC`)
+const runOrderingExpression = "COALESCE(queued_at, started_at, finished_at, TIMESTAMP '1970-01-01')"
+
+func (r *Repository) ListRuns(ctx context.Context, limit int, cursor string) ([]domain.Run, string, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	queryLimit := limit + 1
+	var rows *sql.Rows
+	var err error
+	if cursor != "" {
+		anchor, anchorErr := r.GetRun(ctx, cursor)
+		if anchorErr != nil {
+			cursor = ""
+		} else {
+			anchorTime := runOrderingTime(anchor)
+			rows, err = r.db.QueryContext(ctx, `
+				SELECT id, exploit_id, exploit_revision, target_id, runner_id, status, queued_at, started_at, finished_at, log_uri, flag_id, error_message
+				FROM runs
+				WHERE (`+runOrderingExpression+`) < $1 OR ((`+runOrderingExpression+`) = $1 AND id < $2)
+				ORDER BY `+runOrderingExpression+` DESC, id DESC
+				LIMIT $3`,
+				anchorTime,
+				cursor,
+				queryLimit,
+			)
+		}
+	}
+	if cursor == "" && rows == nil {
+		rows, err = r.db.QueryContext(ctx, `
+			SELECT id, exploit_id, exploit_revision, target_id, runner_id, status, queued_at, started_at, finished_at, log_uri, flag_id, error_message
+			FROM runs
+			ORDER BY `+runOrderingExpression+` DESC, id DESC
+			LIMIT $1`,
+			queryLimit,
+		)
+	}
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer rows.Close()
 
@@ -1675,7 +1706,7 @@ func (r *Repository) ListRuns(ctx context.Context) ([]domain.Run, error) {
 			&flagID,
 			&errorMessage,
 		); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		if exploitID.Valid {
 			run.ExploitID = exploitID.String
@@ -1711,9 +1742,14 @@ func (r *Repository) ListRuns(ctx context.Context) ([]domain.Run, error) {
 		runs = append(runs, run)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return runs, nil
+	var nextCursor string
+	if len(runs) > limit {
+		nextCursor = runs[limit-1].ID
+		runs = runs[:limit]
+	}
+	return runs, nextCursor, nil
 }
 
 func (r *Repository) GetRun(ctx context.Context, id string) (domain.Run, error) {
@@ -2161,4 +2197,17 @@ func jobHintsFromMetadata(meta map[string]any) (string, string, time.Duration) {
 	}
 
 	return flagRegex, flagFile, timeout
+}
+
+func runOrderingTime(run domain.Run) time.Time {
+	if !run.QueuedAt.IsZero() {
+		return run.QueuedAt
+	}
+	if !run.StartedAt.IsZero() {
+		return run.StartedAt
+	}
+	if !run.FinishedAt.IsZero() {
+		return run.FinishedAt
+	}
+	return time.Unix(0, 0).UTC()
 }

@@ -3,7 +3,9 @@
     <article class="panel table">
       <header>
         <h2>Execution Queue</h2>
-        <button class="refresh" @click="runStore.load">Refresh</button>
+        <button class="refresh" :disabled="runStore.loading" @click="runStore.refresh">
+          {{ runStore.loading ? "Refreshing..." : "Refresh" }}
+        </button>
       </header>
       <div class="table-wrapper">
         <table>
@@ -24,15 +26,40 @@
               :class="{ active: runStore.selectedRun?.id === run.id }"
               @click="select(run.id)"
             >
-              <td>{{ run.id }}</td>
-              <td>{{ run.exploitName ?? run.exploitId }}</td>
-              <td>{{ run.targetLabel ?? run.targetId }}</td>
+              <td>
+                <span class="mono truncate" :title="run.id">{{ run.id }}</span>
+              </td>
+              <td>
+                <span class="truncate" :title="run.exploitName ?? run.exploitId">
+                  {{ run.exploitName ?? run.exploitId }}
+                </span>
+              </td>
+              <td>
+                <span class="truncate" :title="run.targetLabel ?? run.targetId">
+                  {{ run.targetLabel ?? run.targetId }}
+                </span>
+              </td>
               <td><span class="status" :data-status="run.status">{{ run.status }}</span></td>
-              <td>{{ run.runnerId ?? "pending" }}</td>
-              <td>{{ run.queuedAt }}</td>
+              <td>
+                <span class="mono truncate" :title="run.runnerId ?? 'pending'">
+                  {{ run.runnerId ?? "pending" }}
+                </span>
+              </td>
+              <td><span class="mono truncate" :title="run.queuedAt">{{ run.queuedAt }}</span></td>
             </tr>
           </tbody>
         </table>
+      </div>
+      <div class="table-actions">
+        <button
+          v-if="runStore.hasMore"
+          class="load-more"
+          type="button"
+          :disabled="runStore.loading"
+          @click="runStore.loadMore"
+        >
+          {{ runStore.loading ? "Loading..." : "Load More" }}
+        </button>
       </div>
     </article>
 
@@ -75,7 +102,7 @@ function select(id: string) {
 }
 
 onMounted(() => {
-  runStore.load();
+  runStore.refresh();
 });
 </script>
 
@@ -100,6 +127,12 @@ onMounted(() => {
   overflow-x: auto;
 }
 
+.table-actions {
+  display: flex;
+  justify-content: center;
+  margin-top: 0.75rem;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
@@ -115,8 +148,9 @@ th {
   text-align: left;
   color: #94a3b8;
   text-transform: uppercase;
-  font-size: 0.75rem;
+  font-size: 0.72rem;
   letter-spacing: 0.05em;
+  white-space: nowrap;
 }
 
 tr.active {
@@ -147,6 +181,20 @@ tr.active {
   color: #facc15;
 }
 
+.truncate {
+  display: inline-block;
+  max-width: 16ch;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+}
+
+.mono {
+  font-family: "JetBrains Mono", Menlo, monospace;
+  font-size: 0.82rem;
+}
+
 .detail header {
   display: flex;
   justify-content: space-between;
@@ -154,13 +202,20 @@ tr.active {
 }
 
 .close,
-.refresh {
+.refresh,
+.load-more {
   background: rgba(148, 163, 184, 0.2);
   border: none;
   color: #e2e8f0;
   padding: 0.4rem 0.9rem;
   border-radius: 999px;
   cursor: pointer;
+}
+
+.load-more[disabled],
+.refresh[disabled] {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .meta {
