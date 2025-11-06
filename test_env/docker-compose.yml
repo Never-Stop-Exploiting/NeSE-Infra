@@ -19,8 +19,8 @@ services:
     pull_policy: never
   runner-exp:
     build:
-      context: ./exp
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: ./test_env/exp/Dockerfile
     container_name: runner-exp
     image: runner-exp:latest
     pull_policy: never

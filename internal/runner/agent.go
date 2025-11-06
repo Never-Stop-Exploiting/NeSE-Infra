@@ -168,6 +168,10 @@ func (a *Agent) handleMessage(ctx context.Context, msg queue.Message) error {
 	defer cancel()
 
 	workspace, relPath, err := a.prepareWorkspace(payload.RunID, artifact)
+	a.log.Info("workspace prepared",
+		slog.String("run_id", runID),
+		slog.String("workspace", workspace),
+		slog.String("relative_path", relPath))
 	if err != nil {
 		a.log.Error("prepare workspace failed",
 			slog.String("run_id", runID),
@@ -182,11 +186,11 @@ func (a *Agent) handleMessage(ctx context.Context, msg queue.Message) error {
 		}
 		return nil
 	}
-	defer func() {
-		if err := os.RemoveAll(workspace); err != nil {
-			a.log.Warn("failed to cleanup workspace", slog.Any("err", err), slog.String("workspace", workspace))
-		}
-	}()
+	// defer func() {
+	// 	if err := os.RemoveAll(workspace); err != nil {
+	// 		a.log.Warn("failed to cleanup workspace", slog.Any("err", err), slog.String("workspace", workspace))
+	// 	}
+	// }()
 
 	if err := a.ensureRunScript(workspace, payload); err != nil {
 		a.log.Error("prepare run script failed",

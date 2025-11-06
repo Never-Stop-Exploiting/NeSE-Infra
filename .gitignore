@@ -33,3 +33,5 @@ web/dist/
 
 # MacOS / system
 .DS_Store
+
+tmp/
