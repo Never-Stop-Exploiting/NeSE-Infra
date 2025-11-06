@@ -1,7 +1,12 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
 import type { Challenge } from "@/types";
-import { fetchChallenges } from "@/api/challenges";
+import {
+  fetchChallenges,
+  createChallenge as apiCreateChallenge,
+  updateChallenge as apiUpdateChallenge,
+  deleteChallenge as apiDeleteChallenge
+} from "@/api/challenges";
 
 export const useChallengeStore = defineStore("challenges", () => {
   const challenges = ref<Challenge[]>([]);
@@ -22,10 +27,47 @@ export const useChallengeStore = defineStore("challenges", () => {
     }
   }
 
+  async function create(payload: {
+    name: string;
+    category?: string;
+    serviceType?: string;
+    description?: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<Challenge> {
+    const challenge = await apiCreateChallenge(payload);
+    challenges.value.push(challenge);
+    return challenge;
+  }
+
+  async function update(
+    id: string,
+    payload: {
+      name?: string;
+      category?: string;
+      serviceType?: string;
+      description?: string;
+      metadata?: Record<string, unknown>;
+    }
+  ): Promise<Challenge> {
+    const updated = await apiUpdateChallenge(id, payload);
+    challenges.value = challenges.value.map((challenge) =>
+      challenge.id === id ? updated : challenge
+    );
+    return updated;
+  }
+
+  async function remove(id: string): Promise<void> {
+    await apiDeleteChallenge(id);
+    challenges.value = challenges.value.filter((challenge) => challenge.id !== id);
+  }
+
   return {
     challenges,
     loading,
     error,
-    load
+    load,
+    create,
+    update,
+    remove
   };
 });

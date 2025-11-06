@@ -29,6 +29,7 @@ type PostgresConfig struct {
 	MaxIdleConns    int
 	MaxOpenConns    int
 	ConnMaxLifetime time.Duration
+	ArtifactDir     string
 }
 
 type RedisConfig struct {
@@ -52,6 +53,7 @@ type SchedulerConfig struct {
 type RunnerConfig struct {
 	ID                string
 	Type              string
+	ControlPlaneURL   string
 	MaxParallelJobs   int
 	LogFlushInterval  time.Duration
 	HeartbeatInterval time.Duration
@@ -60,6 +62,7 @@ type RunnerConfig struct {
 	FlagFileName      string
 	DefaultFlagRegex  string
 	DefaultTimeout    time.Duration
+	Tags              []string
 }
 
 type FlagSubmitterConfig struct {
@@ -107,6 +110,7 @@ func loadPostgres() PostgresConfig {
 		MaxIdleConns:    getenvInt("POSTGRES_MAX_IDLE", 5),
 		MaxOpenConns:    getenvInt("POSTGRES_MAX_OPEN", 10),
 		ConnMaxLifetime: getenvDuration("POSTGRES_CONN_MAX_LIFETIME", time.Minute*5),
+		ArtifactDir:     getenv("POSTGRES_ARTIFACT_DIR", ""),
 	}
 }
 
@@ -138,6 +142,7 @@ func loadRunner() RunnerConfig {
 	return RunnerConfig{
 		ID:                getenv("RUNNER_ID", ""),
 		Type:              getenv("RUNNER_TYPE", "default"),
+		ControlPlaneURL:   getenv("CONTROL_PLANE_URL", ""),
 		MaxParallelJobs:   getenvInt("RUNNER_MAX_PARALLEL", 2),
 		LogFlushInterval:  getenvDuration("RUNNER_LOG_FLUSH_INTERVAL", time.Second*2),
 		HeartbeatInterval: getenvDuration("RUNNER_HEARTBEAT_INTERVAL", time.Second*10),
@@ -146,6 +151,7 @@ func loadRunner() RunnerConfig {
 		FlagFileName:      getenv("RUNNER_FLAG_FILE", "flag"),
 		DefaultFlagRegex:  getenv("RUNNER_FLAG_REGEX", `flag\{[a-zA-Z0-9_\-]+\}`),
 		DefaultTimeout:    getenvDuration("RUNNER_DEFAULT_TIMEOUT", time.Second*120),
+		Tags:              splitAndTrim(getenv("RUNNER_TAGS", "")),
 	}
 }
 

@@ -51,10 +51,14 @@ services:
     build:
       context: .
       dockerfile: docker/runner.Dockerfile
+    image: infra-runner:latest
+    pull_policy: never
     env_file:
       - .env.example
     environment:
       RUNNER_SECRET: ${RUNNER_SECRET:-dev-runner-secret}
+      CONTROL_PLANE_URL: ${CONTROL_PLANE_URL:-http://control-plane:8080}
+      RUNNER_TAGS: ${RUNNER_TAGS:-python,pwntools}
     depends_on:
       - scheduler
 

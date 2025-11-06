@@ -1,7 +1,7 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
 import type { RunnerInfo } from "@/types";
-import { fetchRunners } from "@/api/runners";
+import { fetchRunners, deleteRunner } from "@/api/runners";
 
 export const useRunnerStore = defineStore("runners", () => {
   const runners = ref<RunnerInfo[]>([]);
@@ -18,5 +18,10 @@ export const useRunnerStore = defineStore("runners", () => {
     }
   }
 
-  return { runners, loading, load };
+  async function remove(id: string) {
+    await deleteRunner(id);
+    runners.value = runners.value.filter((runner) => runner.id !== id);
+  }
+
+  return { runners, loading, load, remove };
 });

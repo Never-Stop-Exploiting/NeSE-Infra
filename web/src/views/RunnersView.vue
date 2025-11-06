@@ -18,10 +18,27 @@
           <span>Hostname: {{ runner.hostname ?? "-" }}</span>
           <span>Active Jobs: {{ runner.activeJobs }}/{{ runner.maxParallel }}</span>
           <span>Last heartbeat: {{ runner.lastHeartbeat ?? "-" }}</span>
+          <span>
+            Broker:
+            <span class="broker-badge" :class="brokerBadgeClass(runner.labels?.broker)">
+              {{ brokerBadgeText(runner.labels?.broker) }}
+            </span>
+          </span>
+        </div>
+        <div v-if="runner.tags?.length" class="tags">
+          <span v-for="tag in runner.tags" :key="tag">{{ tag }}</span>
         </div>
         <div v-if="runner.labels && Object.keys(runner.labels).length" class="labels">
           <span v-for="(value, key) in runner.labels" :key="key">{{ key }}={{ value }}</span>
         </div>
+        <button
+          v-if="runner.status === 'offline'"
+          class="danger"
+          type="button"
+          @click="handleDelete(runner.id)"
+        >
+          Delete
+        </button>
       </article>
     </div>
   </section>
@@ -32,6 +49,24 @@ import { onMounted } from "vue";
 import { useRunnerStore } from "@/stores/runners";
 
 const runnerStore = useRunnerStore();
+
+function brokerBadgeText(status?: string) {
+  if (!status) return "Unknown";
+  if (status === "connected") return "Connected";
+  if (status === "disconnected") return "Disconnected";
+  return status;
+}
+
+function brokerBadgeClass(status?: string) {
+  if (status === "connected") return "connected";
+  if (status === "disconnected") return "disconnected";
+  return "unknown";
+}
+
+async function handleDelete(id: string) {
+  if (!confirm("Remove this offline runner?")) return;
+  await runnerStore.remove(id);
+}
 
 onMounted(() => {
   runnerStore.load();
@@ -116,11 +151,31 @@ header {
   color: #cbd5f5;
   font-size: 0.9rem;
 }
+.meta span {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
 
 .labels {
   display: flex;
   flex-wrap: wrap;
   gap: 0.35rem;
+}
+
+.tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.tags span {
+  background: rgba(34, 197, 94, 0.15);
+  border-radius: 999px;
+  padding: 0.2rem 0.6rem;
+  font-size: 0.75rem;
+  color: #4ade80;
 }
 
 .labels span {
@@ -129,5 +184,39 @@ header {
   padding: 0.2rem 0.6rem;
   font-size: 0.75rem;
   color: #38bdf8;
+}
+
+.broker-badge {
+  border-radius: 999px;
+  padding: 0.15rem 0.55rem;
+  font-size: 0.75rem;
+  background: rgba(148, 163, 184, 0.15);
+  color: #e2e8f0;
+  text-transform: capitalize;
+}
+
+.broker-badge.connected {
+  background: rgba(74, 222, 128, 0.18);
+  color: #4ade80;
+}
+
+.broker-badge.disconnected {
+  background: rgba(248, 113, 113, 0.18);
+  color: #f87171;
+}
+
+.broker-badge.unknown {
+  background: rgba(148, 163, 184, 0.18);
+  color: #cbd5f5;
+}
+
+.danger {
+  align-self: flex-start;
+  background: rgba(248, 113, 113, 0.2);
+  border: 1px solid rgba(248, 113, 113, 0.4);
+  color: #f87171;
+  padding: 0.3rem 0.8rem;
+  border-radius: 8px;
+  cursor: pointer;
 }
 </style>

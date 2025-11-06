@@ -2,7 +2,6 @@ package controlplane
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -10,6 +9,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -85,7 +86,12 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/runs", s.handleRuns)
 	mux.HandleFunc("/api/v1/runs/", s.handleRunDetail)
 	mux.HandleFunc("/api/v1/logs", s.handleLogs)
+	mux.HandleFunc("/api/v1/runners/register", s.handleRunnerRegister)
+	mux.HandleFunc("/api/v1/runners/heartbeat", s.handleRunnerHeartbeat)
 	mux.HandleFunc("/api/v1/runners", s.handleRunners)
+	mux.HandleFunc("/api/v1/scheduler/settings", s.handleSchedulerSettings)
+	mux.HandleFunc("/api/v1/scheduler/targets", s.handleSchedulerTargets)
+	mux.HandleFunc("/api/v1/scheduler/targets/", s.handleSchedulerTargetDetail)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -332,8 +338,10 @@ func (s *Server) handleExploits(w http.ResponseWriter, r *http.Request) {
 			Entrypoint     string   `json:"entrypoint"`
 			RunScript      string   `json:"runScript"`
 			ArtifactBase64 string   `json:"artifactBase64"`
+			ArtifactName   string   `json:"artifactName"`
 		}
 		var artifact []byte
+		var artifactName string
 		if strings.HasPrefix(contentType, "multipart/form-data") {
 			if err := r.ParseMultipartForm(32 << 20); err != nil {
 				writeError(w, http.StatusBadRequest, "failed to parse form")
@@ -366,6 +374,7 @@ func (s *Server) handleExploits(w http.ResponseWriter, r *http.Request) {
 					writeError(w, http.StatusBadRequest, "failed to read artifact")
 					return
 				}
+				artifactName = header.Filename
 			} else if err != nil && !errors.Is(err, http.ErrMissingFile) {
 				writeError(w, http.StatusBadRequest, "failed to read artifact")
 				return
@@ -382,6 +391,7 @@ func (s *Server) handleExploits(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				artifact = data
+				artifactName = req.ArtifactName
 			}
 		}
 		if strings.TrimSpace(req.Name) == "" {
@@ -391,9 +401,6 @@ func (s *Server) handleExploits(w http.ResponseWriter, r *http.Request) {
 		metadata := map[string]any{"timeout_seconds": req.TimeoutSeconds}
 		if req.Entrypoint != "" {
 			metadata["entrypoint"] = req.Entrypoint
-		}
-		if req.RunScript != "" {
-			metadata["run_script"] = req.RunScript
 		}
 		if req.ScheduleWeight == 0 {
 			req.ScheduleWeight = 1
@@ -414,17 +421,21 @@ func (s *Server) handleExploits(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if len(artifact) > 0 {
-			revID := fmt.Sprintf("rev-%d", time.Now().UnixNano())
-			rev := domain.ExploitRevision{
-				ID:         revID,
-				ExploitID:  created.ID,
-				Digest:     fmt.Sprintf("%x", sha256.Sum256(artifact)),
-				StorageURI: fmt.Sprintf("memory://exploit/%s/%s", created.ID, revID),
+			if strings.TrimSpace(artifactName) == "" {
+				writeError(w, http.StatusBadRequest, "artifact filename required")
+				return
 			}
-			if err := s.repository.AddExploitRevision(r.Context(), rev); err != nil {
-				s.logger.Warn("store revision failed", slog.Any("err", err))
-			} else if err := s.repository.SaveExploitArtifact(r.Context(), rev.ID, artifact); err != nil {
-				s.logger.Warn("store artifact failed", slog.Any("err", err))
+			if err := s.repository.SaveExploitFile(r.Context(), created.ID, artifactName, artifact); err != nil {
+				s.logger.Warn("store exploit file failed", slog.Any("err", err), slog.String("exploit_id", created.ID))
+			}
+		}
+		if strings.TrimSpace(req.RunScript) != "" {
+			if err := s.repository.SaveExploitRunScript(r.Context(), created.ID, req.RunScript); err != nil {
+				s.logger.Warn("save run script failed", slog.Any("err", err), slog.String("exploit_id", created.ID))
+			}
+		} else {
+			if _, err := s.repository.GetExploitRunScript(r.Context(), created.ID); err != nil {
+				s.logger.Warn("ensure default run script failed", slog.Any("err", err), slog.String("exploit_id", created.ID))
 			}
 		}
 		writeJSON(w, http.StatusCreated, map[string]any{"exploit": marshalExploit(created)})
@@ -436,13 +447,37 @@ func (s *Server) handleExploits(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleExploitActions(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/exploits/")
 	parts := strings.Split(path, "/")
-	if len(parts) < 2 || parts[0] == "" {
+	if parts[0] == "" {
 		writeError(w, http.StatusNotFound, "invalid exploit path")
 		return
 	}
 	id := parts[0]
+	rest := parts[1:]
+
+	if len(rest) == 0 || (len(rest) == 1 && rest[0] == "") {
+		switch r.Method {
+		case http.MethodDelete:
+			if err := s.repository.DeleteExploit(r.Context(), id); err != nil {
+				if errors.Is(err, storage.ErrExploitNotFound) {
+					writeError(w, http.StatusNotFound, "exploit not found")
+				} else {
+					writeError(w, http.StatusInternalServerError, "failed to delete exploit")
+				}
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+			return
+		default:
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+	}
+
 	action := parts[1]
 	switch action {
+	case "files":
+		s.handleExploitFiles(w, r, id, rest[1:])
+		return
 	case "enable", "disable":
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -475,25 +510,158 @@ func (s *Server) handleExploitActions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"exploit_id": id, "timeoutSeconds": req.TimeoutSeconds})
+	case "run-script":
+		switch r.Method {
+		case http.MethodGet:
+			script, err := s.repository.GetExploitRunScript(r.Context(), id)
+			if err != nil {
+				writeError(w, http.StatusNotFound, "run script not found")
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"exploit_id": id, "runScript": script})
+		case http.MethodPost:
+			var req struct {
+				RunScript string `json:"runScript"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeError(w, http.StatusBadRequest, "invalid payload")
+				return
+			}
+			if strings.TrimSpace(req.RunScript) == "" {
+				writeError(w, http.StatusBadRequest, "runScript cannot be empty")
+				return
+			}
+			if err := s.repository.SaveExploitRunScript(r.Context(), id, req.RunScript); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to update run script")
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"exploit_id": id, "runScript": req.RunScript})
+		default:
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		}
+		return
 	case "revisions":
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
-			if err := r.ParseMultipartForm(10 << 20); err != nil {
-				writeError(w, http.StatusBadRequest, "failed to parse form")
-				return
-			}
-		}
-		revision := domain.ExploitRevision{ExploitID: id, Digest: fmt.Sprintf("upload-%d", time.Now().UnixNano())}
-		if err := s.repository.AddExploitRevision(r.Context(), revision); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to store revision")
+		artifactName, artifact, err := readExploitFilePayload(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusCreated, map[string]any{"revision": revision})
+		if err := s.repository.SaveExploitFile(r.Context(), id, artifactName, artifact); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to store file")
+			return
+		}
+		files, err := s.repository.ListExploitFiles(r.Context(), id)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to list files")
+			return
+		}
+		var fileInfo storage.ExploitFile
+		for _, f := range files {
+			if f.Name == artifactName {
+				fileInfo = f
+				break
+			}
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{"file": marshalExploitFile(fileInfo)})
+	case "artifact":
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		data, err := s.repository.LatestExploitArtifact(r.Context(), id)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "artifact not found")
+			return
+		}
+		w.Header().Set("Content-Type", "application/zip")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s.zip\"", id))
+		w.WriteHeader(http.StatusOK)
+		if _, err := w.Write(data); err != nil {
+			s.logger.Warn("stream artifact failed", slog.Any("err", err), slog.String("exploit_id", id))
+		}
 	default:
 		writeError(w, http.StatusNotFound, "unknown exploit action")
+	}
+}
+
+func (s *Server) handleExploitFiles(w http.ResponseWriter, r *http.Request, exploitID string, rest []string) {
+	if len(rest) == 0 {
+		switch r.Method {
+		case http.MethodGet:
+			files, err := s.repository.ListExploitFiles(r.Context(), exploitID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to list files")
+				return
+			}
+			result := make([]map[string]any, 0, len(files))
+			for _, file := range files {
+				result = append(result, marshalExploitFile(file))
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"files": result})
+		case http.MethodPost:
+			name, data, err := readExploitFilePayload(r)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			if err := s.repository.SaveExploitFile(r.Context(), exploitID, name, data); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to store file")
+				return
+			}
+			files, err := s.repository.ListExploitFiles(r.Context(), exploitID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to list files")
+				return
+			}
+			var fileInfo storage.ExploitFile
+			for _, f := range files {
+				if f.Name == name {
+					fileInfo = f
+					break
+				}
+			}
+			writeJSON(w, http.StatusCreated, map[string]any{"file": marshalExploitFile(fileInfo)})
+		default:
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		}
+		return
+	}
+
+	fileName := strings.Join(rest, "/")
+	switch r.Method {
+	case http.MethodGet:
+		data, err := s.repository.GetExploitFile(r.Context(), exploitID, fileName)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "file not found")
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(fileName)))
+		w.WriteHeader(http.StatusOK)
+		if _, err := w.Write(data); err != nil {
+			s.logger.Warn("stream exploit file failed", slog.Any("err", err), slog.String("exploit_id", exploitID), slog.String("file", fileName))
+		}
+	case http.MethodDelete:
+		if err := s.repository.DeleteExploitFile(r.Context(), exploitID, fileName); err != nil {
+			switch {
+			case errors.Is(err, storage.ErrExploitNotFound):
+				writeError(w, http.StatusNotFound, "exploit not found")
+			case strings.Contains(err.Error(), "not found"):
+				writeError(w, http.StatusNotFound, "file not found")
+			case strings.Contains(err.Error(), "cannot be deleted"):
+				writeError(w, http.StatusBadRequest, err.Error())
+			default:
+				writeError(w, http.StatusInternalServerError, "failed to delete file")
+			}
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
 }
 
@@ -690,21 +858,511 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRunners(w http.ResponseWriter, r *http.Request) {
+	if err := s.sweepStaleRunners(r.Context()); err != nil {
+		s.logger.Warn("runner sweep failed", slog.Any("err", err))
+	}
+	switch r.Method {
+	case http.MethodGet:
+		runners, err := s.repository.ListRunners(r.Context())
+		if err != nil {
+			s.logger.Error("list runners failed", slog.Any("err", err))
+			writeError(w, http.StatusInternalServerError, "failed to list runners")
+			return
+		}
+		items := make([]map[string]any, 0, len(runners))
+		for _, runner := range runners {
+			items = append(items, marshalRunner(runner))
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	case http.MethodDelete:
+		id := r.URL.Query().Get("id")
+		if strings.TrimSpace(id) == "" {
+			writeError(w, http.StatusBadRequest, "runner id required")
+			return
+		}
+		if err := s.repository.DeleteRunner(r.Context(), id); err != nil {
+			writeError(w, http.StatusNotFound, "runner not found")
+			return
+		}
+		s.logger.Info("runner removed", slog.String("runner_id", id))
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *Server) handleRunnerRegister(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req struct {
+		ID          string            `json:"id"`
+		Type        string            `json:"type"`
+		Hostname    string            `json:"hostname"`
+		Secret      string            `json:"secret"`
+		Tags        []string          `json:"tags"`
+		Labels      map[string]string `json:"labels"`
+		MaxParallel int               `json:"maxParallel"`
+		Status      string            `json:"status"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid payload")
+		return
+	}
+	if strings.TrimSpace(req.Secret) == "" || req.Secret != s.cfg.RunnerSecret {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if strings.TrimSpace(req.ID) == "" {
+		writeError(w, http.StatusBadRequest, "id is required")
+		return
+	}
+	now := time.Now().UTC()
+	tags := normalizeTags(req.Tags)
+	if req.MaxParallel <= 0 {
+		req.MaxParallel = 1
+	}
+	status := req.Status
+	if status == "" {
+		status = "online"
+	}
+	runner := domain.Runner{
+		ID:            req.ID,
+		Type:          strings.TrimSpace(req.Type),
+		Hostname:      strings.TrimSpace(req.Hostname),
+		Tags:          tags,
+		Labels:        req.Labels,
+		MaxParallel:   req.MaxParallel,
+		Status:        status,
+		LastHeartbeat: now,
+		RegisteredAt:  now,
+	}
+	if runner.Labels == nil {
+		runner.Labels = map[string]string{}
+	}
+	if runner.Type == "" {
+		runner.Type = "default"
+	}
+	if runner.Hostname == "" {
+		runner.Hostname = req.ID
+	}
+	if err := s.repository.UpsertRunner(r.Context(), runner); err != nil {
+		s.logger.Error("runner register failed", slog.Any("err", err), slog.String("runner_id", req.ID))
+		writeError(w, http.StatusInternalServerError, "failed to register runner")
+		return
+	}
+	if err := s.sweepStaleRunners(r.Context()); err != nil {
+		s.logger.Warn("runner sweep failed", slog.Any("err", err))
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"runner": marshalRunner(runner)})
+}
+
+func (s *Server) handleRunnerHeartbeat(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req struct {
+		ID          string            `json:"id"`
+		Secret      string            `json:"secret"`
+		Status      string            `json:"status"`
+		Type        string            `json:"type"`
+		Hostname    string            `json:"hostname"`
+		Tags        []string          `json:"tags"`
+		Labels      map[string]string `json:"labels"`
+		MaxParallel int               `json:"maxParallel"`
+		ActiveJobs  int               `json:"activeJobs"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid payload")
+		return
+	}
+	if strings.TrimSpace(req.Secret) == "" || req.Secret != s.cfg.RunnerSecret {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if strings.TrimSpace(req.ID) == "" {
+		writeError(w, http.StatusBadRequest, "id is required")
+		return
+	}
+
+	existing, err := s.repository.GetRunner(r.Context(), req.ID)
+	if err != nil && !strings.Contains(err.Error(), "not found") {
+		s.logger.Error("load runner for heartbeat failed", slog.Any("err", err), slog.String("runner_id", req.ID))
+		writeError(w, http.StatusInternalServerError, "failed to update runner")
+		return
+	}
+
+	now := time.Now().UTC()
+	runner := existing
+	runner.ID = req.ID
+	if req.Type != "" {
+		runner.Type = req.Type
+	} else if runner.Type == "" {
+		runner.Type = "default"
+	}
+	if req.Hostname != "" {
+		runner.Hostname = req.Hostname
+	} else if runner.Hostname == "" {
+		runner.Hostname = req.ID
+	}
+	if len(req.Tags) > 0 {
+		runner.Tags = normalizeTags(req.Tags)
+	} else if runner.Tags == nil {
+		runner.Tags = nil
+	}
+	if req.Labels != nil {
+		runner.Labels = req.Labels
+	} else if runner.Labels == nil {
+		runner.Labels = map[string]string{}
+	}
+	if req.MaxParallel > 0 {
+		runner.MaxParallel = req.MaxParallel
+	} else if runner.MaxParallel == 0 {
+		runner.MaxParallel = 1
+	}
+	if req.ActiveJobs >= 0 {
+		runner.ActiveJobs = req.ActiveJobs
+	}
+	if req.Status != "" {
+		runner.Status = req.Status
+	} else if runner.Status == "" {
+		runner.Status = "online"
+	}
+	if runner.RegisteredAt.IsZero() {
+		runner.RegisteredAt = now
+	}
+	runner.LastHeartbeat = now
+
+	if err := s.repository.UpsertRunner(r.Context(), runner); err != nil {
+		s.logger.Error("runner heartbeat failed", slog.Any("err", err), slog.String("runner_id", req.ID))
+		writeError(w, http.StatusInternalServerError, "failed to update runner")
+		return
+	}
+	if err := s.sweepStaleRunners(r.Context()); err != nil {
+		s.logger.Warn("runner sweep failed", slog.Any("err", err))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"runner": marshalRunner(runner)})
+}
+
+func (s *Server) handleSchedulerSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		settings, err := s.repository.GetSchedulerSettings(r.Context())
+		if err != nil {
+			s.logger.Error("load scheduler settings failed", slog.Any("err", err))
+			writeError(w, http.StatusInternalServerError, "failed to load scheduler settings")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"settings": marshalSchedulerSettings(settings)})
+	case http.MethodPost, http.MethodPatch:
+		var req struct {
+			RoundIntervalMinutes *int `json:"roundIntervalMinutes"`
+			RoundIntervalSeconds *int `json:"roundIntervalSeconds"`
+			MaxDispatchBatch     *int `json:"maxDispatchBatch"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid payload")
+			return
+		}
+		settings, err := s.repository.GetSchedulerSettings(r.Context())
+		if err != nil {
+			s.logger.Error("load scheduler settings failed", slog.Any("err", err))
+			writeError(w, http.StatusInternalServerError, "failed to load scheduler settings")
+			return
+		}
+		if req.RoundIntervalSeconds != nil {
+			if *req.RoundIntervalSeconds <= 0 {
+				writeError(w, http.StatusBadRequest, "roundIntervalSeconds must be > 0")
+				return
+			}
+			settings.RoundInterval = time.Duration(*req.RoundIntervalSeconds) * time.Second
+		} else if req.RoundIntervalMinutes != nil {
+			if *req.RoundIntervalMinutes <= 0 {
+				writeError(w, http.StatusBadRequest, "roundIntervalMinutes must be > 0")
+				return
+			}
+			settings.RoundInterval = time.Duration(*req.RoundIntervalMinutes) * time.Minute
+		}
+		if req.MaxDispatchBatch != nil {
+			if *req.MaxDispatchBatch <= 0 {
+				writeError(w, http.StatusBadRequest, "maxDispatchBatch must be > 0")
+				return
+			}
+			settings.MaxDispatchBatch = *req.MaxDispatchBatch
+		}
+		updated, err := s.repository.SaveSchedulerSettings(r.Context(), settings)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to update scheduler settings")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"settings": marshalSchedulerSettings(updated)})
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *Server) handleSchedulerTargets(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	runners, err := s.repository.ListRunners(r.Context())
+	items, err := s.buildSchedulerResponse(r.Context(), nil)
 	if err != nil {
-		s.logger.Error("list runners failed", slog.Any("err", err))
-		writeError(w, http.StatusInternalServerError, "failed to list runners")
+		s.logger.Error("scheduler overview failed", slog.Any("err", err))
+		writeError(w, http.StatusInternalServerError, "failed to load scheduler overview")
 		return
 	}
-	items := make([]map[string]any, 0, len(runners))
-	for _, runner := range runners {
-		items = append(items, marshalRunner(runner))
-	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) handleSchedulerTargetDetail(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/scheduler/targets/")
+	if path == "" {
+		writeError(w, http.StatusNotFound, "missing target id")
+		return
+	}
+	parts := strings.Split(path, "/")
+	targetID := parts[0]
+	rest := parts[1:]
+
+	if len(rest) == 0 {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		filter := map[string]struct{}{targetID: {}}
+		items, err := s.buildSchedulerResponse(r.Context(), filter)
+		if err != nil {
+			s.logger.Error("scheduler target detail failed", slog.Any("err", err), slog.String("target_id", targetID))
+			writeError(w, http.StatusInternalServerError, "failed to load target schedule")
+			return
+		}
+		if len(items) == 0 {
+			writeError(w, http.StatusNotFound, "target not found")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"target": items[0]})
+		return
+	}
+
+	action := rest[0]
+	if action != "exploits" {
+		writeError(w, http.StatusNotFound, "unknown scheduler action")
+		return
+	}
+	if r.Method != http.MethodPost && r.Method != http.MethodPut {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var req struct {
+		Statuses []struct {
+			ExploitID string `json:"exploitId"`
+			Enabled   bool   `json:"enabled"`
+		} `json:"statuses"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid payload")
+		return
+	}
+	if len(req.Statuses) == 0 {
+		writeError(w, http.StatusBadRequest, "statuses required")
+		return
+	}
+
+	ctx := r.Context()
+	targets, err := s.repository.ListTargets(ctx)
+	if err != nil {
+		s.logger.Error("load targets failed", slog.Any("err", err))
+		writeError(w, http.StatusInternalServerError, "failed to load targets")
+		return
+	}
+	var target domain.Target
+	found := false
+	for _, t := range targets {
+		if t.ID == targetID {
+			target = t
+			found = true
+			break
+		}
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "target not found")
+		return
+	}
+
+	exploits, err := s.repository.ListExploits(ctx)
+	if err != nil {
+		s.logger.Error("load exploits failed", slog.Any("err", err))
+		writeError(w, http.StatusInternalServerError, "failed to load exploits")
+		return
+	}
+	exploitIndex := make(map[string]domain.Exploit, len(exploits))
+	for _, exploit := range exploits {
+		exploitIndex[exploit.ID] = exploit
+	}
+
+	for _, status := range req.Statuses {
+		exploit, ok := exploitIndex[status.ExploitID]
+		if !ok {
+			writeError(w, http.StatusBadRequest, "unknown exploit in payload")
+			return
+		}
+		if target.ChallengeID != "" && exploit.ChallengeID != "" && exploit.ChallengeID != target.ChallengeID {
+			writeError(w, http.StatusBadRequest, "exploit does not belong to target challenge")
+			return
+		}
+		if status.Enabled == exploit.Enabled {
+			if err := s.repository.DeleteTargetExploitOverride(ctx, targetID, exploit.ID); err != nil {
+				s.logger.Error("delete exploit override failed", slog.Any("err", err), slog.String("target_id", targetID), slog.String("exploit_id", exploit.ID))
+				writeError(w, http.StatusInternalServerError, "failed to update exploit override")
+				return
+			}
+			continue
+		}
+		if err := s.repository.UpsertTargetExploitOverride(ctx, domain.TargetExploitOverride{
+			TargetID:  targetID,
+			ExploitID: exploit.ID,
+			Enabled:   status.Enabled,
+		}); err != nil {
+			s.logger.Error("upsert exploit override failed", slog.Any("err", err), slog.String("target_id", targetID), slog.String("exploit_id", exploit.ID))
+			writeError(w, http.StatusInternalServerError, "failed to update exploit override")
+			return
+		}
+	}
+
+	filter := map[string]struct{}{targetID: {}}
+	items, err := s.buildSchedulerResponse(ctx, filter)
+	if err != nil {
+		s.logger.Error("scheduler target detail failed", slog.Any("err", err), slog.String("target_id", targetID))
+		writeError(w, http.StatusInternalServerError, "failed to load target schedule")
+		return
+	}
+	if len(items) == 0 {
+		writeError(w, http.StatusNotFound, "target not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"target": items[0]})
+}
+
+func (s *Server) buildSchedulerResponse(ctx context.Context, filter map[string]struct{}) ([]map[string]any, error) {
+	targets, err := s.repository.ListTargets(ctx)
+	if err != nil {
+		return nil, err
+	}
+	exploits, err := s.repository.ListExploits(ctx)
+	if err != nil {
+		return nil, err
+	}
+	challenges, err := s.repository.Challenges(ctx)
+	if err != nil {
+		return nil, err
+	}
+	overrides, err := s.repository.ListTargetExploitOverrides(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	challengeIndex := make(map[string]domain.Challenge, len(challenges))
+	for _, ch := range challenges {
+		challengeIndex[ch.ID] = ch
+	}
+
+	exploitsByChallenge := make(map[string][]domain.Exploit)
+	for _, exploit := range exploits {
+		exploitsByChallenge[exploit.ChallengeID] = append(exploitsByChallenge[exploit.ChallengeID], exploit)
+	}
+	for challengeID := range exploitsByChallenge {
+		sort.Slice(exploitsByChallenge[challengeID], func(i, j int) bool {
+			return strings.ToLower(exploitsByChallenge[challengeID][i].Name) < strings.ToLower(exploitsByChallenge[challengeID][j].Name)
+		})
+	}
+
+	overrideIndex := make(map[string]map[string]domain.TargetExploitOverride)
+	for _, override := range overrides {
+		if overrideIndex[override.TargetID] == nil {
+			overrideIndex[override.TargetID] = make(map[string]domain.TargetExploitOverride)
+		}
+		overrideIndex[override.TargetID][override.ExploitID] = override
+	}
+
+	items := make([]map[string]any, 0, len(targets))
+	for _, target := range targets {
+		if filter != nil {
+			if _, ok := filter[target.ID]; !ok {
+				continue
+			}
+		}
+		exploitList := exploitsByChallenge[target.ChallengeID]
+		item := marshalSchedulerTarget(target, challengeIndex[target.ChallengeID], exploitList, overrideIndex[target.ID])
+		items = append(items, item)
+	}
+	return items, nil
+}
+
+func marshalSchedulerSettings(settings domain.SchedulerSettings) map[string]any {
+	seconds := int(settings.RoundInterval / time.Second)
+	if seconds < 0 {
+		seconds = 0
+	}
+	minutes := int(settings.RoundInterval / time.Minute)
+	if minutes == 0 && seconds > 0 {
+		minutes = 1
+	}
+	return map[string]any{
+		"roundIntervalSeconds": seconds,
+		"roundIntervalMinutes": minutes,
+		"maxDispatchBatch":     settings.MaxDispatchBatch,
+		"updatedAt":            settings.UpdatedAt,
+	}
+}
+
+func marshalSchedulerTarget(target domain.Target, challenge domain.Challenge, exploits []domain.Exploit, overrides map[string]domain.TargetExploitOverride) map[string]any {
+	statuses := make([]map[string]any, 0, len(exploits))
+	var indicators strings.Builder
+	enabledCount := 0
+	for _, exploit := range exploits {
+		enabled := exploit.Enabled
+		if overrides != nil {
+			if override, ok := overrides[exploit.ID]; ok {
+				enabled = override.Enabled
+			}
+		}
+		statuses = append(statuses, map[string]any{
+			"exploitId":      exploit.ID,
+			"exploitName":    exploit.Name,
+			"enabled":        enabled,
+			"defaultEnabled": exploit.Enabled,
+		})
+		if enabled {
+			indicators.WriteString("🟢")
+			enabledCount++
+		} else {
+			indicators.WriteString("🔴")
+		}
+	}
+	summary := map[string]any{
+		"total":      len(statuses),
+		"enabled":    enabledCount,
+		"disabled":   len(statuses) - enabledCount,
+		"indicators": indicators.String(),
+	}
+	result := map[string]any{
+		"target":   marshalTarget(target),
+		"exploits": statuses,
+		"summary":  summary,
+	}
+	if challenge.ID != "" {
+		result["challenge"] = map[string]any{
+			"id":          challenge.ID,
+			"name":        challenge.Name,
+			"category":    challenge.Category,
+			"serviceType": challenge.ServiceType,
+		}
+	}
+	return result
 }
 
 func marshalExploit(exploit domain.Exploit) map[string]any {
@@ -741,6 +1399,18 @@ func marshalExploit(exploit domain.Exploit) map[string]any {
 	}
 }
 
+func marshalExploitFile(file storage.ExploitFile) map[string]any {
+	result := map[string]any{
+		"name": file.Name,
+		"size": file.Size,
+		"md5":  file.MD5,
+	}
+	if !file.ModTime.IsZero() {
+		result["modTime"] = file.ModTime
+	}
+	return result
+}
+
 func marshalTarget(target domain.Target) map[string]any {
 	return map[string]any{
 		"id":               target.ID,
@@ -765,6 +1435,59 @@ func marshalChallenge(ch domain.Challenge) map[string]any {
 		"createdAt":   ch.CreatedAt,
 		"updatedAt":   ch.UpdatedAt,
 	}
+}
+
+func readExploitFilePayload(r *http.Request) (string, []byte, error) {
+	contentType := r.Header.Get("Content-Type")
+	if strings.HasPrefix(contentType, "multipart/form-data") {
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			return "", nil, fmt.Errorf("failed to parse form")
+		}
+		file, header, err := r.FormFile("file")
+		if err != nil {
+			return "", nil, fmt.Errorf("file field required")
+		}
+		defer file.Close()
+		data, err := io.ReadAll(file)
+		if err != nil {
+			return "", nil, fmt.Errorf("failed to read file")
+		}
+		if len(data) == 0 {
+			return "", nil, fmt.Errorf("file data required")
+		}
+		return header.Filename, data, nil
+	}
+
+	var req struct {
+		ArtifactBase64 string `json:"artifactBase64"`
+		ArtifactName   string `json:"artifactName"`
+		FileBase64     string `json:"fileBase64"`
+		FileName       string `json:"fileName"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		return "", nil, fmt.Errorf("invalid payload")
+	}
+
+	name := strings.TrimSpace(req.FileName)
+	data64 := req.FileBase64
+	if data64 == "" {
+		data64 = req.ArtifactBase64
+		name = strings.TrimSpace(req.ArtifactName)
+	}
+	if name == "" {
+		return "", nil, fmt.Errorf("filename required")
+	}
+	if data64 == "" {
+		return "", nil, fmt.Errorf("file data required")
+	}
+	data, err := base64.StdEncoding.DecodeString(data64)
+	if err != nil {
+		return "", nil, fmt.Errorf("invalid base64 data")
+	}
+	if len(data) == 0 {
+		return "", nil, fmt.Errorf("file data required")
+	}
+	return name, data, nil
 }
 
 func marshalAttempt(attempt domain.SubmissionAttempt) map[string]any {
@@ -797,6 +1520,8 @@ func marshalRunner(runner domain.Runner) map[string]any {
 		"id":            runner.ID,
 		"type":          runner.Type,
 		"hostname":      runner.Hostname,
+		"tags":          runner.Tags,
+		"activeJobs":    runner.ActiveJobs,
 		"labels":        runner.Labels,
 		"maxParallel":   runner.MaxParallel,
 		"lastHeartbeat": runner.LastHeartbeat,
@@ -846,6 +1571,71 @@ func splitCSV(raw string) []string {
 		}
 	}
 	return result
+}
+
+func normalizeTags(tags []string) []string {
+	if len(tags) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(tags))
+	result := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		tag = strings.TrimSpace(tag)
+		if tag == "" {
+			continue
+		}
+		if _, ok := seen[tag]; ok {
+			continue
+		}
+		seen[tag] = struct{}{}
+		result = append(result, tag)
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+func (s *Server) sweepStaleRunners(ctx context.Context) error {
+	runners, err := s.repository.ListRunners(ctx)
+	if err != nil {
+		return err
+	}
+	interval := s.cfg.Runner.HeartbeatInterval
+	if interval <= 0 {
+		interval = 10 * time.Second
+	}
+	offlineThreshold := interval * 2
+	purgeThreshold := interval * 20
+	now := time.Now().UTC()
+
+	for _, runner := range runners {
+		last := runner.LastHeartbeat
+		if last.IsZero() {
+			last = runner.RegisteredAt
+		}
+		if last.IsZero() {
+			last = now
+		}
+		since := now.Sub(last)
+		if purgeThreshold > 0 && since >= purgeThreshold {
+			if err := s.repository.DeleteRunner(ctx, runner.ID); err != nil {
+				s.logger.Warn("purge stale runner failed", slog.Any("err", err), slog.String("runner_id", runner.ID))
+				continue
+			}
+			s.logger.Info("purged stale runner", slog.String("runner_id", runner.ID))
+			continue
+		}
+		if offlineThreshold > 0 && since >= offlineThreshold && runner.Status != "offline" {
+			runner.Status = "offline"
+			if err := s.repository.UpsertRunner(ctx, runner); err != nil {
+				s.logger.Warn("mark runner offline failed", slog.Any("err", err), slog.String("runner_id", runner.ID))
+			} else {
+				s.logger.Info("runner marked offline due to missed heartbeats", slog.String("runner_id", runner.ID))
+			}
+		}
+	}
+	return nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

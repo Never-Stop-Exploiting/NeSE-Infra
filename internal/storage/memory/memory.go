@@ -1,9 +1,17 @@
 package memory
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -12,38 +20,52 @@ import (
 	"awdinfra/internal/storage"
 )
 
+const runScriptName = "run.sh"
+
+type memoryFile struct {
+	Data    []byte
+	ModTime time.Time
+}
+
 // Ensure Repository implements storage.Repository at compile time.
 var _ storage.Repository = (*Repository)(nil)
 
 // Repository offers a development-grade in-memory store.
 type Repository struct {
-	mu               sync.RWMutex
-	challenges       map[string]domain.Challenge
-	runs             map[string]domain.Run
-	flags            map[string]domain.Flag
-	targets          map[string]domain.Target
-	exploits         map[string]domain.Exploit
-	exploitRevs      map[string][]domain.ExploitRevision
-	flagLogs         map[string][]string
-	flagAttempts     map[string][]domain.SubmissionAttempt
-	exploitArtifacts map[string][]byte
-	logs             []domain.LogEntry
-	runners          map[string]domain.Runner
+	mu           sync.RWMutex
+	challenges   map[string]domain.Challenge
+	runs         map[string]domain.Run
+	flags        map[string]domain.Flag
+	targets      map[string]domain.Target
+	exploits     map[string]domain.Exploit
+	flagLogs     map[string][]string
+	flagAttempts map[string][]domain.SubmissionAttempt
+	exploitFiles map[string]map[string]memoryFile
+	logs         []domain.LogEntry
+	runners      map[string]domain.Runner
+	scheduler    domain.SchedulerSettings
+	overrides    map[string]map[string]domain.TargetExploitOverride
 }
 
 // New creates an empty repository.
 func New() *Repository {
 	repo := &Repository{
-		challenges:       make(map[string]domain.Challenge),
-		runs:             make(map[string]domain.Run),
-		flags:            make(map[string]domain.Flag),
-		targets:          make(map[string]domain.Target),
-		exploits:         make(map[string]domain.Exploit),
-		exploitRevs:      make(map[string][]domain.ExploitRevision),
-		flagLogs:         make(map[string][]string),
-		flagAttempts:     make(map[string][]domain.SubmissionAttempt),
-		exploitArtifacts: make(map[string][]byte),
-		runners:          make(map[string]domain.Runner),
+		challenges:   make(map[string]domain.Challenge),
+		runs:         make(map[string]domain.Run),
+		flags:        make(map[string]domain.Flag),
+		targets:      make(map[string]domain.Target),
+		exploits:     make(map[string]domain.Exploit),
+		flagLogs:     make(map[string][]string),
+		flagAttempts: make(map[string][]domain.SubmissionAttempt),
+		exploitFiles: make(map[string]map[string]memoryFile),
+		runners:      make(map[string]domain.Runner),
+		scheduler: domain.SchedulerSettings{
+			RoundInterval:    time.Minute * 5,
+			MaxDispatchBatch: 50,
+			UpdatedAt:        time.Now().UTC(),
+			Enabled:          false,
+		},
+		overrides: make(map[string]map[string]domain.TargetExploitOverride),
 	}
 	repo.seed()
 	return repo
@@ -104,7 +126,7 @@ func (r *Repository) DeleteChallenge(ctx context.Context, id string) error {
 	for eid, exploit := range r.exploits {
 		if exploit.ChallengeID == id {
 			delete(r.exploits, eid)
-			delete(r.exploitRevs, eid)
+			delete(r.exploitFiles, eid)
 		}
 	}
 	return ctx.Err()
@@ -154,8 +176,191 @@ func (r *Repository) UpdateRun(ctx context.Context, run *domain.Run) error {
 }
 
 func (r *Repository) RunnableWork(ctx context.Context, limit int) ([]domain.RunWorkItem, error) {
-	// Development stub returns nothing.
-	return nil, ctx.Err()
+	if limit <= 0 {
+		limit = 1
+	}
+
+	r.mu.RLock()
+	targetCopies := make([]domain.Target, 0, len(r.targets))
+	for _, target := range r.targets {
+		targetCopies = append(targetCopies, target)
+	}
+	exploitCopies := make([]domain.Exploit, 0, len(r.exploits))
+	for _, exploit := range r.exploits {
+		exploitCopies = append(exploitCopies, exploit)
+	}
+	overrideCopies := make(map[string]map[string]domain.TargetExploitOverride, len(r.overrides))
+	for targetID, overrides := range r.overrides {
+		copyMap := make(map[string]domain.TargetExploitOverride, len(overrides))
+		for exploitID, override := range overrides {
+			copyMap[exploitID] = override
+		}
+		overrideCopies[targetID] = copyMap
+	}
+	runCopies := make([]domain.Run, 0, len(r.runs))
+	for _, run := range r.runs {
+		runCopies = append(runCopies, run)
+	}
+	r.mu.RUnlock()
+
+	activeCounts := make(map[string]int)
+	for _, run := range runCopies {
+		if run.TargetID == "" {
+			continue
+		}
+		if run.Status == domain.RunStatusPending || run.Status == domain.RunStatusRunning {
+			activeCounts[run.TargetID]++
+		}
+	}
+
+	exploitsByChallenge := make(map[string][]domain.Exploit)
+	for _, exploit := range exploitCopies {
+		exploitsByChallenge[exploit.ChallengeID] = append(exploitsByChallenge[exploit.ChallengeID], exploit)
+	}
+
+	work := make([]domain.RunWorkItem, 0, limit)
+	now := time.Now().UTC()
+
+	for _, target := range targetCopies {
+		if len(work) >= limit {
+			break
+		}
+		status := strings.ToLower(strings.TrimSpace(target.Status))
+		if status != "" && status != "active" {
+			continue
+		}
+		concurrency := target.ConcurrencyLimit
+		if concurrency <= 0 {
+			concurrency = 1
+		}
+		if activeCounts[target.ID] >= concurrency {
+			continue
+		}
+
+		candidates := exploitsByChallenge[target.ChallengeID]
+		if len(candidates) == 0 {
+			continue
+		}
+
+		for _, exploit := range candidates {
+			if len(work) >= limit {
+				break
+			}
+			enabled := exploit.Enabled
+			if overrides := overrideCopies[target.ID]; overrides != nil {
+				if override, ok := overrides[exploit.ID]; ok {
+					enabled = override.Enabled
+				}
+			}
+			if !enabled {
+				continue
+			}
+
+			artifact, err := r.LatestExploitArtifact(ctx, exploit.ID)
+			if err != nil || len(artifact) == 0 {
+				continue
+			}
+
+			run := domain.Run{
+				ExploitID: exploit.ID,
+				TargetID:  target.ID,
+				Status:    domain.RunStatusPending,
+				QueuedAt:  now,
+			}
+			if err := r.CreateRun(ctx, &run); err != nil {
+				return nil, err
+			}
+
+			flagRegex, flagFile, timeout := jobHintsFromMetadata(exploit.Metadata)
+
+			work = append(work, domain.RunWorkItem{
+				RunID:     run.ID,
+				Exploit:   exploit,
+				Target:    target,
+				Artifact:  artifact,
+				FlagRegex: flagRegex,
+				FlagFile:  flagFile,
+				Timeout:   timeout,
+			})
+			activeCounts[target.ID]++
+			if activeCounts[target.ID] >= concurrency {
+				break
+			}
+		}
+	}
+
+	if ctx.Err() != nil {
+		return work, ctx.Err()
+	}
+	return work, nil
+}
+
+func (r *Repository) GetSchedulerSettings(ctx context.Context) (domain.SchedulerSettings, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	settings := r.scheduler
+	if settings.RoundInterval <= 0 {
+		settings.RoundInterval = time.Minute * 5
+	}
+	if settings.MaxDispatchBatch <= 0 {
+		settings.MaxDispatchBatch = 50
+	}
+	return settings, ctx.Err()
+}
+
+func (r *Repository) SaveSchedulerSettings(ctx context.Context, settings domain.SchedulerSettings) (domain.SchedulerSettings, error) {
+	if settings.RoundInterval <= 0 {
+		return domain.SchedulerSettings{}, errors.New("round interval must be positive")
+	}
+	if settings.MaxDispatchBatch <= 0 {
+		return domain.SchedulerSettings{}, errors.New("max dispatch batch must be positive")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	settings.UpdatedAt = time.Now().UTC()
+	r.scheduler = settings
+	return settings, ctx.Err()
+}
+
+func (r *Repository) ListTargetExploitOverrides(ctx context.Context) ([]domain.TargetExploitOverride, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	result := make([]domain.TargetExploitOverride, 0)
+	for _, byExploit := range r.overrides {
+		for _, override := range byExploit {
+			result = append(result, override)
+		}
+	}
+	return result, ctx.Err()
+}
+
+func (r *Repository) UpsertTargetExploitOverride(ctx context.Context, override domain.TargetExploitOverride) error {
+	if strings.TrimSpace(override.TargetID) == "" || strings.TrimSpace(override.ExploitID) == "" {
+		return errors.New("target and exploit ids required")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.overrides[override.TargetID]; !ok {
+		r.overrides[override.TargetID] = make(map[string]domain.TargetExploitOverride)
+	}
+	override.UpdatedAt = time.Now().UTC()
+	r.overrides[override.TargetID][override.ExploitID] = override
+	return ctx.Err()
+}
+
+func (r *Repository) DeleteTargetExploitOverride(ctx context.Context, targetID string, exploitID string) error {
+	if strings.TrimSpace(targetID) == "" || strings.TrimSpace(exploitID) == "" {
+		return errors.New("target and exploit ids required")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if byExploit, ok := r.overrides[targetID]; ok {
+		delete(byExploit, exploitID)
+		if len(byExploit) == 0 {
+			delete(r.overrides, targetID)
+		}
+	}
+	return ctx.Err()
 }
 
 func (r *Repository) ListTargets(ctx context.Context) ([]domain.Target, error) {
@@ -166,6 +371,16 @@ func (r *Repository) ListTargets(ctx context.Context) ([]domain.Target, error) {
 		items = append(items, target)
 	}
 	return items, ctx.Err()
+}
+
+func (r *Repository) GetTarget(ctx context.Context, id string) (domain.Target, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	target, ok := r.targets[id]
+	if !ok {
+		return domain.Target{}, errors.New("target not found")
+	}
+	return target, ctx.Err()
 }
 
 func (r *Repository) CreateTarget(ctx context.Context, target domain.Target) (domain.Target, error) {
@@ -220,6 +435,15 @@ func (r *Repository) CreateExploit(ctx context.Context, exploit domain.Exploit) 
 		exploit.Metadata = make(map[string]any)
 	}
 	r.exploits[exploit.ID] = exploit
+	entry := ""
+	if exploit.Metadata != nil {
+		if val, ok := exploit.Metadata["entrypoint"].(string); ok {
+			entry = val
+		}
+	}
+	if _, err := r.ensureRunScriptLocked(exploit.ID, entry); err != nil {
+		return domain.Exploit{}, err
+	}
 	return exploit, ctx.Err()
 }
 
@@ -228,7 +452,7 @@ func (r *Repository) SetExploitEnabled(ctx context.Context, exploitID string, en
 	defer r.mu.Unlock()
 	exploit, ok := r.exploits[exploitID]
 	if !ok {
-		return errors.New("exploit not found")
+		return storage.ErrExploitNotFound
 	}
 	exploit.Enabled = enabled
 	exploit.UpdatedAt = time.Now().UTC()
@@ -241,7 +465,7 @@ func (r *Repository) SetExploitTimeout(ctx context.Context, exploitID string, ti
 	defer r.mu.Unlock()
 	exploit, ok := r.exploits[exploitID]
 	if !ok {
-		return errors.New("exploit not found")
+		return storage.ErrExploitNotFound
 	}
 	if exploit.Metadata == nil {
 		exploit.Metadata = make(map[string]any)
@@ -252,40 +476,197 @@ func (r *Repository) SetExploitTimeout(ctx context.Context, exploitID string, ti
 	return ctx.Err()
 }
 
-func (r *Repository) AddExploitRevision(ctx context.Context, revision domain.ExploitRevision) error {
+func (r *Repository) DeleteExploit(ctx context.Context, exploitID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if revision.ID == "" {
-		revision.ID = newID("rev")
+	if _, ok := r.exploits[exploitID]; !ok {
+		return storage.ErrExploitNotFound
 	}
-	revision.CreatedAt = time.Now().UTC()
-	r.exploitRevs[revision.ExploitID] = append(r.exploitRevs[revision.ExploitID], revision)
+	delete(r.exploits, exploitID)
+	delete(r.exploitFiles, exploitID)
 	return ctx.Err()
 }
 
-func (r *Repository) SaveExploitArtifact(ctx context.Context, revisionID string, data []byte) error {
+func (r *Repository) UpdateExploitMetadata(ctx context.Context, exploitID string, updates map[string]any) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if len(data) == 0 {
-		return errors.New("artifact empty")
+	exploit, ok := r.exploits[exploitID]
+	if !ok {
+		return storage.ErrExploitNotFound
 	}
-	r.exploitArtifacts[revisionID] = append([]byte(nil), data...)
+	if exploit.Metadata == nil {
+		exploit.Metadata = make(map[string]any)
+	}
+	for key, value := range updates {
+		if value == nil {
+			delete(exploit.Metadata, key)
+			continue
+		}
+		exploit.Metadata[key] = value
+	}
+	exploit.UpdatedAt = time.Now().UTC()
+	r.exploits[exploitID] = exploit
+	entry := r.exploitEntrypointLocked(exploitID)
+	if _, err := r.ensureRunScriptLocked(exploitID, entry); err != nil {
+		return err
+	}
 	return ctx.Err()
 }
 
 func (r *Repository) LatestExploitArtifact(ctx context.Context, exploitID string) ([]byte, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	revs := r.exploitRevs[exploitID]
-	if len(revs) == 0 {
-		return nil, errors.New("no revision")
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.exploits[exploitID]; !ok {
+		return nil, storage.ErrExploitNotFound
 	}
-	rev := revs[len(revs)-1]
-	artifact, ok := r.exploitArtifacts[rev.ID]
+	entry := r.exploitEntrypointLocked(exploitID)
+	if _, err := r.ensureRunScriptLocked(exploitID, entry); err != nil {
+		return nil, err
+	}
+	files := r.ensureExploitFilesLocked(exploitID)
+	archive, err := createZipFromFilesLocked(files)
+	if err != nil {
+		return nil, err
+	}
+	return archive, ctx.Err()
+}
+
+func (r *Repository) GetExploitRunScript(ctx context.Context, exploitID string) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.exploits[exploitID]; !ok {
+		return "", storage.ErrExploitNotFound
+	}
+	entry := r.exploitEntrypointLocked(exploitID)
+	script, err := r.ensureRunScriptLocked(exploitID, entry)
+	if err != nil {
+		return "", err
+	}
+	return script, ctx.Err()
+}
+
+func (r *Repository) SaveExploitRunScript(ctx context.Context, exploitID string, script string) error {
+	if strings.TrimSpace(script) == "" {
+		return errors.New("run script cannot be empty")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.exploits[exploitID]; !ok {
+		return storage.ErrExploitNotFound
+	}
+	if !strings.HasSuffix(script, "\n") {
+		script += "\n"
+	}
+	files := r.ensureExploitFilesLocked(exploitID)
+	files[runScriptName] = memoryFile{
+		Data:    []byte(script),
+		ModTime: time.Now().UTC(),
+	}
+	return ctx.Err()
+}
+
+func (r *Repository) ListExploitFiles(ctx context.Context, exploitID string) ([]storage.ExploitFile, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.exploits[exploitID]; !ok {
+		return nil, storage.ErrExploitNotFound
+	}
+	entry := r.exploitEntrypointLocked(exploitID)
+	if _, err := r.ensureRunScriptLocked(exploitID, entry); err != nil {
+		return nil, err
+	}
+	files := r.ensureExploitFilesLocked(exploitID)
+	result := make([]storage.ExploitFile, 0, len(files))
+	for name, file := range files {
+		sum := md5.Sum(file.Data)
+		result = append(result, storage.ExploitFile{
+			Name:    name,
+			Size:    int64(len(file.Data)),
+			MD5:     hex.EncodeToString(sum[:]),
+			ModTime: file.ModTime,
+		})
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Name == runScriptName {
+			return true
+		}
+		if result[j].Name == runScriptName {
+			return false
+		}
+		return result[i].Name < result[j].Name
+	})
+	return result, ctx.Err()
+}
+
+func (r *Repository) GetExploitFile(ctx context.Context, exploitID string, name string) ([]byte, error) {
+	name = filepath.Base(strings.TrimSpace(name))
+	if name == "" {
+		return nil, errors.New("file name required")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.exploits[exploitID]; !ok {
+		return nil, storage.ErrExploitNotFound
+	}
+	files := r.ensureExploitFilesLocked(exploitID)
+	if name == runScriptName {
+		entry := r.exploitEntrypointLocked(exploitID)
+		script, err := r.ensureRunScriptLocked(exploitID, entry)
+		if err != nil {
+			return nil, err
+		}
+		return []byte(script), ctx.Err()
+	}
+	file, ok := files[name]
 	if !ok {
-		return nil, errors.New("artifact not found")
+		return nil, errors.New("file not found")
 	}
-	return append([]byte(nil), artifact...), ctx.Err()
+	return cloneBytes(file.Data), ctx.Err()
+}
+
+func (r *Repository) SaveExploitFile(ctx context.Context, exploitID string, name string, data []byte) error {
+	name = filepath.Base(strings.TrimSpace(name))
+	if name == "" {
+		return errors.New("file name required")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.exploits[exploitID]; !ok {
+		return storage.ErrExploitNotFound
+	}
+	if name == runScriptName {
+		return r.SaveExploitRunScript(ctx, exploitID, string(data))
+	}
+	if len(data) == 0 {
+		return errors.New("file empty")
+	}
+	files := r.ensureExploitFilesLocked(exploitID)
+	files[name] = memoryFile{
+		Data:    cloneBytes(data),
+		ModTime: time.Now().UTC(),
+	}
+	return ctx.Err()
+}
+
+func (r *Repository) DeleteExploitFile(ctx context.Context, exploitID string, name string) error {
+	name = filepath.Base(strings.TrimSpace(name))
+	if name == "" {
+		return errors.New("file name required")
+	}
+	if name == runScriptName {
+		return errors.New("run.sh cannot be deleted")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.exploits[exploitID]; !ok {
+		return storage.ErrExploitNotFound
+	}
+	files := r.ensureExploitFilesLocked(exploitID)
+	if _, ok := files[name]; !ok {
+		return errors.New("file not found")
+	}
+	delete(files, name)
+	return ctx.Err()
 }
 
 func (r *Repository) UpdateFlag(ctx context.Context, flag *domain.Flag) error {
@@ -444,21 +825,158 @@ func (r *Repository) ListRunners(ctx context.Context) ([]domain.Runner, error) {
 	return items, ctx.Err()
 }
 
+func (r *Repository) GetRunner(ctx context.Context, id string) (domain.Runner, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	runner, ok := r.runners[id]
+	if !ok {
+		return domain.Runner{}, errors.New("runner not found")
+	}
+	return runner, ctx.Err()
+}
+
 func (r *Repository) UpsertRunner(ctx context.Context, runner domain.Runner) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if runner.ID == "" {
 		runner.ID = newID("runner")
 	}
-	if runner.RegisteredAt.IsZero() {
-		runner.RegisteredAt = time.Now().UTC()
-	}
 	_runner := r.runners[runner.ID]
+	if runner.RegisteredAt.IsZero() {
+		if !_runner.RegisteredAt.IsZero() {
+			runner.RegisteredAt = _runner.RegisteredAt
+		} else {
+			runner.RegisteredAt = time.Now().UTC()
+		}
+	}
 	if runner.LastHeartbeat.IsZero() {
 		runner.LastHeartbeat = _runner.LastHeartbeat
 	}
+	if runner.Type == "" {
+		runner.Type = _runner.Type
+	}
+	if runner.Hostname == "" {
+		runner.Hostname = _runner.Hostname
+	}
+	if runner.MaxParallel == 0 && _runner.MaxParallel > 0 {
+		runner.MaxParallel = _runner.MaxParallel
+	}
+	if len(runner.Tags) == 0 && len(_runner.Tags) > 0 {
+		runner.Tags = _runner.Tags
+	}
+	if runner.Labels == nil && _runner.Labels != nil {
+		runner.Labels = _runner.Labels
+	}
 	r.runners[runner.ID] = runner
 	return ctx.Err()
+}
+
+func (r *Repository) DeleteRunner(ctx context.Context, id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.runners[id]; !ok {
+		return errors.New("runner not found")
+	}
+	delete(r.runners, id)
+	return ctx.Err()
+}
+
+func (r *Repository) ensureExploitFilesLocked(exploitID string) map[string]memoryFile {
+	files, ok := r.exploitFiles[exploitID]
+	if !ok {
+		files = make(map[string]memoryFile)
+		r.exploitFiles[exploitID] = files
+	}
+	return files
+}
+
+func (r *Repository) exploitEntrypointLocked(exploitID string) string {
+	exploit, ok := r.exploits[exploitID]
+	if !ok || exploit.Metadata == nil {
+		return ""
+	}
+	if entry, ok := exploit.Metadata["entrypoint"].(string); ok {
+		return entry
+	}
+	return ""
+}
+
+func (r *Repository) ensureRunScriptLocked(exploitID string, entrypoint string) (string, error) {
+	files := r.ensureExploitFilesLocked(exploitID)
+	if file, ok := files[runScriptName]; ok && len(file.Data) > 0 {
+		return string(file.Data), nil
+	}
+	script := defaultRunScript(entrypoint)
+	files[runScriptName] = memoryFile{
+		Data:    []byte(script),
+		ModTime: time.Now().UTC(),
+	}
+	return script, nil
+}
+
+func createZipFromFilesLocked(files map[string]memoryFile) ([]byte, error) {
+	if len(files) == 0 {
+		return nil, errors.New("no artifact files")
+	}
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	buf := new(bytes.Buffer)
+	zw := zip.NewWriter(buf)
+	for _, name := range names {
+		file := files[name]
+		header := &zip.FileHeader{
+			Name:   filepath.ToSlash(name),
+			Method: zip.Deflate,
+		}
+		modTime := file.ModTime
+		if modTime.IsZero() {
+			modTime = time.Unix(0, 0)
+		}
+		header.SetModTime(modTime)
+		mode := os.FileMode(0o644)
+		if filepath.Base(name) == runScriptName {
+			mode = 0o755
+		}
+		header.SetMode(mode)
+		writer, err := zw.CreateHeader(header)
+		if err != nil {
+			zw.Close()
+			return nil, err
+		}
+		if _, err := writer.Write(file.Data); err != nil {
+			zw.Close()
+			return nil, err
+		}
+	}
+	if err := zw.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func cloneBytes(data []byte) []byte {
+	if len(data) == 0 {
+		return nil
+	}
+	return append([]byte(nil), data...)
+}
+
+func defaultRunScript(entry string) string {
+	entry = strings.TrimSpace(entry)
+	if entry == "" {
+		entry = "python exp.py"
+	}
+	if strings.HasPrefix(entry, "#!") {
+		if strings.HasSuffix(entry, "\n") {
+			return entry
+		}
+		return entry + "\n"
+	}
+	return fmt.Sprintf("#!/bin/sh\nset -euo pipefail\n%s \"$1\" \"$2\"\n", entry)
 }
 
 func (r *Repository) LogRunArtifact(ctx context.Context, runID string, uri string) error {
@@ -538,6 +1056,8 @@ func (r *Repository) seed() {
 		ID:            newID("runner"),
 		Type:          "python",
 		Hostname:      "runner-1",
+		Tags:          []string{"python", "pwntools"},
+		ActiveJobs:    0,
 		MaxParallel:   3,
 		Status:        "online",
 		LastHeartbeat: now.Add(-time.Second * 10),
@@ -575,3 +1095,50 @@ func repr(event string, ts time.Time, code int, msg string) string {
 }
 
 var idCounter uint64
+
+func jobHintsFromMetadata(meta map[string]any) (string, string, time.Duration) {
+	if meta == nil {
+		return "", "", 0
+	}
+	flagRegex := ""
+	flagFile := ""
+	timeout := time.Duration(0)
+
+	if value, ok := meta["flag_regex"].(string); ok {
+		flagRegex = value
+	} else if value, ok := meta["flagRegex"].(string); ok {
+		flagRegex = value
+	}
+
+	if value, ok := meta["flag_file"].(string); ok {
+		flagFile = value
+	} else if value, ok := meta["flagFile"].(string); ok {
+		flagFile = value
+	}
+
+	timeoutKeys := []string{"timeout_seconds", "timeoutSeconds"}
+	for _, key := range timeoutKeys {
+		if timeout > 0 {
+			break
+		}
+		switch value := meta[key].(type) {
+		case float64:
+			if value > 0 {
+				timeout = time.Duration(value) * time.Second
+			}
+		case int:
+			if value > 0 {
+				timeout = time.Duration(value) * time.Second
+			}
+		case int32:
+			if value > 0 {
+				timeout = time.Duration(value) * time.Second
+			}
+		case int64:
+			if value > 0 {
+				timeout = time.Duration(value) * time.Second
+			}
+		}
+	}
+	return flagRegex, flagFile, timeout
+}

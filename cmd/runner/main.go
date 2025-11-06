@@ -24,9 +24,21 @@ func main() {
 	}
 
 	logger := logging.NewLogger(cfg.LogLevel)
-	broker := createBroker(cfg, logger)
+	broker, brokerStatus := createBroker(cfg, logger)
 
-	agent := runner.New(cfg, logger, broker)
+	var controlClient *runner.ControlPlaneClient
+	if cfg.Runner.ControlPlaneURL != "" {
+		client, err := runner.NewControlPlaneClient(cfg, logger)
+		if err != nil {
+			logger.Warn("control plane client disabled", slog.Any("err", err))
+		} else {
+			controlClient = client
+		}
+	} else {
+		logger.Warn("CONTROL_PLANE_URL not configured; runner will operate in offline mode")
+	}
+
+	agent := runner.New(cfg, logger, broker, controlClient, brokerStatus)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -37,12 +49,12 @@ func main() {
 	}
 }
 
-func createBroker(cfg config.Config, logger *slog.Logger) queue.Broker {
+func createBroker(cfg config.Config, logger *slog.Logger) (queue.Broker, string) {
 	broker, err := redisbroker.New(cfg.Redis)
 	if err != nil {
 		logger.Warn("redis broker unavailable, falling back to noop", slog.Any("err", err))
-		return noop.New()
+		return noop.New(), "disconnected"
 	}
 	logger.Info("redis broker enabled", slog.String("addr", cfg.Redis.Addr))
-	return broker
+	return broker, "connected"
 }

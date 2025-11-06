@@ -34,8 +34,14 @@ func New(cfg config.Config, log *slog.Logger, repo storage.Repository, broker qu
 
 // Run launches the scheduling loop until the provided context is cancelled.
 func (s *Scheduler) Run(ctx context.Context) error {
-	ticker := time.NewTicker(s.cfg.Scheduler.PollInterval)
+	baseInterval := time.Second
+	if s.cfg.Scheduler.PollInterval > 0 && s.cfg.Scheduler.PollInterval < baseInterval {
+		baseInterval = s.cfg.Scheduler.PollInterval
+	}
+	ticker := time.NewTicker(baseInterval)
 	defer ticker.Stop()
+
+	var lastRound time.Time
 
 	for {
 		select {
@@ -43,15 +49,41 @@ func (s *Scheduler) Run(ctx context.Context) error {
 			s.log.Info("scheduler stopping")
 			return ctx.Err()
 		case <-ticker.C:
-			if err := s.tick(ctx); err != nil {
-				s.log.Error("scheduler tick failed", slog.Any("err", err))
+			settings, err := s.repo.GetSchedulerSettings(ctx)
+			if err != nil {
+				s.log.Warn("load scheduler settings failed, falling back to config", slog.Any("err", err))
+				settings.RoundInterval = s.cfg.Scheduler.PollInterval
+				settings.MaxDispatchBatch = s.cfg.Scheduler.MaxDispatchBatch
+				settings.Enabled = true
+			}
+			if !settings.Enabled {
+				s.log.Debug("scheduler paused")
+				continue
+			}
+			interval := settings.RoundInterval
+			if interval <= 0 {
+				interval = s.cfg.Scheduler.PollInterval
+			}
+			if interval <= 0 {
+				interval = time.Second * 5
+			}
+			maxBatch := settings.MaxDispatchBatch
+			if maxBatch <= 0 {
+				maxBatch = s.cfg.Scheduler.MaxDispatchBatch
+			}
+			if lastRound.IsZero() || time.Since(lastRound) >= interval {
+				if err := s.tick(ctx, maxBatch); err != nil {
+					s.log.Error("scheduler tick failed", slog.Any("err", err))
+				} else {
+					lastRound = time.Now()
+				}
 			}
 		}
 	}
 }
 
-func (s *Scheduler) tick(ctx context.Context) error {
-	workItems, err := s.repo.RunnableWork(ctx, s.cfg.Scheduler.MaxDispatchBatch)
+func (s *Scheduler) tick(ctx context.Context, limit int) error {
+	workItems, err := s.repo.RunnableWork(ctx, limit)
 	if err != nil {
 		return err
 	}
@@ -74,7 +106,7 @@ func (s *Scheduler) tick(ctx context.Context) error {
 	}
 
 	if dispatched > 0 {
-		s.log.Info("scheduled runs", slog.Int("count", dispatched))
+		s.log.Info("scheduled runs", slog.Int("count", dispatched), slog.Int("limit", limit))
 	}
 	return nil
 }
@@ -106,6 +138,7 @@ func (s *Scheduler) enqueueRun(ctx context.Context, item domain.RunWorkItem) err
 		payload.TimeoutSeconds = int(item.Timeout.Seconds())
 	}
 	payload.ArtifactBase64 = base64.StdEncoding.EncodeToString(item.Artifact)
+	payload.ArtifactURI = fmt.Sprintf("/api/v1/exploits/%s/artifact", item.Exploit.ID)
 
 	body, err := jobs.MarshalJobPayload(payload)
 	if err != nil {

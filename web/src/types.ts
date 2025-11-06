@@ -25,8 +25,19 @@ export interface Exploit {
   runnerTags: string[];
   scheduleWeight: number;
   timeoutSeconds?: number;
+  entrypoint?: string;
+  runScript?: string;
+  latestRevisionId?: string;
+  latestArtifactDigest?: string;
   metadata?: Record<string, unknown>;
   updatedAt?: string;
+}
+
+export interface ExploitFile {
+  name: string;
+  size: number;
+  md5: string;
+  modTime?: string;
 }
 
 export interface ExploitRevision {
@@ -35,6 +46,7 @@ export interface ExploitRevision {
   digest: string;
   createdAt: string;
   notes?: string;
+  artifactName?: string;
 }
 
 export interface RunSummary {
@@ -80,6 +92,7 @@ export interface RunnerInfo {
   id: string;
   type: string;
   hostname?: string;
+  tags?: string[];
   maxParallel: number;
   activeJobs: number;
   status: "online" | "offline" | "degraded";
@@ -96,4 +109,37 @@ export interface LogEntry {
   runId?: string;
   flagId?: string;
   fields?: Record<string, unknown>;
+}
+
+export interface SchedulerSettings {
+  roundIntervalSeconds: number;
+  roundIntervalMinutes: number;
+  maxDispatchBatch: number;
+  updatedAt?: string;
+}
+
+export interface TargetExploitStatus {
+  exploitId: string;
+  exploitName: string;
+  enabled: boolean;
+  defaultEnabled: boolean;
+}
+
+export interface TargetScheduleSummary {
+  total: number;
+  enabled: number;
+  disabled: number;
+  indicators: string;
+}
+
+export interface TargetSchedule {
+  target: Target;
+  challenge?: {
+    id: string;
+    name: string;
+    category?: string;
+    serviceType?: string;
+  };
+  exploits: TargetExploitStatus[];
+  summary: TargetScheduleSummary;
 }

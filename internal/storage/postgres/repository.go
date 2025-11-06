@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -24,11 +26,13 @@ type Config struct {
 	MaxIdleConns    int
 	MaxOpenConns    int
 	ConnMaxLifetime time.Duration
+	ArtifactDir     string
 }
 
 // Repository implements storage.Repository backed by PostgreSQL.
 type Repository struct {
-	db *sql.DB
+	db          *sql.DB
+	artifactDir string
 }
 
 // New initialises a PostgreSQL backed repository, ensuring the required schema exists.
@@ -77,7 +81,19 @@ func New(cfg Config) (*Repository, error) {
 		return nil, err
 	}
 
-	return &Repository{db: db}, nil
+	artifactDir := strings.TrimSpace(cfg.ArtifactDir)
+	if artifactDir == "" {
+		artifactDir = filepath.Join(os.TempDir(), "awdinfra", "artifacts")
+	}
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("prepare artifact dir: %w", err)
+	}
+
+	return &Repository{
+		db:          db,
+		artifactDir: artifactDir,
+	}, nil
 }
 
 // Close releases underlying database resources.
@@ -150,8 +166,12 @@ func ensureSchema(ctx context.Context, db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_exploit_revisions_exploit_id ON exploit_revisions(exploit_id);`,
 		`CREATE TABLE IF NOT EXISTS exploit_artifacts (
 			revision_id TEXT PRIMARY KEY REFERENCES exploit_revisions(id) ON DELETE CASCADE,
-			data BYTEA NOT NULL
+			file_name TEXT,
+			md5 TEXT
 		);`,
+		`ALTER TABLE exploit_artifacts ADD COLUMN IF NOT EXISTS file_name TEXT;`,
+		`ALTER TABLE exploit_artifacts ADD COLUMN IF NOT EXISTS md5 TEXT;`,
+		`ALTER TABLE exploit_artifacts DROP COLUMN IF EXISTS data;`,
 		`CREATE TABLE IF NOT EXISTS runs (
 			id TEXT PRIMARY KEY,
 			exploit_id TEXT REFERENCES exploits(id) ON DELETE SET NULL,
@@ -209,16 +229,39 @@ func ensureSchema(ctx context.Context, db *sql.DB) error {
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_log_entries_flag_id ON log_entries(flag_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_log_entries_run_id ON log_entries(run_id);`,
+		`CREATE TABLE IF NOT EXISTS scheduler_settings (
+			id TEXT PRIMARY KEY,
+			round_interval_seconds INTEGER NOT NULL,
+			max_dispatch_batch INTEGER NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL,
+			enabled BOOLEAN NOT NULL DEFAULT false
+		);`,
+		`ALTER TABLE scheduler_settings ADD COLUMN IF NOT EXISTS enabled BOOLEAN NOT NULL DEFAULT false;`,
+		`INSERT INTO scheduler_settings (id, round_interval_seconds, max_dispatch_batch, updated_at, enabled)
+			VALUES ('default', 300, 50, NOW(), false)
+			ON CONFLICT (id) DO NOTHING;`,
+		`CREATE TABLE IF NOT EXISTS target_exploit_overrides (
+			target_id TEXT REFERENCES targets(id) ON DELETE CASCADE,
+			exploit_id TEXT REFERENCES exploits(id) ON DELETE CASCADE,
+			enabled BOOLEAN NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL,
+			PRIMARY KEY (target_id, exploit_id)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_target_exploit_overrides_exploit_id ON target_exploit_overrides(exploit_id);`,
 		`CREATE TABLE IF NOT EXISTS runners (
 			id TEXT PRIMARY KEY,
 			type TEXT,
 			hostname TEXT,
 			labels JSONB,
+			tags JSONB,
 			max_parallel INTEGER,
+			active_jobs INTEGER,
 			last_heartbeat TIMESTAMPTZ,
 			status TEXT,
 			registered_at TIMESTAMPTZ NOT NULL
 		);`,
+		`ALTER TABLE runners ADD COLUMN IF NOT EXISTS tags JSONB;`,
+		`ALTER TABLE runners ADD COLUMN IF NOT EXISTS active_jobs INTEGER;`,
 	}
 
 	for _, stmt := range statements {
@@ -481,8 +524,271 @@ func (r *Repository) UpdateRun(ctx context.Context, run *domain.Run) error {
 }
 
 func (r *Repository) RunnableWork(ctx context.Context, limit int) ([]domain.RunWorkItem, error) {
-	// Scheduler logic not yet implemented for postgres backend.
-	return nil, nil
+	if limit <= 0 {
+		limit = 1
+	}
+
+	targets, err := r.ListTargets(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(targets) == 0 {
+		return nil, nil
+	}
+
+	exploits, err := r.ListExploits(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(exploits) == 0 {
+		return nil, nil
+	}
+
+	overrides, err := r.ListTargetExploitOverrides(ctx)
+	if err != nil {
+		return nil, err
+	}
+	overrideIndex := make(map[string]map[string]domain.TargetExploitOverride)
+	for _, override := range overrides {
+		if overrideIndex[override.TargetID] == nil {
+			overrideIndex[override.TargetID] = make(map[string]domain.TargetExploitOverride)
+		}
+		overrideIndex[override.TargetID][override.ExploitID] = override
+	}
+
+	activeCounts := make(map[string]int)
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT target_id, COUNT(1)
+		FROM runs
+		WHERE status IN ('pending', 'running')
+		GROUP BY target_id`)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	if rows != nil {
+		defer rows.Close()
+		for rows.Next() {
+			var targetID sql.NullString
+			var count int
+			if scanErr := rows.Scan(&targetID, &count); scanErr != nil {
+				return nil, scanErr
+			}
+			if targetID.Valid {
+				activeCounts[targetID.String] = count
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+	}
+
+	exploitsByChallenge := make(map[string][]domain.Exploit)
+	for _, exploit := range exploits {
+		exploitsByChallenge[exploit.ChallengeID] = append(exploitsByChallenge[exploit.ChallengeID], exploit)
+	}
+
+	work := make([]domain.RunWorkItem, 0, limit)
+	now := time.Now().UTC()
+
+	for _, target := range targets {
+		if len(work) >= limit {
+			break
+		}
+		status := strings.ToLower(strings.TrimSpace(target.Status))
+		if status != "" && status != "active" {
+			continue
+		}
+		concurrency := target.ConcurrencyLimit
+		if concurrency <= 0 {
+			concurrency = 1
+		}
+		if activeCounts[target.ID] >= concurrency {
+			continue
+		}
+
+		candidates := exploitsByChallenge[target.ChallengeID]
+		if len(candidates) == 0 {
+			continue
+		}
+
+		for _, exploit := range candidates {
+			if len(work) >= limit {
+				break
+			}
+
+			enabled := exploit.Enabled
+			if overrides := overrideIndex[target.ID]; overrides != nil {
+				if override, ok := overrides[exploit.ID]; ok {
+					enabled = override.Enabled
+				}
+			}
+			if !enabled {
+				continue
+			}
+
+			artifact, err := r.LatestExploitArtifact(ctx, exploit.ID)
+			if err != nil || len(artifact) == 0 {
+				continue
+			}
+
+			run := domain.Run{
+				ExploitID: exploit.ID,
+				TargetID:  target.ID,
+				Status:    domain.RunStatusPending,
+				QueuedAt:  now,
+			}
+			if err := r.CreateRun(ctx, &run); err != nil {
+				return nil, err
+			}
+
+			flagRegex, flagFile, timeout := jobHintsFromMetadata(exploit.Metadata)
+
+			item := domain.RunWorkItem{
+				RunID:     run.ID,
+				Exploit:   exploit,
+				Target:    target,
+				Artifact:  artifact,
+				FlagRegex: flagRegex,
+				FlagFile:  flagFile,
+				Timeout:   timeout,
+			}
+			work = append(work, item)
+			activeCounts[target.ID]++
+
+			if _, err := r.db.ExecContext(ctx, `
+				UPDATE exploits
+				SET last_run_at = $1
+				WHERE id = $2`,
+				now,
+				exploit.ID,
+			); err != nil {
+				return nil, err
+			}
+
+			if activeCounts[target.ID] >= concurrency {
+				break
+			}
+		}
+	}
+
+	return work, nil
+}
+
+func (r *Repository) GetSchedulerSettings(ctx context.Context) (domain.SchedulerSettings, error) {
+	var roundSeconds int64
+	var maxBatch int
+	var updatedAt time.Time
+	var enabled bool
+	err := r.db.QueryRowContext(ctx, `
+		SELECT round_interval_seconds, max_dispatch_batch, updated_at, enabled
+		FROM scheduler_settings
+		WHERE id = 'default'`).Scan(&roundSeconds, &maxBatch, &updatedAt, &enabled)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.SchedulerSettings{
+			RoundInterval:    time.Minute * 5,
+			MaxDispatchBatch: 50,
+			Enabled:          false,
+		}, nil
+	}
+	if err != nil {
+		return domain.SchedulerSettings{}, err
+	}
+	settings := domain.SchedulerSettings{
+		RoundInterval:    time.Duration(roundSeconds) * time.Second,
+		MaxDispatchBatch: maxBatch,
+		UpdatedAt:        updatedAt,
+		Enabled:          enabled,
+	}
+	if settings.RoundInterval <= 0 {
+		settings.RoundInterval = time.Minute * 5
+	}
+	if settings.MaxDispatchBatch <= 0 {
+		settings.MaxDispatchBatch = 50
+	}
+	return settings, nil
+}
+
+func (r *Repository) SaveSchedulerSettings(ctx context.Context, settings domain.SchedulerSettings) (domain.SchedulerSettings, error) {
+	if settings.RoundInterval <= 0 {
+		return domain.SchedulerSettings{}, errors.New("round interval must be positive")
+	}
+	if settings.MaxDispatchBatch <= 0 {
+		return domain.SchedulerSettings{}, errors.New("max dispatch batch must be positive")
+	}
+	now := time.Now().UTC()
+	_, err := r.db.ExecContext(ctx, `
+		INSERT INTO scheduler_settings (id, round_interval_seconds, max_dispatch_batch, updated_at, enabled)
+		VALUES ('default', $1, $2, $3, $4)
+		ON CONFLICT (id) DO UPDATE
+		SET round_interval_seconds = EXCLUDED.round_interval_seconds,
+			max_dispatch_batch = EXCLUDED.max_dispatch_batch,
+			updated_at = EXCLUDED.updated_at,
+			enabled = EXCLUDED.enabled`,
+		int64(settings.RoundInterval/time.Second),
+		settings.MaxDispatchBatch,
+		now,
+		settings.Enabled,
+	)
+	if err != nil {
+		return domain.SchedulerSettings{}, err
+	}
+	settings.UpdatedAt = now
+	return settings, nil
+}
+
+func (r *Repository) ListTargetExploitOverrides(ctx context.Context) ([]domain.TargetExploitOverride, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT target_id, exploit_id, enabled, updated_at
+		FROM target_exploit_overrides`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var overrides []domain.TargetExploitOverride
+	for rows.Next() {
+		var item domain.TargetExploitOverride
+		if err := rows.Scan(&item.TargetID, &item.ExploitID, &item.Enabled, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		overrides = append(overrides, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return overrides, nil
+}
+
+func (r *Repository) UpsertTargetExploitOverride(ctx context.Context, override domain.TargetExploitOverride) error {
+	if strings.TrimSpace(override.TargetID) == "" || strings.TrimSpace(override.ExploitID) == "" {
+		return errors.New("target and exploit ids required")
+	}
+	now := time.Now().UTC()
+	_, err := r.db.ExecContext(ctx, `
+		INSERT INTO target_exploit_overrides (target_id, exploit_id, enabled, updated_at)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (target_id, exploit_id) DO UPDATE
+		SET enabled = EXCLUDED.enabled,
+			updated_at = EXCLUDED.updated_at`,
+		override.TargetID,
+		override.ExploitID,
+		override.Enabled,
+		now,
+	)
+	return err
+}
+
+func (r *Repository) DeleteTargetExploitOverride(ctx context.Context, targetID string, exploitID string) error {
+	if strings.TrimSpace(targetID) == "" || strings.TrimSpace(exploitID) == "" {
+		return errors.New("target and exploit ids required")
+	}
+	_, err := r.db.ExecContext(ctx, `
+		DELETE FROM target_exploit_overrides
+		WHERE target_id = $1 AND exploit_id = $2`,
+		targetID,
+		exploitID,
+	)
+	return err
 }
 
 func (r *Repository) UpdateFlag(ctx context.Context, flag *domain.Flag) error {
@@ -608,6 +914,51 @@ func (r *Repository) ListTargets(ctx context.Context) ([]domain.Target, error) {
 		return nil, err
 	}
 	return targets, nil
+}
+
+func (r *Repository) GetTarget(ctx context.Context, id string) (domain.Target, error) {
+	var target domain.Target
+	var challengeID sql.NullString
+	var labels []byte
+	var lastSeen sql.NullTime
+	err := r.db.QueryRowContext(ctx, `
+		SELECT id, challenge_id, team_name, ip, port, status, concurrency_limit, labels, last_seen_at, created_at, updated_at
+		FROM targets
+		WHERE id = $1`,
+		id,
+	).Scan(
+		&target.ID,
+		&challengeID,
+		&target.TeamName,
+		&target.IP,
+		&target.Port,
+		&target.Status,
+		&target.ConcurrencyLimit,
+		&labels,
+		&lastSeen,
+		&target.CreatedAt,
+		&target.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.Target{}, errors.New("target not found")
+	}
+	if err != nil {
+		return domain.Target{}, err
+	}
+	if challengeID.Valid {
+		target.ChallengeID = challengeID.String
+	}
+	if lastSeen.Valid {
+		target.LastSeenAt = lastSeen.Time
+	}
+	if len(labels) > 0 {
+		data, err := unmarshalStringMap(labels)
+		if err != nil {
+			return domain.Target{}, err
+		}
+		target.Labels = data
+	}
+	return target, nil
 }
 
 func (r *Repository) CreateTarget(ctx context.Context, target domain.Target) (domain.Target, error) {
@@ -826,7 +1177,33 @@ func (r *Repository) CreateExploit(ctx context.Context, exploit domain.Exploit) 
 	if err != nil {
 		return domain.Exploit{}, err
 	}
+	entry := ""
+	if exploit.Metadata != nil {
+		if value, ok := exploit.Metadata["entrypoint"].(string); ok {
+			entry = value
+		}
+	}
+	if _, err := r.ensureDefaultRunScript(exploit.ID, entry); err != nil {
+		return domain.Exploit{}, err
+	}
 	return exploit, nil
+}
+
+func (r *Repository) DeleteExploit(ctx context.Context, exploitID string) error {
+	if strings.TrimSpace(exploitID) == "" {
+		return errors.New("exploit id required")
+	}
+	res, err := r.db.ExecContext(ctx, `DELETE FROM exploits WHERE id = $1`, exploitID)
+	if err != nil {
+		return err
+	}
+	if rows, _ := res.RowsAffected(); rows == 0 {
+		return storage.ErrExploitNotFound
+	}
+	if err := os.RemoveAll(r.exploitDir(exploitID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("cleanup exploit directory: %w", err)
+	}
+	return nil
 }
 
 func (r *Repository) SetExploitEnabled(ctx context.Context, exploitID string, enabled bool) error {
@@ -842,7 +1219,7 @@ func (r *Repository) SetExploitEnabled(ctx context.Context, exploitID string, en
 		return err
 	}
 	if rows, _ := res.RowsAffected(); rows == 0 {
-		return errors.New("exploit not found")
+		return storage.ErrExploitNotFound
 	}
 	return nil
 }
@@ -851,7 +1228,7 @@ func (r *Repository) SetExploitTimeout(ctx context.Context, exploitID string, ti
 	var metadataRaw []byte
 	err := r.db.QueryRowContext(ctx, `SELECT metadata FROM exploits WHERE id = $1`, exploitID).Scan(&metadataRaw)
 	if errors.Is(err, sql.ErrNoRows) {
-		return errors.New("exploit not found")
+		return storage.ErrExploitNotFound
 	}
 	if err != nil {
 		return err
@@ -880,77 +1257,156 @@ func (r *Repository) SetExploitTimeout(ctx context.Context, exploitID string, ti
 		return err
 	}
 	if rows, _ := res.RowsAffected(); rows == 0 {
-		return errors.New("exploit not found")
+		return storage.ErrExploitNotFound
 	}
 	return nil
 }
 
-func (r *Repository) AddExploitRevision(ctx context.Context, revision domain.ExploitRevision) error {
-	if revision.ExploitID == "" {
-		return errors.New("exploit id required")
+func (r *Repository) UpdateExploitMetadata(ctx context.Context, exploitID string, updates map[string]any) error {
+	if len(updates) == 0 {
+		return nil
 	}
-	if revision.ID == "" {
-		revision.ID = generateID("rev")
-	}
-	if revision.CreatedAt.IsZero() {
-		revision.CreatedAt = time.Now().UTC()
-	}
-
-	command, err := marshalJSON(revision.Command)
-	if err != nil {
-		return err
-	}
-	env, err := marshalJSON(revision.Env)
-	if err != nil {
-		return err
-	}
-
-	_, err = r.db.ExecContext(ctx, `
-		INSERT INTO exploit_revisions (id, exploit_id, digest, storage_uri, command, env, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		revision.ID,
-		revision.ExploitID,
-		revision.Digest,
-		revision.StorageURI,
-		command,
-		env,
-		revision.CreatedAt,
-	)
-	return err
-}
-
-func (r *Repository) SaveExploitArtifact(ctx context.Context, revisionID string, data []byte) error {
-	if len(data) == 0 {
-		return errors.New("artifact empty")
-	}
-	_, err := r.db.ExecContext(ctx, `
-		INSERT INTO exploit_artifacts (revision_id, data)
-		VALUES ($1, $2)
-		ON CONFLICT (revision_id) DO UPDATE SET data = EXCLUDED.data`,
-		revisionID,
-		data,
-	)
-	return err
-}
-
-func (r *Repository) LatestExploitArtifact(ctx context.Context, exploitID string) ([]byte, error) {
-	var artifact []byte
-	err := r.db.QueryRowContext(ctx, `
-		SELECT a.data
-		FROM exploit_artifacts a
-		JOIN exploit_revisions r ON r.id = a.revision_id
-		WHERE r.exploit_id = $1
-		ORDER BY r.created_at DESC
-		LIMIT 1`,
-		exploitID,
-	).Scan(&artifact)
+	var metadataRaw []byte
+	err := r.db.QueryRowContext(ctx, `SELECT metadata FROM exploits WHERE id = $1`, exploitID).Scan(&metadataRaw)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, errors.New("artifact not found")
+		return storage.ErrExploitNotFound
 	}
+	if err != nil {
+		return err
+	}
+	meta, err := unmarshalMap(metadataRaw)
+	if err != nil {
+		return err
+	}
+	if meta == nil {
+		meta = make(map[string]any)
+	}
+	for key, value := range updates {
+		if value == nil {
+			delete(meta, key)
+		} else {
+			meta[key] = value
+		}
+	}
+	metadata, err := marshalJSON(meta)
+	if err != nil {
+		return err
+	}
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE exploits
+		SET metadata=$1, updated_at=$2
+		WHERE id=$3`,
+		metadata,
+		time.Now().UTC(),
+		exploitID,
+	)
+	if err != nil {
+		return err
+	}
+	if rows, _ := res.RowsAffected(); rows == 0 {
+		return storage.ErrExploitNotFound
+	}
+	return nil
+}
+
+func (r *Repository) GetExploitRunScript(ctx context.Context, exploitID string) (string, error) {
+	if err := r.ensureExploitExists(ctx, exploitID); err != nil {
+		return "", err
+	}
+	entry, err := r.exploitEntrypoint(ctx, exploitID)
+	if err != nil {
+		return "", err
+	}
+	path := r.runScriptPath(exploitID)
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return r.ensureDefaultRunScript(exploitID, entry)
+	}
+	if err != nil {
+		return "", fmt.Errorf("read run.sh: %w", err)
+	}
+	return string(data), nil
+}
+
+func (r *Repository) SaveExploitRunScript(ctx context.Context, exploitID string, script string) error {
+	if err := r.ensureExploitExists(ctx, exploitID); err != nil {
+		return err
+	}
+	if err := r.writeRunScript(exploitID, script); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *Repository) ListExploitFiles(ctx context.Context, exploitID string) ([]storage.ExploitFile, error) {
+	if err := r.ensureExploitExists(ctx, exploitID); err != nil {
+		return nil, err
+	}
+	entry, err := r.exploitEntrypoint(ctx, exploitID)
 	if err != nil {
 		return nil, err
 	}
-	return cloneBytes(artifact), nil
+	if _, err := r.ensureDefaultRunScript(exploitID, entry); err != nil {
+		return nil, err
+	}
+	return r.listExploitFiles(exploitID)
+}
+
+func (r *Repository) GetExploitFile(ctx context.Context, exploitID string, name string) ([]byte, error) {
+	if err := r.ensureExploitExists(ctx, exploitID); err != nil {
+		return nil, err
+	}
+	if name == runScriptName {
+		script, err := r.GetExploitRunScript(ctx, exploitID)
+		if err != nil {
+			return nil, err
+		}
+		return []byte(script), nil
+	}
+	data, err := r.readExploitFile(exploitID, name)
+	if errors.Is(err, errFileNotFound) {
+		return nil, errors.New("file not found")
+	}
+	return data, err
+}
+
+func (r *Repository) SaveExploitFile(ctx context.Context, exploitID string, name string, data []byte) error {
+	if err := r.ensureExploitExists(ctx, exploitID); err != nil {
+		return err
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return errors.New("file name required")
+	}
+	if name == runScriptName {
+		return r.SaveExploitRunScript(ctx, exploitID, string(data))
+	}
+	if len(data) == 0 {
+		return errors.New("file empty")
+	}
+	return r.writeExploitFile(exploitID, name, data)
+}
+
+func (r *Repository) DeleteExploitFile(ctx context.Context, exploitID string, name string) error {
+	if err := r.ensureExploitExists(ctx, exploitID); err != nil {
+		return err
+	}
+	return r.deleteExploitFile(exploitID, name)
+}
+
+func (r *Repository) LatestExploitArtifact(ctx context.Context, exploitID string) ([]byte, error) {
+	if err := r.ensureExploitExists(ctx, exploitID); err != nil {
+		return nil, err
+	}
+	// Ensure run.sh exists before packaging
+	if _, err := r.GetExploitRunScript(ctx, exploitID); err != nil {
+		return nil, err
+	}
+	archive, err := r.packageExploitDir(exploitID)
+	if err != nil {
+		return nil, err
+	}
+	return archive, nil
 }
 
 func (r *Repository) ListFlags(ctx context.Context) ([]domain.Flag, error) {
@@ -1437,7 +1893,7 @@ func (r *Repository) AppendLog(ctx context.Context, entry domain.LogEntry) error
 
 func (r *Repository) ListRunners(ctx context.Context) ([]domain.Runner, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT id, type, hostname, labels, max_parallel, last_heartbeat, status, registered_at
+		SELECT id, type, hostname, labels, tags, max_parallel, active_jobs, last_heartbeat, status, registered_at
 		FROM runners
 		ORDER BY hostname ASC`)
 	if err != nil {
@@ -1448,7 +1904,8 @@ func (r *Repository) ListRunners(ctx context.Context) ([]domain.Runner, error) {
 	var runners []domain.Runner
 	for rows.Next() {
 		var runner domain.Runner
-		var labels []byte
+		var labels, tags []byte
+		var activeJobs sql.NullInt64
 		var lastHeartbeat sql.NullTime
 		var typ, hostname, status sql.NullString
 		if err := rows.Scan(
@@ -1456,7 +1913,9 @@ func (r *Repository) ListRunners(ctx context.Context) ([]domain.Runner, error) {
 			&typ,
 			&hostname,
 			&labels,
+			&tags,
 			&runner.MaxParallel,
+			&activeJobs,
 			&lastHeartbeat,
 			&status,
 			&runner.RegisteredAt,
@@ -1482,12 +1941,82 @@ func (r *Repository) ListRunners(ctx context.Context) ([]domain.Runner, error) {
 			}
 			runner.Labels = data
 		}
+		if len(tags) > 0 {
+			list, err := unmarshalStringSlice(tags)
+			if err != nil {
+				return nil, err
+			}
+			runner.Tags = list
+		}
+		if activeJobs.Valid {
+			runner.ActiveJobs = int(activeJobs.Int64)
+		}
 		runners = append(runners, runner)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	return runners, nil
+}
+
+func (r *Repository) GetRunner(ctx context.Context, id string) (domain.Runner, error) {
+	var runner domain.Runner
+	var labels, tags []byte
+	var typ, hostname, status sql.NullString
+	var lastHeartbeat sql.NullTime
+	var activeJobs sql.NullInt64
+	err := r.db.QueryRowContext(ctx, `
+		SELECT id, type, hostname, labels, tags, max_parallel, active_jobs, last_heartbeat, status, registered_at
+		FROM runners
+		WHERE id = $1`, id,
+	).Scan(
+		&runner.ID,
+		&typ,
+		&hostname,
+		&labels,
+		&tags,
+		&runner.MaxParallel,
+		&activeJobs,
+		&lastHeartbeat,
+		&status,
+		&runner.RegisteredAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.Runner{}, errors.New("runner not found")
+	}
+	if err != nil {
+		return domain.Runner{}, err
+	}
+	if typ.Valid {
+		runner.Type = typ.String
+	}
+	if hostname.Valid {
+		runner.Hostname = hostname.String
+	}
+	if len(labels) > 0 {
+		data, err := unmarshalStringMap(labels)
+		if err != nil {
+			return domain.Runner{}, err
+		}
+		runner.Labels = data
+	}
+	if len(tags) > 0 {
+		list, err := unmarshalStringSlice(tags)
+		if err != nil {
+			return domain.Runner{}, err
+		}
+		runner.Tags = list
+	}
+	if activeJobs.Valid {
+		runner.ActiveJobs = int(activeJobs.Int64)
+	}
+	if lastHeartbeat.Valid {
+		runner.LastHeartbeat = lastHeartbeat.Time
+	}
+	if status.Valid {
+		runner.Status = status.String
+	}
+	return runner, nil
 }
 
 func (r *Repository) UpsertRunner(ctx context.Context, runner domain.Runner) error {
@@ -1501,15 +2030,21 @@ func (r *Repository) UpsertRunner(ctx context.Context, runner domain.Runner) err
 	if err != nil {
 		return err
 	}
+	tags, err := marshalJSON(runner.Tags)
+	if err != nil {
+		return err
+	}
 
 	_, err = r.db.ExecContext(ctx, `
-		INSERT INTO runners (id, type, hostname, labels, max_parallel, last_heartbeat, status, registered_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		INSERT INTO runners (id, type, hostname, labels, tags, max_parallel, active_jobs, last_heartbeat, status, registered_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		ON CONFLICT (id) DO UPDATE
 		SET type = EXCLUDED.type,
 		    hostname = EXCLUDED.hostname,
 		    labels = EXCLUDED.labels,
+		    tags = EXCLUDED.tags,
 		    max_parallel = EXCLUDED.max_parallel,
+		    active_jobs = EXCLUDED.active_jobs,
 		    last_heartbeat = EXCLUDED.last_heartbeat,
 		    status = EXCLUDED.status,
 		    registered_at = EXCLUDED.registered_at`,
@@ -1517,10 +2052,113 @@ func (r *Repository) UpsertRunner(ctx context.Context, runner domain.Runner) err
 		runner.Type,
 		runner.Hostname,
 		labels,
+		tags,
 		runner.MaxParallel,
+		runner.ActiveJobs,
 		nullTime(runner.LastHeartbeat),
 		runner.Status,
 		runner.RegisteredAt,
 	)
 	return err
+}
+
+func (r *Repository) DeleteRunner(ctx context.Context, id string) error {
+	res, err := r.db.ExecContext(ctx, `DELETE FROM runners WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	if rows, _ := res.RowsAffected(); rows == 0 {
+		return errors.New("runner not found")
+	}
+	return nil
+}
+
+func (r *Repository) ensureExploitExists(ctx context.Context, exploitID string) error {
+	var exists bool
+	if err := r.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM exploits WHERE id = $1)`, exploitID).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		return storage.ErrExploitNotFound
+	}
+	return nil
+}
+
+func (r *Repository) exploitEntrypoint(ctx context.Context, exploitID string) (string, error) {
+	meta, err := r.fetchExploitMetadata(ctx, exploitID)
+	if err != nil {
+		return "", err
+	}
+	if meta == nil {
+		return "", nil
+	}
+	if entry, ok := meta["entrypoint"].(string); ok {
+		return entry, nil
+	}
+	return "", nil
+}
+
+func (r *Repository) fetchExploitMetadata(ctx context.Context, exploitID string) (map[string]any, error) {
+	var metadataRaw []byte
+	err := r.db.QueryRowContext(ctx, `SELECT metadata FROM exploits WHERE id = $1`, exploitID).Scan(&metadataRaw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, storage.ErrExploitNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	meta, err := unmarshalMap(metadataRaw)
+	if err != nil {
+		return nil, err
+	}
+	return meta, nil
+}
+
+func jobHintsFromMetadata(meta map[string]any) (string, string, time.Duration) {
+	if meta == nil {
+		return "", "", 0
+	}
+
+	flagRegex := ""
+	flagFile := ""
+	timeout := time.Duration(0)
+
+	if value, ok := meta["flag_regex"].(string); ok {
+		flagRegex = value
+	} else if value, ok := meta["flagRegex"].(string); ok {
+		flagRegex = value
+	}
+
+	if value, ok := meta["flag_file"].(string); ok {
+		flagFile = value
+	} else if value, ok := meta["flagFile"].(string); ok {
+		flagFile = value
+	}
+
+	timeoutKeys := []string{"timeout_seconds", "timeoutSeconds"}
+	for _, key := range timeoutKeys {
+		if timeout > 0 {
+			break
+		}
+		switch value := meta[key].(type) {
+		case float64:
+			if value > 0 {
+				timeout = time.Duration(value) * time.Second
+			}
+		case int:
+			if value > 0 {
+				timeout = time.Duration(value) * time.Second
+			}
+		case int32:
+			if value > 0 {
+				timeout = time.Duration(value) * time.Second
+			}
+		case int64:
+			if value > 0 {
+				timeout = time.Duration(value) * time.Second
+			}
+		}
+	}
+
+	return flagRegex, flagFile, timeout
 }

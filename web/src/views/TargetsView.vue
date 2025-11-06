@@ -173,12 +173,16 @@ watch(
   challenges,
   (items) => {
     const firstId = items[0]?.id ?? "";
-    if (items.length) {
-      if (!singleForm.challengeId) singleForm.challengeId = firstId;
-      if (!bulkForm.challengeId) bulkForm.challengeId = firstId;
-    } else {
+    if (!items.length) {
       singleForm.challengeId = "";
       bulkForm.challengeId = "";
+      return;
+    }
+    if (!items.some((item) => item.id === singleForm.challengeId)) {
+      singleForm.challengeId = firstId;
+    }
+    if (!items.some((item) => item.id === bulkForm.challengeId)) {
+      bulkForm.challengeId = firstId;
     }
   },
   { immediate: true }

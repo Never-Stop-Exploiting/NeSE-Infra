@@ -31,6 +31,7 @@ func main() {
 		MaxIdleConns:    cfg.Postgres.MaxIdleConns,
 		MaxOpenConns:    cfg.Postgres.MaxOpenConns,
 		ConnMaxLifetime: cfg.Postgres.ConnMaxLifetime,
+		ArtifactDir:     cfg.Postgres.ArtifactDir,
 	})
 	if err != nil {
 		logger.Error("failed to connect postgres", slog.Any("err", err))

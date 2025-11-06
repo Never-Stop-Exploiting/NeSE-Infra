@@ -17,6 +17,7 @@ type JobPayload struct {
 	TargetPort     int    `json:"target_port"`
 	TimeoutSeconds int    `json:"timeout_seconds"`
 	ArtifactBase64 string `json:"artifact_base64"`
+	ArtifactURI    string `json:"artifact_uri,omitempty"`
 	FlagRegex      string `json:"flag_regex"`
 	FlagFile       string `json:"flag_file"`
 	RunScript      string `json:"run_script,omitempty"`
@@ -29,15 +30,21 @@ func DecodeJobPayload(raw []byte) (JobPayload, error) {
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		return JobPayload{}, fmt.Errorf("unmarshal job payload: %w", err)
 	}
-	if payload.RunID == "" || payload.TargetIP == "" || payload.ArtifactBase64 == "" {
+	if payload.RunID == "" || payload.TargetIP == "" {
 		return JobPayload{}, fmt.Errorf("missing required job fields")
+	}
+	if payload.ArtifactBase64 == "" && payload.ArtifactURI == "" {
+		return JobPayload{}, fmt.Errorf("missing artifact data")
 	}
 	return payload, nil
 }
 
 // MarshalJobPayload serializes the payload into JSON.
 func MarshalJobPayload(payload JobPayload) ([]byte, error) {
-	if payload.RunID == "" || payload.TargetIP == "" || payload.ArtifactBase64 == "" {
+	if payload.RunID == "" || payload.TargetIP == "" {
+		return nil, fmt.Errorf("invalid job payload: incomplete fields")
+	}
+	if payload.ArtifactBase64 == "" && payload.ArtifactURI == "" {
 		return nil, fmt.Errorf("invalid job payload: incomplete fields")
 	}
 	return json.Marshal(payload)
@@ -45,6 +52,9 @@ func MarshalJobPayload(payload JobPayload) ([]byte, error) {
 
 // ArtifactBytes decodes base64 encoded ZIP bytes.
 func (p JobPayload) ArtifactBytes() ([]byte, error) {
+	if p.ArtifactBase64 == "" {
+		return nil, fmt.Errorf("no inline artifact")
+	}
 	data, err := base64.StdEncoding.DecodeString(p.ArtifactBase64)
 	if err != nil {
 		return nil, fmt.Errorf("decode artifact: %w", err)

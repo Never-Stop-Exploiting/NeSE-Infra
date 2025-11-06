@@ -44,18 +44,21 @@ type Exploit struct {
 	LastRunAt      time.Time
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
+	RunScript      string
 	Metadata       map[string]any
 }
 
 // ExploitRevision references immutable build artifacts for reproducible runs.
 type ExploitRevision struct {
-	ID         string
-	ExploitID  string
-	Digest     string
-	StorageURI string
-	Command    []string
-	Env        map[string]string
-	CreatedAt  time.Time
+	ID           string
+	ExploitID    string
+	Digest       string
+	StorageURI   string
+	ArtifactMD5  string
+	ArtifactName string
+	Command      []string
+	Env          map[string]string
+	CreatedAt    time.Time
 }
 
 // Runner represents an execution worker registered to the control plane.
@@ -63,6 +66,8 @@ type Runner struct {
 	ID            string
 	Type          string
 	Hostname      string
+	Tags          []string
+	ActiveJobs    int
 	Labels        map[string]string
 	MaxParallel   int
 	LastHeartbeat time.Time
@@ -154,6 +159,22 @@ type LogEntry struct {
 	RunID     string
 	FlagID    string
 	Fields    map[string]any
+}
+
+// SchedulerSettings capture runtime tunables for the exploit scheduler.
+type SchedulerSettings struct {
+	RoundInterval    time.Duration
+	MaxDispatchBatch int
+	UpdatedAt        time.Time
+	Enabled          bool
+}
+
+// TargetExploitOverride records per-target enablement for specific exploits.
+type TargetExploitOverride struct {
+	TargetID  string
+	ExploitID string
+	Enabled   bool
+	UpdatedAt time.Time
 }
 
 // LogFilter captures query parameters for log retrieval.

@@ -3,6 +3,8 @@
     <h1>AwD Infra Dashboard</h1>
     <nav class="links">
       <RouterLink to="/">Overview</RouterLink>
+      <RouterLink to="/schedule">Schedule</RouterLink>
+      <RouterLink to="/challenges">Challenges</RouterLink>
       <RouterLink to="/targets">Targets</RouterLink>
       <RouterLink to="/exploits">Exploits</RouterLink>
       <RouterLink to="/flags">Flags</RouterLink>
