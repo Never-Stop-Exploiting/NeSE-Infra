@@ -7,8 +7,17 @@
       </header>
       <form class="form" @submit.prevent="handleCreateTarget">
         <label>
-          Challenge ID
-          <input v-model="singleForm.challengeId" required placeholder="chal-uuid" />
+          Challenge
+          <select
+            v-model="singleForm.challengeId"
+            required
+            :disabled="!challengeOptions.length"
+          >
+            <option value="" disabled>Select challenge</option>
+            <option v-for="challenge in challengeOptions" :key="challenge.id" :value="challenge.id">
+              {{ challenge.name || challenge.id }}
+            </option>
+          </select>
         </label>
         <label>
           Team Name
@@ -37,8 +46,17 @@
       </header>
       <form class="form" @submit.prevent="handleImport">
         <label>
-          Challenge ID
-          <input v-model="bulkForm.challengeId" required placeholder="chal-uuid" />
+          Challenge
+          <select
+            v-model="bulkForm.challengeId"
+            required
+            :disabled="!challengeOptions.length"
+          >
+            <option value="" disabled>Select challenge</option>
+            <option v-for="challenge in challengeOptions" :key="challenge.id" :value="challenge.id">
+              {{ challenge.name || challenge.id }}
+            </option>
+          </select>
         </label>
         <label class="row">
           <span>Base IP</span>
@@ -84,7 +102,7 @@
           </thead>
           <tbody>
             <tr v-for="target in targetStore.targets" :key="target.id">
-              <td>{{ target.challengeId }}</td>
+              <td>{{ challengeNames[target.challengeId] ?? target.challengeId }}</td>
               <td>{{ target.teamName }}</td>
               <td>{{ target.ip }}:{{ target.port }}</td>
               <td>{{ target.status ?? "active" }}</td>
@@ -98,11 +116,23 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref, onMounted } from "vue";
+import { computed, reactive, ref, onMounted, watch } from "vue";
+import { storeToRefs } from "pinia";
 import { useTargetStore } from "@/stores/targets";
+import { useChallengeStore } from "@/stores/challenges";
 
 const targetStore = useTargetStore();
+const challengeStore = useChallengeStore();
+const { challenges } = storeToRefs(challengeStore);
 const pending = ref(false);
+const challengeOptions = computed(() => challenges.value);
+const challengeNames = computed<Record<string, string>>(() => {
+  const mapping: Record<string, string> = {};
+  challenges.value.forEach((challenge) => {
+    mapping[challenge.id] = challenge.name || challenge.id;
+  });
+  return mapping;
+});
 
 const singleForm = reactive({
   challengeId: "",
@@ -139,6 +169,21 @@ const previewTargets = computed(() => {
   return previews;
 });
 
+watch(
+  challenges,
+  (items) => {
+    const firstId = items[0]?.id ?? "";
+    if (items.length) {
+      if (!singleForm.challengeId) singleForm.challengeId = firstId;
+      if (!bulkForm.challengeId) bulkForm.challengeId = firstId;
+    } else {
+      singleForm.challengeId = "";
+      bulkForm.challengeId = "";
+    }
+  },
+  { immediate: true }
+);
+
 async function handleCreateTarget() {
   pending.value = true;
   await targetStore.addTarget({
@@ -171,6 +216,7 @@ async function handleImport() {
 }
 
 onMounted(() => {
+  challengeStore.load();
   targetStore.load();
 });
 </script>

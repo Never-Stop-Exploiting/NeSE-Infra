@@ -14,7 +14,7 @@ import (
 	"awdinfra/internal/queue"
 	"awdinfra/internal/queue/noop"
 	redisbroker "awdinfra/internal/queue/redis"
-	"awdinfra/internal/storage/memory"
+	"awdinfra/internal/storage/postgres"
 	"awdinfra/internal/submitter"
 )
 
@@ -25,7 +25,17 @@ func main() {
 	}
 
 	logger := logging.NewLogger(cfg.LogLevel)
-	repo := memory.New()
+	repo, err := postgres.New(postgres.Config{
+		DSN:             cfg.Postgres.DSN,
+		MaxIdleConns:    cfg.Postgres.MaxIdleConns,
+		MaxOpenConns:    cfg.Postgres.MaxOpenConns,
+		ConnMaxLifetime: cfg.Postgres.ConnMaxLifetime,
+	})
+	if err != nil {
+		logger.Error("failed to connect postgres", slog.Any("err", err))
+		os.Exit(1)
+	}
+	defer repo.Close()
 	broker := createBroker(cfg, logger)
 	service := submitter.New(cfg, logger, repo, broker)
 

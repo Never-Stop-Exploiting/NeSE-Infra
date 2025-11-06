@@ -34,6 +34,7 @@ export const useTargetStore = defineStore("targets", () => {
     count: number;
   }) {
     await importTargets(payload);
+    await load();
   }
 
   return { targets, loading, error, load, addTarget, bulkImport };

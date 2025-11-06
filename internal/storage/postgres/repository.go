@@ -3,167 +3,1524 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	"awdinfra/internal/domain"
 	"awdinfra/internal/storage"
 
-	_ "github.com/jackc/pgx/v5"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 var _ storage.Repository = (*Repository)(nil)
 
+// Config captures PostgreSQL connection parameters used by the repository.
+type Config struct {
+	DSN             string
+	MaxIdleConns    int
+	MaxOpenConns    int
+	ConnMaxLifetime time.Duration
+}
+
+// Repository implements storage.Repository backed by PostgreSQL.
 type Repository struct {
 	db *sql.DB
 }
 
-func New(connString string) (*Repository, error) {
-	db, err := sql.Open("pgx", connString)
-	if err != nil {
-		return nil, err
+// New initialises a PostgreSQL backed repository, ensuring the required schema exists.
+func New(cfg Config) (*Repository, error) {
+	if strings.TrimSpace(cfg.DSN) == "" {
+		return nil, errors.New("postgres DSN required")
 	}
-	db.SetMaxOpenConns(25)
-	db.SetMaxIdleConns(10)
-	db.SetConnMaxLifetime(time.Minute * 5)
+
+	db, err := sql.Open("pgx", cfg.DSN)
+	if err != nil {
+		return nil, fmt.Errorf("open postgres: %w", err)
+	}
+
+	maxOpen := cfg.MaxOpenConns
+	if maxOpen <= 0 {
+		maxOpen = 10
+	}
+	db.SetMaxOpenConns(maxOpen)
+
+	maxIdle := cfg.MaxIdleConns
+	if maxIdle < 0 {
+		maxIdle = 0
+	}
+	if maxIdle == 0 && cfg.MaxIdleConns == 0 {
+		maxIdle = 5
+	}
+	db.SetMaxIdleConns(maxIdle)
+
+	lifetime := cfg.ConnMaxLifetime
+	if lifetime <= 0 {
+		lifetime = time.Minute * 5
+	}
+	db.SetConnMaxLifetime(lifetime)
+
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
 	defer cancel()
 	if err := db.PingContext(ctx); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("ping postgres: %w", err)
+	}
+
+	schemaCtx, schemaCancel := context.WithTimeout(context.Background(), time.Second*30)
+	defer schemaCancel()
+	if err := ensureSchema(schemaCtx, db); err != nil {
+		db.Close()
 		return nil, err
 	}
+
 	return &Repository{db: db}, nil
 }
 
+// Close releases underlying database resources.
 func (r *Repository) Close() error {
 	return r.db.Close()
 }
 
-// TODO: Implement storage.Repository methods (Challenges, Targets, Exploits, Runs, Flags, Logs)
+const schemaLockID int64 = 0x617764696e667261 // "awdinfra"
 
-// Placeholder to satisfy interface. Full implementation will require schema migration and SQL queries.
+func ensureSchema(ctx context.Context, db *sql.DB) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin schema transaction: %w", err)
+	}
+	defer tx.Rollback()
 
-func notImplemented() error { return errors.New("postgres repository method not implemented") }
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, schemaLockID); err != nil {
+		return fmt.Errorf("acquire schema lock: %w", err)
+	}
+
+	statements := []string{
+		`CREATE TABLE IF NOT EXISTS challenges (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			category TEXT,
+			service_type TEXT,
+			description TEXT,
+			metadata JSONB,
+			created_at TIMESTAMPTZ NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS targets (
+			id TEXT PRIMARY KEY,
+			challenge_id TEXT REFERENCES challenges(id) ON DELETE CASCADE,
+			team_name TEXT NOT NULL,
+			ip TEXT NOT NULL,
+			port INTEGER NOT NULL,
+			status TEXT NOT NULL,
+			concurrency_limit INTEGER NOT NULL DEFAULT 1,
+			labels JSONB,
+			last_seen_at TIMESTAMPTZ,
+			created_at TIMESTAMPTZ NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_targets_challenge_id ON targets(challenge_id);`,
+		`CREATE TABLE IF NOT EXISTS exploits (
+			id TEXT PRIMARY KEY,
+			challenge_id TEXT REFERENCES challenges(id) ON DELETE SET NULL,
+			name TEXT NOT NULL,
+			description TEXT,
+			enabled BOOLEAN NOT NULL DEFAULT false,
+			runner_tags JSONB,
+			schedule_weight INTEGER NOT NULL DEFAULT 1,
+			cooldown_seconds INTEGER NOT NULL DEFAULT 0,
+			last_run_at TIMESTAMPTZ,
+			metadata JSONB,
+			created_at TIMESTAMPTZ NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_exploits_challenge_id ON exploits(challenge_id);`,
+		`CREATE TABLE IF NOT EXISTS exploit_revisions (
+			id TEXT PRIMARY KEY,
+			exploit_id TEXT REFERENCES exploits(id) ON DELETE CASCADE,
+			digest TEXT,
+			storage_uri TEXT,
+			command JSONB,
+			env JSONB,
+			created_at TIMESTAMPTZ NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_exploit_revisions_exploit_id ON exploit_revisions(exploit_id);`,
+		`CREATE TABLE IF NOT EXISTS exploit_artifacts (
+			revision_id TEXT PRIMARY KEY REFERENCES exploit_revisions(id) ON DELETE CASCADE,
+			data BYTEA NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS runs (
+			id TEXT PRIMARY KEY,
+			exploit_id TEXT REFERENCES exploits(id) ON DELETE SET NULL,
+			exploit_revision TEXT,
+			target_id TEXT REFERENCES targets(id) ON DELETE SET NULL,
+			runner_id TEXT,
+			status TEXT NOT NULL,
+			queued_at TIMESTAMPTZ,
+			started_at TIMESTAMPTZ,
+			finished_at TIMESTAMPTZ,
+			log_uri TEXT,
+			flag_id TEXT,
+			error_message TEXT
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_runs_flag_id ON runs(flag_id);`,
+		`CREATE TABLE IF NOT EXISTS flags (
+			id TEXT PRIMARY KEY,
+			value TEXT NOT NULL,
+			challenge_id TEXT REFERENCES challenges(id) ON DELETE SET NULL,
+			target_id TEXT REFERENCES targets(id) ON DELETE SET NULL,
+			run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+			status TEXT NOT NULL,
+			submission_count INTEGER NOT NULL DEFAULT 0,
+			last_submitted_at TIMESTAMPTZ,
+			created_at TIMESTAMPTZ NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_flags_status ON flags(status);`,
+		`CREATE TABLE IF NOT EXISTS flag_logs (
+			id BIGSERIAL PRIMARY KEY,
+			flag_id TEXT REFERENCES flags(id) ON DELETE CASCADE,
+			message TEXT NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_flag_logs_flag_id ON flag_logs(flag_id);`,
+		`CREATE TABLE IF NOT EXISTS submission_attempts (
+			id TEXT PRIMARY KEY,
+			flag_id TEXT REFERENCES flags(id) ON DELETE CASCADE,
+			submitter_id TEXT,
+			status_code INTEGER,
+			error TEXT,
+			submitted_at TIMESTAMPTZ NOT NULL,
+			next_retry_at TIMESTAMPTZ,
+			payload JSONB
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_submission_attempts_flag_id ON submission_attempts(flag_id);`,
+		`CREATE TABLE IF NOT EXISTS log_entries (
+			id TEXT PRIMARY KEY,
+			timestamp TIMESTAMPTZ NOT NULL,
+			level TEXT,
+			source TEXT,
+			message TEXT,
+			run_id TEXT,
+			flag_id TEXT,
+			fields JSONB
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_log_entries_flag_id ON log_entries(flag_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_log_entries_run_id ON log_entries(run_id);`,
+		`CREATE TABLE IF NOT EXISTS runners (
+			id TEXT PRIMARY KEY,
+			type TEXT,
+			hostname TEXT,
+			labels JSONB,
+			max_parallel INTEGER,
+			last_heartbeat TIMESTAMPTZ,
+			status TEXT,
+			registered_at TIMESTAMPTZ NOT NULL
+		);`,
+	}
+
+	for _, stmt := range statements {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("apply schema: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit schema transaction: %w", err)
+	}
+	return nil
+}
 
 func (r *Repository) Challenges(ctx context.Context) ([]domain.Challenge, error) {
-	return nil, notImplemented()
-}
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, name, category, service_type, description, metadata, created_at, updated_at
+		FROM challenges
+		ORDER BY created_at ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
 
-func (r *Repository) CreateChallenge(ctx context.Context, challenge domain.Challenge) (domain.Challenge, error) {
-	return domain.Challenge{}, notImplemented()
-}
-
-func (r *Repository) UpdateChallenge(ctx context.Context, challenge domain.Challenge) (domain.Challenge, error) {
-	return domain.Challenge{}, notImplemented()
-}
-
-func (r *Repository) DeleteChallenge(ctx context.Context, id string) error {
-	return notImplemented()
-}
-
-func (r *Repository) CreateRun(ctx context.Context, run *domain.Run) error { return notImplemented() }
-
-func (r *Repository) UpdateRun(ctx context.Context, run *domain.Run) error { return notImplemented() }
-
-func (r *Repository) RunnableWork(ctx context.Context, limit int) ([]domain.RunWorkItem, error) {
-	return nil, notImplemented()
-}
-
-func (r *Repository) UpdateFlag(ctx context.Context, flag *domain.Flag) error {
-	return notImplemented()
-}
-
-func (r *Repository) InsertFlag(ctx context.Context, flag *domain.Flag) error {
-	return notImplemented()
-}
-
-func (r *Repository) LogRunArtifact(ctx context.Context, runID string, uri string) error {
-	return notImplemented()
-}
-
-func (r *Repository) ListTargets(ctx context.Context) ([]domain.Target, error) {
-	return nil, notImplemented()
-}
-
-func (r *Repository) CreateTarget(ctx context.Context, target domain.Target) (domain.Target, error) {
-	return domain.Target{}, notImplemented()
-}
-
-func (r *Repository) BulkInsertTargets(ctx context.Context, targets []domain.Target) error {
-	return notImplemented()
-}
-
-func (r *Repository) ListExploits(ctx context.Context) ([]domain.Exploit, error) {
-	return nil, notImplemented()
-}
-
-func (r *Repository) CreateExploit(ctx context.Context, exploit domain.Exploit) (domain.Exploit, error) {
-	return domain.Exploit{}, notImplemented()
-}
-
-func (r *Repository) SetExploitEnabled(ctx context.Context, exploitID string, enabled bool) error {
-	return notImplemented()
-}
-
-func (r *Repository) SetExploitTimeout(ctx context.Context, exploitID string, timeout time.Duration) error {
-	return notImplemented()
-}
-
-func (r *Repository) AddExploitRevision(ctx context.Context, revision domain.ExploitRevision) error {
-	return notImplemented()
-}
-
-func (r *Repository) SaveExploitArtifact(ctx context.Context, revisionID string, data []byte) error {
-	return notImplemented()
-}
-
-func (r *Repository) LatestExploitArtifact(ctx context.Context, exploitID string) ([]byte, error) {
-	return nil, notImplemented()
-}
-
-func (r *Repository) ListFlags(ctx context.Context) ([]domain.Flag, error) {
-	return nil, notImplemented()
-}
-
-func (r *Repository) GetFlag(ctx context.Context, id string) (domain.Flag, error) {
-	return domain.Flag{}, notImplemented()
-}
-
-func (r *Repository) GetFlagLogs(ctx context.Context, id string) ([]string, error) {
-	return nil, notImplemented()
-}
-
-func (r *Repository) ListFlagAttempts(ctx context.Context, flagID string) ([]domain.SubmissionAttempt, error) {
-	return nil, notImplemented()
-}
-
-func (r *Repository) AddFlagAttempt(ctx context.Context, flagID string, attempt domain.SubmissionAttempt) error {
-	return notImplemented()
-}
-
-func (r *Repository) ListRuns(ctx context.Context) ([]domain.Run, error) {
-	return nil, notImplemented()
+	var items []domain.Challenge
+	for rows.Next() {
+		var challenge domain.Challenge
+		var metadata []byte
+		var category, serviceType, description sql.NullString
+		if err := rows.Scan(
+			&challenge.ID,
+			&challenge.Name,
+			&category,
+			&serviceType,
+			&description,
+			&metadata,
+			&challenge.CreatedAt,
+			&challenge.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		if category.Valid {
+			challenge.Category = category.String
+		}
+		if serviceType.Valid {
+			challenge.ServiceType = serviceType.String
+		}
+		if description.Valid {
+			challenge.Description = description.String
+		}
+		if len(metadata) > 0 {
+			meta, err := unmarshalMap(metadata)
+			if err != nil {
+				return nil, err
+			}
+			challenge.Metadata = meta
+		}
+		items = append(items, challenge)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 func (r *Repository) GetChallenge(ctx context.Context, id string) (domain.Challenge, error) {
-	return domain.Challenge{}, notImplemented()
+	var challenge domain.Challenge
+	var metadata []byte
+	var category, serviceType, description sql.NullString
+	err := r.db.QueryRowContext(ctx, `
+		SELECT id, name, category, service_type, description, metadata, created_at, updated_at
+		FROM challenges
+		WHERE id = $1`, id).Scan(
+		&challenge.ID,
+		&challenge.Name,
+		&category,
+		&serviceType,
+		&description,
+		&metadata,
+		&challenge.CreatedAt,
+		&challenge.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.Challenge{}, errors.New("challenge not found")
+	}
+	if err != nil {
+		return domain.Challenge{}, err
+	}
+	if category.Valid {
+		challenge.Category = category.String
+	}
+	if serviceType.Valid {
+		challenge.ServiceType = serviceType.String
+	}
+	if description.Valid {
+		challenge.Description = description.String
+	}
+	if len(metadata) > 0 {
+		meta, err := unmarshalMap(metadata)
+		if err != nil {
+			return domain.Challenge{}, err
+		}
+		challenge.Metadata = meta
+	}
+	return challenge, nil
+}
+
+func (r *Repository) CreateChallenge(ctx context.Context, challenge domain.Challenge) (domain.Challenge, error) {
+	if strings.TrimSpace(challenge.Name) == "" {
+		return domain.Challenge{}, errors.New("challenge name required")
+	}
+	if challenge.ID == "" {
+		challenge.ID = generateID("challenge")
+	}
+	now := time.Now().UTC()
+	challenge.CreatedAt = now
+	challenge.UpdatedAt = now
+
+	metadata, err := marshalJSON(challenge.Metadata)
+	if err != nil {
+		return domain.Challenge{}, err
+	}
+
+	_, err = r.db.ExecContext(ctx, `
+		INSERT INTO challenges (id, name, category, service_type, description, metadata, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		challenge.ID,
+		challenge.Name,
+		nullString(challenge.Category),
+		nullString(challenge.ServiceType),
+		nullString(challenge.Description),
+		metadata,
+		challenge.CreatedAt,
+		challenge.UpdatedAt,
+	)
+	if err != nil {
+		return domain.Challenge{}, err
+	}
+	return challenge, nil
+}
+
+func (r *Repository) UpdateChallenge(ctx context.Context, challenge domain.Challenge) (domain.Challenge, error) {
+	if challenge.ID == "" {
+		return domain.Challenge{}, errors.New("challenge id required")
+	}
+	existing, err := r.GetChallenge(ctx, challenge.ID)
+	if err != nil {
+		return domain.Challenge{}, err
+	}
+
+	if challenge.Name != "" {
+		existing.Name = challenge.Name
+	}
+	if challenge.Category != "" {
+		existing.Category = challenge.Category
+	}
+	if challenge.ServiceType != "" {
+		existing.ServiceType = challenge.ServiceType
+	}
+	if challenge.Description != "" {
+		existing.Description = challenge.Description
+	}
+	if challenge.Metadata != nil {
+		existing.Metadata = challenge.Metadata
+	}
+
+	existing.UpdatedAt = time.Now().UTC()
+	metadata, err := marshalJSON(existing.Metadata)
+	if err != nil {
+		return domain.Challenge{}, err
+	}
+
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE challenges
+		SET name=$1, category=$2, service_type=$3, description=$4, metadata=$5, updated_at=$6
+		WHERE id=$7`,
+		existing.Name,
+		nullString(existing.Category),
+		nullString(existing.ServiceType),
+		nullString(existing.Description),
+		metadata,
+		existing.UpdatedAt,
+		existing.ID,
+	)
+	if err != nil {
+		return domain.Challenge{}, err
+	}
+	if rows, _ := res.RowsAffected(); rows == 0 {
+		return domain.Challenge{}, errors.New("challenge not found")
+	}
+	return existing, nil
+}
+
+func (r *Repository) DeleteChallenge(ctx context.Context, id string) error {
+	res, err := r.db.ExecContext(ctx, `DELETE FROM challenges WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	if rows, _ := res.RowsAffected(); rows == 0 {
+		return errors.New("challenge not found")
+	}
+	return nil
+}
+
+func (r *Repository) CreateRun(ctx context.Context, run *domain.Run) error {
+	if run == nil {
+		return errors.New("nil run")
+	}
+	if run.ID == "" {
+		run.ID = generateID("run")
+	}
+
+	_, err := r.db.ExecContext(ctx, `
+		INSERT INTO runs (id, exploit_id, exploit_revision, target_id, runner_id, status, queued_at, started_at, finished_at, log_uri, flag_id, error_message)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+		run.ID,
+		nullString(run.ExploitID),
+		nullString(run.ExploitRevision),
+		nullString(run.TargetID),
+		nullString(run.RunnerID),
+		string(run.Status),
+		nullTime(run.QueuedAt),
+		nullTime(run.StartedAt),
+		nullTime(run.FinishedAt),
+		nullString(run.LogURI),
+		nullString(run.FlagID),
+		nullString(run.ErrorMessage),
+	)
+	return err
+}
+
+func (r *Repository) UpdateRun(ctx context.Context, run *domain.Run) error {
+	if run == nil {
+		return errors.New("nil run")
+	}
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE runs
+		SET exploit_id=$1, exploit_revision=$2, target_id=$3, runner_id=$4, status=$5, queued_at=$6, started_at=$7, finished_at=$8, log_uri=$9, flag_id=$10, error_message=$11
+		WHERE id=$12`,
+		nullString(run.ExploitID),
+		nullString(run.ExploitRevision),
+		nullString(run.TargetID),
+		nullString(run.RunnerID),
+		string(run.Status),
+		nullTime(run.QueuedAt),
+		nullTime(run.StartedAt),
+		nullTime(run.FinishedAt),
+		nullString(run.LogURI),
+		nullString(run.FlagID),
+		nullString(run.ErrorMessage),
+		run.ID,
+	)
+	if err != nil {
+		return err
+	}
+	if rows, _ := res.RowsAffected(); rows == 0 {
+		return errors.New("run not found")
+	}
+	return nil
+}
+
+func (r *Repository) RunnableWork(ctx context.Context, limit int) ([]domain.RunWorkItem, error) {
+	// Scheduler logic not yet implemented for postgres backend.
+	return nil, nil
+}
+
+func (r *Repository) UpdateFlag(ctx context.Context, flag *domain.Flag) error {
+	if flag == nil {
+		return errors.New("nil flag")
+	}
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE flags
+		SET value=$1, challenge_id=$2, target_id=$3, run_id=$4, status=$5, submission_count=$6, last_submitted_at=$7
+		WHERE id=$8`,
+		flag.Value,
+		nullString(flag.ChallengeID),
+		nullString(flag.TargetID),
+		nullString(flag.RunID),
+		string(flag.Status),
+		flag.SubmissionCount,
+		nullTime(flag.LastSubmittedAt),
+		flag.ID,
+	)
+	if err != nil {
+		return err
+	}
+	if rows, _ := res.RowsAffected(); rows == 0 {
+		return errors.New("flag not found")
+	}
+	return nil
+}
+
+func (r *Repository) InsertFlag(ctx context.Context, flag *domain.Flag) error {
+	if flag == nil {
+		return errors.New("nil flag")
+	}
+	if flag.ID == "" {
+		flag.ID = generateID("flag")
+	}
+	if flag.Status == "" {
+		flag.Status = domain.FlagStatusNew
+	}
+	if flag.CreatedAt.IsZero() {
+		flag.CreatedAt = time.Now().UTC()
+	}
+	_, err := r.db.ExecContext(ctx, `
+		INSERT INTO flags (id, value, challenge_id, target_id, run_id, status, submission_count, last_submitted_at, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		ON CONFLICT (id) DO NOTHING`,
+		flag.ID,
+		flag.Value,
+		nullString(flag.ChallengeID),
+		nullString(flag.TargetID),
+		nullString(flag.RunID),
+		string(flag.Status),
+		flag.SubmissionCount,
+		nullTime(flag.LastSubmittedAt),
+		flag.CreatedAt,
+	)
+	return err
+}
+
+func (r *Repository) LogRunArtifact(ctx context.Context, runID string, uri string) error {
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE runs
+		SET log_uri=$1
+		WHERE id=$2`,
+		nullString(uri),
+		runID,
+	)
+	if err != nil {
+		return err
+	}
+	if rows, _ := res.RowsAffected(); rows == 0 {
+		return errors.New("run not found")
+	}
+	return nil
+}
+
+func (r *Repository) ListTargets(ctx context.Context) ([]domain.Target, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, challenge_id, team_name, ip, port, status, concurrency_limit, labels, last_seen_at, created_at, updated_at
+		FROM targets
+		ORDER BY created_at ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var targets []domain.Target
+	for rows.Next() {
+		var target domain.Target
+		var labels []byte
+		var lastSeen sql.NullTime
+		var challengeID sql.NullString
+		if err := rows.Scan(
+			&target.ID,
+			&challengeID,
+			&target.TeamName,
+			&target.IP,
+			&target.Port,
+			&target.Status,
+			&target.ConcurrencyLimit,
+			&labels,
+			&lastSeen,
+			&target.CreatedAt,
+			&target.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		if challengeID.Valid {
+			target.ChallengeID = challengeID.String
+		}
+		if lastSeen.Valid {
+			target.LastSeenAt = lastSeen.Time
+		}
+		if len(labels) > 0 {
+			data, err := unmarshalStringMap(labels)
+			if err != nil {
+				return nil, err
+			}
+			target.Labels = data
+		}
+		targets = append(targets, target)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return targets, nil
+}
+
+func (r *Repository) CreateTarget(ctx context.Context, target domain.Target) (domain.Target, error) {
+	if target.TeamName == "" || target.IP == "" || target.Port <= 0 {
+		return domain.Target{}, errors.New("invalid target")
+	}
+	if target.ID == "" {
+		target.ID = generateID("target")
+	}
+	now := time.Now().UTC()
+	target.CreatedAt = now
+	target.UpdatedAt = now
+	if target.ConcurrencyLimit <= 0 {
+		target.ConcurrencyLimit = 1
+	}
+	if target.Status == "" {
+		target.Status = "active"
+	}
+
+	labels, err := marshalJSON(target.Labels)
+	if err != nil {
+		return domain.Target{}, err
+	}
+
+	_, err = r.db.ExecContext(ctx, `
+		INSERT INTO targets (id, challenge_id, team_name, ip, port, status, concurrency_limit, labels, last_seen_at, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		target.ID,
+		nullString(target.ChallengeID),
+		target.TeamName,
+		target.IP,
+		target.Port,
+		target.Status,
+		target.ConcurrencyLimit,
+		labels,
+		nullTime(target.LastSeenAt),
+		target.CreatedAt,
+		target.UpdatedAt,
+	)
+	if err != nil {
+		return domain.Target{}, err
+	}
+	return target, nil
+}
+
+func (r *Repository) BulkInsertTargets(ctx context.Context, targets []domain.Target) error {
+	if len(targets) == 0 {
+		return nil
+	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	now := time.Now().UTC()
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO targets (id, challenge_id, team_name, ip, port, status, concurrency_limit, labels, last_seen_at, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, target := range targets {
+		if target.ID == "" {
+			target.ID = generateID("target")
+		}
+		if target.ConcurrencyLimit <= 0 {
+			target.ConcurrencyLimit = 1
+		}
+		if target.Status == "" {
+			target.Status = "active"
+		}
+		target.CreatedAt = now
+		target.UpdatedAt = now
+		labels, err := marshalJSON(target.Labels)
+		if err != nil {
+			return err
+		}
+		if _, err := stmt.ExecContext(ctx,
+			target.ID,
+			nullString(target.ChallengeID),
+			target.TeamName,
+			target.IP,
+			target.Port,
+			target.Status,
+			target.ConcurrencyLimit,
+			labels,
+			nullTime(target.LastSeenAt),
+			target.CreatedAt,
+			target.UpdatedAt,
+		); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+func (r *Repository) ListExploits(ctx context.Context) ([]domain.Exploit, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, challenge_id, name, description, enabled, runner_tags, schedule_weight, cooldown_seconds, last_run_at, metadata, created_at, updated_at
+		FROM exploits
+		ORDER BY created_at ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var exploits []domain.Exploit
+	for rows.Next() {
+		var exploit domain.Exploit
+		var runnerTags, metadata []byte
+		var lastRun sql.NullTime
+		var challengeID, description sql.NullString
+		var cooldownSeconds int64
+
+		if err := rows.Scan(
+			&exploit.ID,
+			&challengeID,
+			&exploit.Name,
+			&description,
+			&exploit.Enabled,
+			&runnerTags,
+			&exploit.ScheduleWeight,
+			&cooldownSeconds,
+			&lastRun,
+			&metadata,
+			&exploit.CreatedAt,
+			&exploit.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		if challengeID.Valid {
+			exploit.ChallengeID = challengeID.String
+		}
+		if description.Valid {
+			exploit.Description = description.String
+		}
+		if lastRun.Valid {
+			exploit.LastRunAt = lastRun.Time
+		}
+		if len(runnerTags) > 0 {
+			tags, err := unmarshalStringSlice(runnerTags)
+			if err != nil {
+				return nil, err
+			}
+			exploit.RunnerTags = tags
+		}
+		if len(metadata) > 0 {
+			meta, err := unmarshalMap(metadata)
+			if err != nil {
+				return nil, err
+			}
+			exploit.Metadata = meta
+		}
+		if cooldownSeconds > 0 {
+			exploit.Cooldown = time.Duration(cooldownSeconds) * time.Second
+		} else {
+			exploit.Cooldown = 0
+		}
+		exploits = append(exploits, exploit)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return exploits, nil
+}
+
+func (r *Repository) CreateExploit(ctx context.Context, exploit domain.Exploit) (domain.Exploit, error) {
+	if strings.TrimSpace(exploit.Name) == "" {
+		return domain.Exploit{}, errors.New("exploit name required")
+	}
+	if exploit.ID == "" {
+		exploit.ID = generateID("exploit")
+	}
+	now := time.Now().UTC()
+	exploit.CreatedAt = now
+	exploit.UpdatedAt = now
+	if exploit.ScheduleWeight == 0 {
+		exploit.ScheduleWeight = 1
+	}
+
+	runnerTags, err := marshalJSON(exploit.RunnerTags)
+	if err != nil {
+		return domain.Exploit{}, err
+	}
+	metadata, err := marshalJSON(exploit.Metadata)
+	if err != nil {
+		return domain.Exploit{}, err
+	}
+
+	cooldownSeconds := int(exploit.Cooldown.Seconds())
+	if cooldownSeconds < 0 {
+		cooldownSeconds = 0
+	}
+
+	_, err = r.db.ExecContext(ctx, `
+		INSERT INTO exploits (id, challenge_id, name, description, enabled, runner_tags, schedule_weight, cooldown_seconds, last_run_at, metadata, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+		exploit.ID,
+		nullString(exploit.ChallengeID),
+		exploit.Name,
+		nullString(exploit.Description),
+		exploit.Enabled,
+		runnerTags,
+		exploit.ScheduleWeight,
+		cooldownSeconds,
+		nullTime(exploit.LastRunAt),
+		metadata,
+		exploit.CreatedAt,
+		exploit.UpdatedAt,
+	)
+	if err != nil {
+		return domain.Exploit{}, err
+	}
+	return exploit, nil
+}
+
+func (r *Repository) SetExploitEnabled(ctx context.Context, exploitID string, enabled bool) error {
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE exploits
+		SET enabled=$1, updated_at=$2
+		WHERE id=$3`,
+		enabled,
+		time.Now().UTC(),
+		exploitID,
+	)
+	if err != nil {
+		return err
+	}
+	if rows, _ := res.RowsAffected(); rows == 0 {
+		return errors.New("exploit not found")
+	}
+	return nil
+}
+
+func (r *Repository) SetExploitTimeout(ctx context.Context, exploitID string, timeout time.Duration) error {
+	var metadataRaw []byte
+	err := r.db.QueryRowContext(ctx, `SELECT metadata FROM exploits WHERE id = $1`, exploitID).Scan(&metadataRaw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return errors.New("exploit not found")
+	}
+	if err != nil {
+		return err
+	}
+	meta, err := unmarshalMap(metadataRaw)
+	if err != nil {
+		return err
+	}
+	if meta == nil {
+		meta = make(map[string]any)
+	}
+	meta["timeout_seconds"] = int(timeout.Seconds())
+	metadata, err := marshalJSON(meta)
+	if err != nil {
+		return err
+	}
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE exploits
+		SET metadata=$1, updated_at=$2
+		WHERE id=$3`,
+		metadata,
+		time.Now().UTC(),
+		exploitID,
+	)
+	if err != nil {
+		return err
+	}
+	if rows, _ := res.RowsAffected(); rows == 0 {
+		return errors.New("exploit not found")
+	}
+	return nil
+}
+
+func (r *Repository) AddExploitRevision(ctx context.Context, revision domain.ExploitRevision) error {
+	if revision.ExploitID == "" {
+		return errors.New("exploit id required")
+	}
+	if revision.ID == "" {
+		revision.ID = generateID("rev")
+	}
+	if revision.CreatedAt.IsZero() {
+		revision.CreatedAt = time.Now().UTC()
+	}
+
+	command, err := marshalJSON(revision.Command)
+	if err != nil {
+		return err
+	}
+	env, err := marshalJSON(revision.Env)
+	if err != nil {
+		return err
+	}
+
+	_, err = r.db.ExecContext(ctx, `
+		INSERT INTO exploit_revisions (id, exploit_id, digest, storage_uri, command, env, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		revision.ID,
+		revision.ExploitID,
+		revision.Digest,
+		revision.StorageURI,
+		command,
+		env,
+		revision.CreatedAt,
+	)
+	return err
+}
+
+func (r *Repository) SaveExploitArtifact(ctx context.Context, revisionID string, data []byte) error {
+	if len(data) == 0 {
+		return errors.New("artifact empty")
+	}
+	_, err := r.db.ExecContext(ctx, `
+		INSERT INTO exploit_artifacts (revision_id, data)
+		VALUES ($1, $2)
+		ON CONFLICT (revision_id) DO UPDATE SET data = EXCLUDED.data`,
+		revisionID,
+		data,
+	)
+	return err
+}
+
+func (r *Repository) LatestExploitArtifact(ctx context.Context, exploitID string) ([]byte, error) {
+	var artifact []byte
+	err := r.db.QueryRowContext(ctx, `
+		SELECT a.data
+		FROM exploit_artifacts a
+		JOIN exploit_revisions r ON r.id = a.revision_id
+		WHERE r.exploit_id = $1
+		ORDER BY r.created_at DESC
+		LIMIT 1`,
+		exploitID,
+	).Scan(&artifact)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, errors.New("artifact not found")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return cloneBytes(artifact), nil
+}
+
+func (r *Repository) ListFlags(ctx context.Context) ([]domain.Flag, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, value, challenge_id, target_id, run_id, status, submission_count, last_submitted_at, created_at
+		FROM flags
+		ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var flags []domain.Flag
+	for rows.Next() {
+		var flag domain.Flag
+		var lastSubmitted sql.NullTime
+		var challengeID, targetID, runID sql.NullString
+		var status string
+		if err := rows.Scan(
+			&flag.ID,
+			&flag.Value,
+			&challengeID,
+			&targetID,
+			&runID,
+			&status,
+			&flag.SubmissionCount,
+			&lastSubmitted,
+			&flag.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		if challengeID.Valid {
+			flag.ChallengeID = challengeID.String
+		}
+		if targetID.Valid {
+			flag.TargetID = targetID.String
+		}
+		if runID.Valid {
+			flag.RunID = runID.String
+		}
+		flag.Status = domain.FlagStatus(status)
+		if lastSubmitted.Valid {
+			flag.LastSubmittedAt = lastSubmitted.Time
+		}
+		flags = append(flags, flag)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return flags, nil
+}
+
+func (r *Repository) GetFlag(ctx context.Context, id string) (domain.Flag, error) {
+	var flag domain.Flag
+	var lastSubmitted sql.NullTime
+	var challengeID, targetID, runID sql.NullString
+	var status string
+	err := r.db.QueryRowContext(ctx, `
+		SELECT id, value, challenge_id, target_id, run_id, status, submission_count, last_submitted_at, created_at
+		FROM flags
+		WHERE id = $1`,
+		id,
+	).Scan(
+		&flag.ID,
+		&flag.Value,
+		&challengeID,
+		&targetID,
+		&runID,
+		&status,
+		&flag.SubmissionCount,
+		&lastSubmitted,
+		&flag.CreatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.Flag{}, errors.New("flag not found")
+	}
+	if err != nil {
+		return domain.Flag{}, err
+	}
+	if challengeID.Valid {
+		flag.ChallengeID = challengeID.String
+	}
+	if targetID.Valid {
+		flag.TargetID = targetID.String
+	}
+	if runID.Valid {
+		flag.RunID = runID.String
+	}
+	flag.Status = domain.FlagStatus(status)
+	if lastSubmitted.Valid {
+		flag.LastSubmittedAt = lastSubmitted.Time
+	}
+	return flag, nil
+}
+
+func (r *Repository) GetFlagLogs(ctx context.Context, id string) ([]string, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT message
+		FROM flag_logs
+		WHERE flag_id = $1
+		ORDER BY created_at ASC`,
+		id,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var logs []string
+	for rows.Next() {
+		var msg string
+		if err := rows.Scan(&msg); err != nil {
+			return nil, err
+		}
+		logs = append(logs, msg)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return logs, nil
+}
+
+func (r *Repository) ListFlagAttempts(ctx context.Context, flagID string) ([]domain.SubmissionAttempt, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, flag_id, submitter_id, status_code, error, submitted_at, next_retry_at, payload
+		FROM submission_attempts
+		WHERE flag_id = $1
+		ORDER BY submitted_at ASC`,
+		flagID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var attempts []domain.SubmissionAttempt
+	for rows.Next() {
+		var attempt domain.SubmissionAttempt
+		var nextRetry sql.NullTime
+		var payload []byte
+		var submitterID, errMsg sql.NullString
+		if err := rows.Scan(
+			&attempt.ID,
+			&attempt.FlagID,
+			&submitterID,
+			&attempt.StatusCode,
+			&errMsg,
+			&attempt.SubmittedAt,
+			&nextRetry,
+			&payload,
+		); err != nil {
+			return nil, err
+		}
+		if submitterID.Valid {
+			attempt.SubmitterID = submitterID.String
+		}
+		if errMsg.Valid {
+			attempt.Error = errMsg.String
+		}
+		if nextRetry.Valid {
+			attempt.NextRetryAt = nextRetry.Time
+		}
+		if len(payload) > 0 {
+			data, err := unmarshalMap(payload)
+			if err != nil {
+				return nil, err
+			}
+			attempt.Payload = data
+		}
+		attempts = append(attempts, attempt)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return attempts, nil
+}
+
+func (r *Repository) AddFlagAttempt(ctx context.Context, flagID string, attempt domain.SubmissionAttempt) error {
+	if flagID == "" {
+		return errors.New("flag id required")
+	}
+	if attempt.ID == "" {
+		attempt.ID = generateID("attempt")
+	}
+	if attempt.SubmittedAt.IsZero() {
+		attempt.SubmittedAt = time.Now().UTC()
+	}
+	attempt.FlagID = flagID
+
+	payload, err := marshalJSON(attempt.Payload)
+	if err != nil {
+		return err
+	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO submission_attempts (id, flag_id, submitter_id, status_code, error, submitted_at, next_retry_at, payload)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		attempt.ID,
+		flagID,
+		attempt.SubmitterID,
+		attempt.StatusCode,
+		attempt.Error,
+		attempt.SubmittedAt,
+		nullTime(attempt.NextRetryAt),
+		payload,
+	); err != nil {
+		return err
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE flags
+		SET submission_count = submission_count + 1
+		WHERE id = $1`,
+		flagID,
+	); err != nil {
+		return err
+	}
+
+	logLine := fmt.Sprintf("%s status=%d %s", attempt.SubmittedAt.Format(time.RFC3339), attempt.StatusCode, attempt.Error)
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO flag_logs (flag_id, message, created_at)
+		VALUES ($1, $2, $3)`,
+		flagID,
+		logLine,
+		attempt.SubmittedAt,
+	); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+func (r *Repository) ListRuns(ctx context.Context) ([]domain.Run, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, exploit_id, exploit_revision, target_id, runner_id, status, queued_at, started_at, finished_at, log_uri, flag_id, error_message
+		FROM runs
+		ORDER BY COALESCE(queued_at, started_at, finished_at, NOW()) DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var runs []domain.Run
+	for rows.Next() {
+		var run domain.Run
+		var queued, started, finished sql.NullTime
+		var exploitID, exploitRevision, targetID, runnerID, logURI, flagID, errorMessage sql.NullString
+		var status string
+		if err := rows.Scan(
+			&run.ID,
+			&exploitID,
+			&exploitRevision,
+			&targetID,
+			&runnerID,
+			&status,
+			&queued,
+			&started,
+			&finished,
+			&logURI,
+			&flagID,
+			&errorMessage,
+		); err != nil {
+			return nil, err
+		}
+		if exploitID.Valid {
+			run.ExploitID = exploitID.String
+		}
+		if exploitRevision.Valid {
+			run.ExploitRevision = exploitRevision.String
+		}
+		if targetID.Valid {
+			run.TargetID = targetID.String
+		}
+		if runnerID.Valid {
+			run.RunnerID = runnerID.String
+		}
+		if logURI.Valid {
+			run.LogURI = logURI.String
+		}
+		if flagID.Valid {
+			run.FlagID = flagID.String
+		}
+		if errorMessage.Valid {
+			run.ErrorMessage = errorMessage.String
+		}
+		run.Status = domain.RunStatus(status)
+		if queued.Valid {
+			run.QueuedAt = queued.Time
+		}
+		if started.Valid {
+			run.StartedAt = started.Time
+		}
+		if finished.Valid {
+			run.FinishedAt = finished.Time
+		}
+		runs = append(runs, run)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return runs, nil
 }
 
 func (r *Repository) GetRun(ctx context.Context, id string) (domain.Run, error) {
-	return domain.Run{}, notImplemented()
+	var run domain.Run
+	var queued, started, finished sql.NullTime
+	var exploitID, exploitRevision, targetID, runnerID, logURI, flagID, errorMessage sql.NullString
+	var status string
+	err := r.db.QueryRowContext(ctx, `
+		SELECT id, exploit_id, exploit_revision, target_id, runner_id, status, queued_at, started_at, finished_at, log_uri, flag_id, error_message
+		FROM runs
+		WHERE id = $1`,
+		id,
+	).Scan(
+		&run.ID,
+		&exploitID,
+		&exploitRevision,
+		&targetID,
+		&runnerID,
+		&status,
+		&queued,
+		&started,
+		&finished,
+		&logURI,
+		&flagID,
+		&errorMessage,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.Run{}, errors.New("run not found")
+	}
+	if err != nil {
+		return domain.Run{}, err
+	}
+	if exploitID.Valid {
+		run.ExploitID = exploitID.String
+	}
+	if exploitRevision.Valid {
+		run.ExploitRevision = exploitRevision.String
+	}
+	if targetID.Valid {
+		run.TargetID = targetID.String
+	}
+	if runnerID.Valid {
+		run.RunnerID = runnerID.String
+	}
+	if logURI.Valid {
+		run.LogURI = logURI.String
+	}
+	if flagID.Valid {
+		run.FlagID = flagID.String
+	}
+	if errorMessage.Valid {
+		run.ErrorMessage = errorMessage.String
+	}
+	run.Status = domain.RunStatus(status)
+	if queued.Valid {
+		run.QueuedAt = queued.Time
+	}
+	if started.Valid {
+		run.StartedAt = started.Time
+	}
+	if finished.Valid {
+		run.FinishedAt = finished.Time
+	}
+	return run, nil
 }
 
 func (r *Repository) ListLogs(ctx context.Context, filter domain.LogFilter) ([]domain.LogEntry, error) {
-	return nil, notImplemented()
+	conditions := make([]string, 0, 4)
+	args := make([]any, 0, 5)
+	argPos := 1
+
+	if filter.Level != "" {
+		conditions = append(conditions, fmt.Sprintf("level = $%d", argPos))
+		args = append(args, filter.Level)
+		argPos++
+	}
+	if filter.Source != "" {
+		conditions = append(conditions, fmt.Sprintf("source = $%d", argPos))
+		args = append(args, filter.Source)
+		argPos++
+	}
+	if filter.RunID != "" {
+		conditions = append(conditions, fmt.Sprintf("run_id = $%d", argPos))
+		args = append(args, filter.RunID)
+		argPos++
+	}
+	if filter.FlagID != "" {
+		conditions = append(conditions, fmt.Sprintf("flag_id = $%d", argPos))
+		args = append(args, filter.FlagID)
+		argPos++
+	}
+
+	query := `
+		SELECT id, timestamp, level, source, message, run_id, flag_id, fields
+		FROM log_entries`
+	if len(conditions) > 0 {
+		query += " WHERE " + strings.Join(conditions, " AND ")
+	}
+	query += " ORDER BY timestamp DESC"
+
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	query += fmt.Sprintf(" LIMIT %d", limit)
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []domain.LogEntry
+	for rows.Next() {
+		var entry domain.LogEntry
+		var fields []byte
+		var runID, flagID sql.NullString
+		if err := rows.Scan(
+			&entry.ID,
+			&entry.Timestamp,
+			&entry.Level,
+			&entry.Source,
+			&entry.Message,
+			&runID,
+			&flagID,
+			&fields,
+		); err != nil {
+			return nil, err
+		}
+		if runID.Valid {
+			entry.RunID = runID.String
+		}
+		if flagID.Valid {
+			entry.FlagID = flagID.String
+		}
+		if len(fields) > 0 {
+			var data map[string]any
+			if err := json.Unmarshal(fields, &data); err != nil {
+				return nil, err
+			}
+			entry.Fields = data
+		}
+		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	slices.Reverse(entries)
+	return entries, nil
 }
 
 func (r *Repository) AppendLog(ctx context.Context, entry domain.LogEntry) error {
-	return notImplemented()
+	if entry.ID == "" {
+		entry.ID = generateID("log")
+	}
+	if entry.Timestamp.IsZero() {
+		entry.Timestamp = time.Now().UTC()
+	}
+	fields, err := marshalJSON(entry.Fields)
+	if err != nil {
+		return err
+	}
+	_, err = r.db.ExecContext(ctx, `
+		INSERT INTO log_entries (id, timestamp, level, source, message, run_id, flag_id, fields)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		entry.ID,
+		entry.Timestamp,
+		entry.Level,
+		entry.Source,
+		entry.Message,
+		nullString(entry.RunID),
+		nullString(entry.FlagID),
+		fields,
+	)
+	return err
 }
 
 func (r *Repository) ListRunners(ctx context.Context) ([]domain.Runner, error) {
-	return nil, notImplemented()
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, type, hostname, labels, max_parallel, last_heartbeat, status, registered_at
+		FROM runners
+		ORDER BY hostname ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var runners []domain.Runner
+	for rows.Next() {
+		var runner domain.Runner
+		var labels []byte
+		var lastHeartbeat sql.NullTime
+		var typ, hostname, status sql.NullString
+		if err := rows.Scan(
+			&runner.ID,
+			&typ,
+			&hostname,
+			&labels,
+			&runner.MaxParallel,
+			&lastHeartbeat,
+			&status,
+			&runner.RegisteredAt,
+		); err != nil {
+			return nil, err
+		}
+		if typ.Valid {
+			runner.Type = typ.String
+		}
+		if hostname.Valid {
+			runner.Hostname = hostname.String
+		}
+		if lastHeartbeat.Valid {
+			runner.LastHeartbeat = lastHeartbeat.Time
+		}
+		if status.Valid {
+			runner.Status = status.String
+		}
+		if len(labels) > 0 {
+			data, err := unmarshalStringMap(labels)
+			if err != nil {
+				return nil, err
+			}
+			runner.Labels = data
+		}
+		runners = append(runners, runner)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return runners, nil
 }
 
 func (r *Repository) UpsertRunner(ctx context.Context, runner domain.Runner) error {
-	return notImplemented()
+	if runner.ID == "" {
+		runner.ID = generateID("runner")
+	}
+	if runner.RegisteredAt.IsZero() {
+		runner.RegisteredAt = time.Now().UTC()
+	}
+	labels, err := marshalJSON(runner.Labels)
+	if err != nil {
+		return err
+	}
+
+	_, err = r.db.ExecContext(ctx, `
+		INSERT INTO runners (id, type, hostname, labels, max_parallel, last_heartbeat, status, registered_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		ON CONFLICT (id) DO UPDATE
+		SET type = EXCLUDED.type,
+		    hostname = EXCLUDED.hostname,
+		    labels = EXCLUDED.labels,
+		    max_parallel = EXCLUDED.max_parallel,
+		    last_heartbeat = EXCLUDED.last_heartbeat,
+		    status = EXCLUDED.status,
+		    registered_at = EXCLUDED.registered_at`,
+		runner.ID,
+		runner.Type,
+		runner.Hostname,
+		labels,
+		runner.MaxParallel,
+		nullTime(runner.LastHeartbeat),
+		runner.Status,
+		runner.RegisteredAt,
+	)
+	return err
 }

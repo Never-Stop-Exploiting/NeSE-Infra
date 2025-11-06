@@ -8,3 +8,12 @@ services:
       - "5000:5000"
     image: flagserver:latest
     pull_policy: never
+  challenge:
+    build:
+      context: ./challenge
+      dockerfile: Dockerfile
+    container_name: challenge
+    ports:
+      - "5001:5000"
+    image: challenge:latest
+    pull_policy: never
