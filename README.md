@@ -18,27 +18,42 @@ AwD Infra 以 Go + Vue3 实现一套模块化的 AwD 平台：控制面负责题
 ## 架构总览
 
 ```
-             ┌────────────┐
-             │   Web UI   │
-             └─────▲──────┘
-                   │ HTTP(S) /api
-             ┌─────┴──────┐
-             │ControlPlane│────────────┐
-             └─────▲──────┘            │
-                   │                   │
-          Postgres │                   │ Redis Streams
-                   │                   │
-             ┌─────┴──────┐       ┌───▼─────────┐
-             │ Scheduler  │──────►│ Run Queue    │
-             └────────────┘       └───▲─────────┘
-                                      │
-                                ┌─────┴─────┐
-                                │ Runner(s) │
-                                └─────▲─────┘
-                                      │ Flag Queue
-                                ┌─────┴──────────┐
-                                │ Flag Submitter │
-                                └────────────────┘
+                      ┌──────────────────┐
+                      │      Web UI      │
+                      │ (Vue + Vite)     │
+                      └────────┬─────────┘
+                               │ REST /api + future WS
+                       ┌───────▼────────┐
+        Postgres ◄────►│  Control Plane │◄────► Redis (Queues / Cache)
+                       │  (REST + Biz)  │
+                       └───┬─────────┬──┘
+                           │         │
+                           │         │ Scheduler settings / overrides
+                           │         │
+                     ┌─────▼────┐    │
+                     │Scheduler │    │
+                     │(Go loop) │    │
+                     └────┬─────┘    │
+                          │ publishes Run jobs
+                ┌─────────▼───────────┐
+                │   Redis Streams     │
+                │   (Run Queue)       │
+                └─────────▲───────────┘
+                          │ consumes
+                    ┌─────┴─────┐
+                    │ Runner(s) │───┐
+                    │ (chroot)  │   │ emits flags/logs
+                    └─────┬─────┘   │
+                          │         │
+                 ┌────────▼────────┐│
+                 │ Redis Streams   ││
+                 │  (Flag Queue)   ││
+                 └────────▲────────┘│
+                          │         │
+                    ┌─────┴────────┐│
+                    │ Flag Submitter│
+                    │ (HTTP plugin) │
+                    └───────────────┘
 ```
 
 ## 代码结构
