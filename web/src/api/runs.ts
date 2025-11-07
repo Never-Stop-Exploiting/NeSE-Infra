@@ -30,3 +30,14 @@ export async function fetchRuns(params?: { cursor?: string; limit?: number }): P
 export async function fetchRunDetail(runId: string): Promise<RunDetail | null> {
   return fallback(api.get<{ run: RunDetail }>(`${base}/${runId}`).then((res) => res.data.run), null);
 }
+
+export async function cancelRun(
+  runId: string,
+  payload?: { reason?: string }
+): Promise<RunDetail | null> {
+  const body = payload?.reason ? payload : {};
+  return fallback(
+    api.post<{ run: RunDetail }>(`${base}/${runId}/cancel`, body).then((res) => res.data.run),
+    null
+  );
+}

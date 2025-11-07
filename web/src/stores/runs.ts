@@ -1,7 +1,7 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
 import type { RunDetail, RunSummary } from "@/types";
-import { fetchRuns, fetchRunDetail } from "@/api/runs";
+import { fetchRuns, fetchRunDetail, cancelRun as cancelRunRequest } from "@/api/runs";
 
 export const useRunStore = defineStore("runs", () => {
   const runs = ref<RunSummary[]>([]);
@@ -53,5 +53,43 @@ export const useRunStore = defineStore("runs", () => {
     selectedRun.value = null;
   }
 
-  return { runs, loading, selectedRun, hasMore, refresh, loadMore, selectRun, clearSelected };
+  async function cancelRun(runId: string, reason?: string) {
+    try {
+      const updated = await cancelRunRequest(runId, reason ? { reason } : undefined);
+      if (!updated) {
+        return null;
+      }
+      runs.value = runs.value.map((run) =>
+        run.id === updated.id
+          ? {
+              ...run,
+              status: updated.status,
+              runnerId: updated.runnerId ?? run.runnerId,
+              startedAt: updated.startedAt ?? run.startedAt,
+              finishedAt: updated.finishedAt ?? run.finishedAt,
+              queuedAt: updated.queuedAt ?? run.queuedAt
+            }
+          : run
+      );
+      if (selectedRun.value?.id === updated.id) {
+        selectedRun.value = { ...selectedRun.value, ...updated };
+      }
+      return updated;
+    } catch (err) {
+      console.error("Failed to cancel run", err);
+      return null;
+    }
+  }
+
+  return {
+    runs,
+    loading,
+    selectedRun,
+    hasMore,
+    refresh,
+    loadMore,
+    selectRun,
+    clearSelected,
+    cancelRun
+  };
 });

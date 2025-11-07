@@ -25,6 +25,22 @@ type ControlPlaneClient struct {
 	log     *slog.Logger
 }
 
+// APIError captures non-2xx responses from the control plane.
+type APIError struct {
+	StatusCode int
+	Message    string
+}
+
+func (e *APIError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if strings.TrimSpace(e.Message) == "" {
+		return fmt.Sprintf("control plane error (%d)", e.StatusCode)
+	}
+	return fmt.Sprintf("control plane error (%d): %s", e.StatusCode, e.Message)
+}
+
 // NewControlPlaneClient constructs a client from runner configuration.
 func NewControlPlaneClient(cfg config.Config, log *slog.Logger) (*ControlPlaneClient, error) {
 	if cfg.Runner.ControlPlaneURL == "" {
@@ -198,5 +214,13 @@ func (c *ControlPlaneClient) post(ctx context.Context, endpoint string, payload 
 		return nil
 	}
 
-	return fmt.Errorf("unexpected status %d from control plane", resp.StatusCode)
+	respBody, _ := io.ReadAll(resp.Body)
+	message := strings.TrimSpace(string(respBody))
+	if message == "" {
+		message = http.StatusText(resp.StatusCode)
+	}
+	return &APIError{
+		StatusCode: resp.StatusCode,
+		Message:    message,
+	}
 }

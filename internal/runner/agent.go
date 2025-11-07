@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -40,6 +41,8 @@ type Agent struct {
 	baseLabels    map[string]string
 	runnerTagsSet map[string]struct{}
 }
+
+var errJobDiscard = errors.New("runner job discarded")
 
 // New constructs an Agent.
 func New(cfg config.Config, log *slog.Logger, broker queue.Broker, control *ControlPlaneClient, brokerStatus string) *Agent {
@@ -127,6 +130,13 @@ func (a *Agent) consumeLoop(ctx context.Context) error {
 				a.activeJobs.Add(1)
 				defer a.activeJobs.Add(-1)
 				if err := a.handleMessage(ctx, msgCopy); err != nil {
+					if errors.Is(err, errJobDiscard) {
+						a.log.Info("job discarded", slog.String("id", msgCopy.ID))
+						if ackErr := a.broker.Ack(ctx, a.cfg.RunQueue.Name, group, msgCopy.ID); ackErr != nil {
+							a.log.Warn("failed to ack discarded job", slog.Any("err", ackErr), slog.String("id", msgCopy.ID))
+						}
+						return
+					}
 					a.log.Error("job failed", slog.Any("err", err), slog.String("id", msgCopy.ID))
 					if err := a.broker.Nack(ctx, a.cfg.RunQueue.Name, group, msgCopy.ID, retryDelay); err != nil {
 						a.log.Warn("failed to nack message", slog.Any("err", err), slog.String("id", msgCopy.ID))
@@ -179,7 +189,18 @@ func (a *Agent) handleMessage(ctx context.Context, msg queue.Message) error {
 		return nil
 	}
 
-	a.reportRunStart(ctx, payload, runnerIdent)
+	if err := a.reportRunStart(ctx, payload, runnerIdent); err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict {
+			a.log.Info("run canceled before start",
+				slog.String("run_id", runID))
+			return errJobDiscard
+		}
+		a.log.Warn("failed to mark run started",
+			slog.String("run_id", runID),
+			slog.Any("err", err))
+		return err
+	}
 
 	runCtx, cancel := context.WithTimeout(ctx, payload.Timeout(a.cfg.Runner.DefaultTimeout))
 	defer cancel()
@@ -278,9 +299,15 @@ func (a *Agent) handleMessage(ctx context.Context, msg queue.Message) error {
 	}
 
 	if err := a.reportRunCompletion(ctx, payload, runnerIdent, result); err != nil {
-		a.log.Warn("failed to report run completion",
-			slog.String("run_id", runID),
-			slog.Any("err", err))
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict {
+			a.log.Info("run completion rejected (canceled)",
+				slog.String("run_id", runID))
+		} else {
+			a.log.Warn("failed to report run completion",
+				slog.String("run_id", runID),
+				slog.Any("err", err))
+		}
 	}
 
 	if flagValue != "" && a.controlClient == nil {
@@ -430,17 +457,16 @@ func (a *Agent) ensureRunScript(workspace string, payload jobs.JobPayload) error
 	return os.Chmod(runPath, 0o755)
 }
 
-func (a *Agent) reportRunStart(ctx context.Context, payload jobs.JobPayload, runnerID string) {
+func (a *Agent) reportRunStart(ctx context.Context, payload jobs.JobPayload, runnerID string) error {
 	if a.controlClient == nil || strings.TrimSpace(payload.RunID) == "" {
-		return
+		return nil
 	}
 	startCtx, cancel := context.WithTimeout(ctx, time.Second*5)
 	defer cancel()
 	if err := a.controlClient.MarkRunStarted(startCtx, payload.RunID, runnerID); err != nil {
-		a.log.Warn("failed to mark run started",
-			slog.String("run_id", payload.RunID),
-			slog.Any("err", err))
+		return err
 	}
+	return nil
 }
 
 func (a *Agent) reportRunCompletion(ctx context.Context, payload jobs.JobPayload, runnerID string, result RunResult) error {

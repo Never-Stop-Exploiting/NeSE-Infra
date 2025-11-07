@@ -66,7 +66,18 @@
     <article v-if="runStore.selectedRun" class="panel detail">
       <header>
         <h3>Run Detail</h3>
-        <button class="close" @click="runStore.clearSelected">Close</button>
+        <div class="detail-actions">
+          <button
+            v-if="showCancelButton"
+            class="danger"
+            type="button"
+            :disabled="canceling"
+            @click.stop="cancelSelectedRun"
+          >
+            {{ canceling ? "Processing..." : cancelActionLabel }}
+          </button>
+          <button class="close" type="button" @click="runStore.clearSelected">Close</button>
+        </div>
       </header>
       <section class="meta">
         <div>
@@ -92,13 +103,39 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { useRunStore } from "@/stores/runs";
 
 const runStore = useRunStore();
+const canceling = ref(false);
+
+const cancelActionLabel = computed(() => {
+  const status = runStore.selectedRun?.status;
+  if (status === "running") {
+    return "Terminate Run";
+  }
+  if (status === "pending") {
+    return "Remove From Queue";
+  }
+  return "";
+});
+
+const showCancelButton = computed(() => cancelActionLabel.value.length > 0);
 
 function select(id: string) {
   runStore.selectRun(id);
+}
+
+async function cancelSelectedRun() {
+  if (!runStore.selectedRun || canceling.value) {
+    return;
+  }
+  canceling.value = true;
+  try {
+    await runStore.cancelRun(runStore.selectedRun.id);
+  } finally {
+    canceling.value = false;
+  }
 }
 
 onMounted(() => {
@@ -181,6 +218,11 @@ tr.active {
   color: #facc15;
 }
 
+.status[data-status="canceled"] {
+  background: rgba(148, 163, 184, 0.3);
+  color: #cbd5f5;
+}
+
 .truncate {
   display: inline-block;
   max-width: 16ch;
@@ -199,6 +241,27 @@ tr.active {
   display: flex;
   justify-content: space-between;
   align-items: center;
+}
+
+.detail-actions {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.danger {
+  background: #f87171;
+  color: #0f172a;
+  border: none;
+  border-radius: 999px;
+  padding: 0.4rem 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.danger:disabled {
+  opacity: 0.6;
+  cursor: wait;
 }
 
 .close,

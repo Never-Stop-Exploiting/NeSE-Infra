@@ -834,20 +834,7 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 		}
 		stdout, stderr := s.collectRunOutput(r.Context(), runID)
 		writeJSON(w, http.StatusOK, map[string]any{
-			"run": map[string]any{
-				"id":           run.ID,
-				"exploitId":    run.ExploitID,
-				"targetId":     run.TargetID,
-				"runnerId":     run.RunnerID,
-				"status":       run.Status,
-				"queuedAt":     run.QueuedAt,
-				"startedAt":    run.StartedAt,
-				"finishedAt":   run.FinishedAt,
-				"errorMessage": run.ErrorMessage,
-				"flagId":       run.FlagID,
-				"stdout":       stdout,
-				"stderr":       stderr,
-			},
+			"run": marshalRunDetail(run, stdout, stderr),
 		})
 		return
 	}
@@ -858,6 +845,8 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 		s.handleRunStart(w, r, runID)
 	case "finish":
 		s.handleRunFinish(w, r, runID)
+	case "cancel":
+		s.handleRunCancel(w, r, runID)
 	default:
 		writeError(w, http.StatusNotFound, "unknown run action")
 	}
@@ -884,6 +873,14 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request, runID st
 	run, err := s.repository.GetRun(ctx, runID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "run not found")
+		return
+	}
+	if run.Status == domain.RunStatusCanceled {
+		writeError(w, http.StatusConflict, "run canceled")
+		return
+	}
+	if run.Status != domain.RunStatusPending && run.Status != domain.RunStatusRunning {
+		writeError(w, http.StatusConflict, "run already completed")
 		return
 	}
 	now := time.Now().UTC()
@@ -952,6 +949,10 @@ func (s *Server) handleRunFinish(w http.ResponseWriter, r *http.Request, runID s
 	run, err := s.repository.GetRun(ctx, runID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "run not found")
+		return
+	}
+	if run.Status == domain.RunStatusCanceled {
+		writeError(w, http.StatusConflict, "run canceled")
 		return
 	}
 
@@ -1044,6 +1045,84 @@ func (s *Server) handleRunFinish(w http.ResponseWriter, r *http.Request, runID s
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"run_id": runID, "status": run.Status})
+}
+
+func (s *Server) handleRunCancel(w http.ResponseWriter, r *http.Request, runID string) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			writeError(w, http.StatusBadRequest, "invalid payload")
+			return
+		}
+	}
+
+	ctx := r.Context()
+	run, err := s.repository.GetRun(ctx, runID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "run not found")
+		return
+	}
+
+	switch run.Status {
+	case domain.RunStatusPending, domain.RunStatusRunning:
+	default:
+		writeError(w, http.StatusConflict, "run cannot be canceled")
+		return
+	}
+
+	reason := strings.TrimSpace(req.Reason)
+	if reason == "" {
+		if run.Status == domain.RunStatusPending {
+			reason = "canceled before execution"
+		} else {
+			reason = "canceled during execution"
+		}
+	}
+
+	now := time.Now().UTC()
+	run.Status = domain.RunStatusCanceled
+	if run.StartedAt.IsZero() {
+		if !run.QueuedAt.IsZero() {
+			run.StartedAt = run.QueuedAt
+		} else {
+			run.StartedAt = now
+		}
+	}
+	run.FinishedAt = now
+	run.ErrorMessage = reason
+
+	if err := s.repository.UpdateRun(ctx, &run); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update run")
+		return
+	}
+
+	logFields := map[string]any{
+		"status": string(run.Status),
+		"reason": reason,
+	}
+	if strings.TrimSpace(run.RunnerID) != "" {
+		logFields["runnerId"] = run.RunnerID
+	}
+	if err := s.repository.AppendLog(ctx, domain.LogEntry{
+		Level:   "warn",
+		Source:  "control-plane",
+		Message: fmt.Sprintf("run %s canceled", runID),
+		RunID:   runID,
+		Fields:  logFields,
+	}); err != nil {
+		s.logger.Warn("append cancel log failed", slog.Any("err", err), slog.String("run_id", runID))
+	}
+
+	stdout, stderr := s.collectRunOutput(ctx, runID)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"run": marshalRunDetail(run, stdout, stderr),
+	})
 }
 
 func (s *Server) enqueueFlag(ctx context.Context, flag domain.Flag) {
@@ -1818,6 +1897,23 @@ func marshalLog(entry domain.LogEntry) map[string]any {
 		"runId":     entry.RunID,
 		"flagId":    entry.FlagID,
 		"fields":    entry.Fields,
+	}
+}
+
+func marshalRunDetail(run domain.Run, stdout, stderr string) map[string]any {
+	return map[string]any{
+		"id":           run.ID,
+		"exploitId":    run.ExploitID,
+		"targetId":     run.TargetID,
+		"runnerId":     run.RunnerID,
+		"status":       run.Status,
+		"queuedAt":     run.QueuedAt,
+		"startedAt":    run.StartedAt,
+		"finishedAt":   run.FinishedAt,
+		"errorMessage": run.ErrorMessage,
+		"flagId":       run.FlagID,
+		"stdout":       stdout,
+		"stderr":       stderr,
 	}
 }
 

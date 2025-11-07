@@ -91,26 +91,38 @@ func (s *Service) processMessage(ctx context.Context, msg queue.Message) error {
 	}
 
 	result := s.plugin.Submit(ctx, request)
-	status := result.StatusCode
+	if result.Status == "" {
+		result.Status = SubmissionStatusUnknown
+	}
+	statusCode := result.StatusCode
 	message := result.Message
 	if message == "" && result.Err != nil {
 		message = result.Err.Error()
 	}
-	s.log.Info("flag submitted", slog.String("flag_id", payload.FlagID), slog.Int("status", status), slog.String("message", message))
+	s.log.Info(
+		"flag submitted",
+		slog.String("flag_id", payload.FlagID),
+		slog.String("status", string(result.Status)),
+		slog.Int("status_code", statusCode),
+		slog.String("message", message),
+	)
 
 	retryAfter := time.Time{}
 	if result.RetryAfter != nil {
 		retryAfter = time.Now().Add(time.Duration(*result.RetryAfter) * time.Second)
 	}
 
-	submittedAt := s.recordAttempt(ctx, payload.FlagID, status, message, retryAfter)
+	submittedAt := s.recordAttempt(ctx, payload.FlagID, statusCode, message, retryAfter)
 
 	flag, err := s.repo.GetFlag(ctx, payload.FlagID)
 	s.log.Info("fetched flag for update", slog.String("flag_id", payload.FlagID), slog.Any("err", err))
 	if err == nil {
-		if status >= 200 && status < 300 {
+		switch result.Status {
+		case SubmissionStatusAccept:
 			flag.Status = domain.FlagStatusAccepted
-		} else {
+		case SubmissionStatusFail:
+			flag.Status = domain.FlagStatusRejected
+		default:
 			flag.Status = domain.FlagStatusRetry
 		}
 		flag.LastSubmittedAt = submittedAt
@@ -123,21 +135,25 @@ func (s *Service) processMessage(ctx context.Context, msg queue.Message) error {
 		Source:  "flag-submitter",
 		Message: fmt.Sprintf("flag %s submitted", payload.FlagID),
 		FlagID:  payload.FlagID,
-		Fields:  map[string]any{"status": status, "message": message},
+		Fields:  map[string]any{"status": string(result.Status), "status_code": statusCode, "message": message},
 	}
-	if status < 200 || status >= 300 {
+	switch result.Status {
+	case SubmissionStatusAccept:
+		// keep default info level
+	case SubmissionStatusFail:
 		logEntry.Level = "warn"
-		if result.Err != nil {
-			logEntry.Fields["error"] = result.Err.Error()
-		}
+	default:
+		logEntry.Level = "error"
+	}
+	if result.Err != nil {
+		logEntry.Fields["error"] = result.Err.Error()
 	}
 	_ = s.repo.AppendLog(ctx, logEntry)
 
-	if status >= 200 && status < 300 {
-		return nil
+	if result.Status == SubmissionStatusUnknown {
+		return fmt.Errorf("submit status unknown for flag %s", payload.FlagID)
 	}
-
-	return fmt.Errorf("submit status %d", status)
+	return nil
 }
 
 func (s *Service) recordAttempt(ctx context.Context, flagID string, status int, message string, next time.Time) time.Time {

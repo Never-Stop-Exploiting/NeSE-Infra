@@ -17,8 +17,18 @@ type SubmissionRequest struct {
 	Metadata    map[string]string
 }
 
+// SubmissionStatus captures the high-level outcome of a submission attempt.
+type SubmissionStatus string
+
+const (
+	SubmissionStatusAccept  SubmissionStatus = "accept"
+	SubmissionStatusFail    SubmissionStatus = "fail"
+	SubmissionStatusUnknown SubmissionStatus = "unknown"
+)
+
 // SubmissionResult captures plugin outcome.
 type SubmissionResult struct {
+	Status     SubmissionStatus
 	StatusCode int
 	Message    string
 	RetryAfter *int64 // seconds until retry; nil means no retry

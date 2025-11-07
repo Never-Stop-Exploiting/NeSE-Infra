@@ -56,7 +56,7 @@ export interface RunSummary {
   targetId: string;
   targetLabel?: string;
   runnerId?: string;
-  status: "pending" | "running" | "succeeded" | "failed" | "timeout";
+  status: "pending" | "running" | "succeeded" | "failed" | "timeout" | "canceled";
   queuedAt: string;
   startedAt?: string;
   finishedAt?: string;

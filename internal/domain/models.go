@@ -111,6 +111,7 @@ const (
 	RunStatusSucceeded RunStatus = "succeeded"
 	RunStatusFailed    RunStatus = "failed"
 	RunStatusTimeout   RunStatus = "timeout"
+	RunStatusCanceled  RunStatus = "canceled"
 )
 
 // Flag holds metadata about a captured flag awaiting submission.
