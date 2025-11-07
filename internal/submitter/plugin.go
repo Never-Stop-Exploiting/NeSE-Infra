@@ -21,10 +21,10 @@ type SubmissionRequest struct {
 type SubmissionStatus string
 
 const (
-	SubmissionStatusAccept    SubmissionStatus = "accept"
-	SubmissionStatusFail      SubmissionStatus = "fail"
-	SubmissionStatusDuplicate SubmissionStatus = "duplicate"
-	SubmissionStatusUnknown   SubmissionStatus = "unknown"
+	SubmissionStatusAccepted   SubmissionStatus = "accepted"
+	SubmissionStatusFailed     SubmissionStatus = "failed"
+	SubmissionStatusDuplicated SubmissionStatus = "duplicated"
+	SubmissionStatusUnknown    SubmissionStatus = "unknown"
 )
 
 // SubmissionResult captures plugin outcome.

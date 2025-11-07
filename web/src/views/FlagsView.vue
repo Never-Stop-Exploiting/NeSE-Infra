@@ -39,7 +39,7 @@
               <td>
                 <code :title="flag.value">{{ truncateFlag(flag.value) }}</code>
               </td>
-              <td><span class="status" :data-status="flag.status">{{ flag.status }}</span></td>
+              <td><span class="status" :data-status="flag.status">{{ formatStatus(flag.status) }}</span></td>
               <td>{{ flag.submissionCount }}</td>
               <td>{{ flag.challengeName || flag.challengeId || "—" }}</td>
               <td>{{ flag.targetLabel || flag.targetId || "—" }}</td>
@@ -76,7 +76,7 @@
     <article class="panel detail" v-if="selectedFlag">
       <header>
         <h3>Flag Detail</h3>
-        <span>Status: {{ selectedFlag.status }}</span>
+        <span>Status: {{ formatStatus(selectedFlag.status) }}</span>
       </header>
       <section class="detail-meta">
         <div>
@@ -166,10 +166,20 @@ const statusOptions = [
   { label: "Submitting", value: "submitting" },
   { label: "Accepted", value: "accepted" },
   { label: "Rejected", value: "rejected" },
-  { label: "Duplicate", value: "duplicate" },
+  { label: "Duplicated", value: "duplicate" },
   { label: "Retry", value: "retry" },
   { label: "Dropped", value: "dropped" }
 ];
+
+const statusTextMap: Record<string, string> = {
+  new: "New",
+  submitting: "Submitting",
+  accepted: "Accepted",
+  rejected: "Rejected",
+  duplicate: "Duplicated",
+  retry: "Retry",
+  dropped: "Dropped"
+};
 
 watch(
   () => flagStore.statusFilter,
@@ -242,6 +252,13 @@ function formatTimestamp(value?: string) {
     return value;
   }
   return date.toLocaleString();
+}
+
+function formatStatus(value?: string) {
+  if (!value) {
+    return "Unknown";
+  }
+  return statusTextMap[value] ?? value.charAt(0).toUpperCase() + value.slice(1);
 }
 
 onMounted(() => {

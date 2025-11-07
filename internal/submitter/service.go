@@ -118,11 +118,11 @@ func (s *Service) processMessage(ctx context.Context, msg queue.Message) error {
 	s.log.Info("fetched flag for update", slog.String("flag_id", payload.FlagID), slog.Any("err", err))
 	if err == nil {
 		switch result.Status {
-		case SubmissionStatusAccept:
+		case SubmissionStatusAccepted:
 			flag.Status = domain.FlagStatusAccepted
-		case SubmissionStatusDuplicate:
+		case SubmissionStatusDuplicated:
 			flag.Status = domain.FlagStatusDuplicate
-		case SubmissionStatusFail:
+		case SubmissionStatusFailed:
 			flag.Status = domain.FlagStatusRejected
 		default:
 			flag.Status = domain.FlagStatusRetry
@@ -140,11 +140,11 @@ func (s *Service) processMessage(ctx context.Context, msg queue.Message) error {
 		Fields:  map[string]any{"status": string(result.Status), "status_code": statusCode, "message": message},
 	}
 	switch result.Status {
-	case SubmissionStatusAccept:
+	case SubmissionStatusAccepted:
 		// keep default info level
-	case SubmissionStatusFail:
+	case SubmissionStatusFailed:
 		logEntry.Level = "warn"
-	case SubmissionStatusDuplicate:
+	case SubmissionStatusDuplicated:
 		logEntry.Level = "info"
 	default:
 		logEntry.Level = "error"
