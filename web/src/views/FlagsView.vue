@@ -3,7 +3,19 @@
     <article class="panel table">
       <header>
         <h2>Flags</h2>
-        <button class="refresh" @click="flagStore.load">Refresh</button>
+        <div class="actions">
+          <label class="filter">
+            <span>Status</span>
+            <select v-model="statusFilter" @change="changeFilter">
+              <option v-for="option in statusOptions" :key="option.value" :value="option.value">
+                {{ option.label }}
+              </option>
+            </select>
+          </label>
+          <button class="refresh" :disabled="flagStore.loading" @click="flagStore.refresh">
+            {{ flagStore.loading ? "Refreshing..." : "Refresh" }}
+          </button>
+        </div>
       </header>
       <div class="table-wrapper">
         <table>
@@ -24,17 +36,40 @@
               :class="{ active: selectedFlag?.id === flag.id }"
               @click="selectFlag(flag.id)"
             >
-              <td><code>{{ flag.value }}</code></td>
+              <td>
+                <code :title="flag.value">{{ truncateFlag(flag.value) }}</code>
+              </td>
               <td><span class="status" :data-status="flag.status">{{ flag.status }}</span></td>
               <td>{{ flag.submissionCount }}</td>
-              <td>{{ flag.challengeId }}</td>
-              <td>{{ flag.targetId }}</td>
+              <td>{{ flag.challengeName || flag.challengeId || "—" }}</td>
+              <td>{{ flag.targetLabel || flag.targetId || "—" }}</td>
               <td>
-                <button class="retry" @click.stop="retry(flag.id)">Retry</button>
+                <button
+                  class="retry"
+                  :disabled="retryingFlag === flag.id"
+                  @click.stop="retry(flag.id)"
+                >
+                  {{ retryingFlag === flag.id ? "Retrying..." : "Retry" }}
+                </button>
               </td>
+            </tr>
+            <tr v-if="!flagStore.flags.length && !flagStore.loading">
+              <td colspan="6" class="empty">No flags found</td>
             </tr>
           </tbody>
         </table>
+        <div class="table-actions">
+          <button
+            class="load-more"
+            type="button"
+            :disabled="flagStore.loading || !flagStore.hasMore"
+            @click="flagStore.loadMore"
+          >
+            {{
+              flagStore.loading ? "Loading..." : flagStore.hasMore ? "Load More" : "No More Results"
+            }}
+          </button>
+        </div>
       </div>
     </article>
 
@@ -43,17 +78,59 @@
         <h3>Flag Detail</h3>
         <span>Status: {{ selectedFlag.status }}</span>
       </header>
+      <section class="detail-meta">
+        <div>
+          <strong>Flag ID:</strong>
+          <span>{{ selectedFlagDetail?.id ?? selectedFlag.id }}</span>
+        </div>
+        <div>
+          <strong>Challenge:</strong>
+          <span>
+            {{ selectedFlagDetail?.challengeName ?? selectedFlag.challengeName ?? "Unknown" }}
+            <small class="meta-id">({{ selectedFlagDetail?.challengeId ?? selectedFlag.challengeId }})</small>
+          </span>
+        </div>
+        <div>
+          <strong>Target:</strong>
+          <span>
+            {{ selectedFlagDetail?.targetLabel ?? selectedFlag.targetLabel ?? "Unknown" }}
+            <small class="meta-id">({{ selectedFlagDetail?.targetId ?? selectedFlag.targetId }})</small>
+          </span>
+        </div>
+        <div>
+          <strong>Run ID:</strong>
+          <span>{{ selectedFlagDetail?.runId ?? selectedFlag.runId ?? "—" }}</span>
+        </div>
+        <div>
+          <strong>Created:</strong>
+          <span>{{ formatTimestamp(selectedFlagDetail?.createdAt ?? selectedFlag.createdAt) }}</span>
+        </div>
+        <div>
+          <strong>Last Submitted:</strong>
+          <span>{{ formatTimestamp(selectedFlagDetail?.lastSubmittedAt ?? selectedFlag.lastSubmittedAt) }}</span>
+        </div>
+      </section>
+      <section>
+        <h4>Flag Value</h4>
+        <pre class="flag-value">{{ selectedFlagDetail?.value ?? selectedFlag.value }}</pre>
+      </section>
       <section>
         <h4>Submission Attempts</h4>
-        <ul>
-          <li v-for="attempt in selectedFlag.attempts" :key="attempt.id">
+        <p v-if="detailLoading">Loading attempts…</p>
+        <p v-else-if="detailError" class="error">{{ detailError }}</p>
+        <ul v-else>
+          <li
+            v-for="attempt in selectedFlagDetail?.attempts ?? []"
+            :key="attempt.id ?? attempt.submittedAt"
+          >
             <div>
-              <strong>{{ attempt.submitterId }}</strong>
-              <span>#{{ attempt.statusCode }}</span>
+              <strong>{{ attempt.submitterId ?? "unknown" }}</strong>
+              <span>#{{ attempt.statusCode ?? 0 }}</span>
             </div>
-            <small>{{ attempt.submittedAt }}</small>
+            <small>{{ formatTimestamp(attempt.submittedAt) }}</small>
             <p v-if="attempt.error">{{ attempt.error }}</p>
           </li>
+          <li v-if="!selectedFlagDetail?.attempts?.length" class="hint">No attempts recorded.</li>
         </ul>
       </section>
       <section>
@@ -65,26 +142,105 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { useFlagStore } from "@/stores/flags";
+import type { FlagRecord } from "@/types";
+import { fetchFlagDetail } from "@/api/flags";
 
 const flagStore = useFlagStore();
 const selectedFlagId = ref<string | null>(null);
+const selectedFlagDetail = ref<FlagRecord | null>(null);
+const detailLoading = ref(false);
+const detailError = ref<string | null>(null);
 const logOutput = ref("Select a flag to view logs");
+const statusFilter = ref("");
+const retryingFlag = ref<string | null>(null);
 
 const selectedFlag = computed(() =>
   flagStore.flags.find((flag) => flag.id === selectedFlagId.value)
 );
 
+const statusOptions = [
+  { label: "All", value: "" },
+  { label: "New", value: "new" },
+  { label: "Submitting", value: "submitting" },
+  { label: "Accepted", value: "accepted" },
+  { label: "Rejected", value: "rejected" },
+  { label: "Retry", value: "retry" },
+  { label: "Dropped", value: "dropped" }
+];
+
+watch(
+  () => flagStore.statusFilter,
+  (value) => {
+    statusFilter.value = value;
+  },
+  { immediate: true }
+);
+
 async function selectFlag(id: string) {
+  if (selectedFlagId.value === id && selectedFlagDetail.value) {
+    return;
+  }
   selectedFlagId.value = id;
-  const logs = await flagStore.loadLogs(id);
-  logOutput.value = logs.join("\n");
+  await loadFlagDetail(id);
+}
+
+async function loadFlagDetail(id: string) {
+  detailLoading.value = true;
+  detailError.value = null;
+  selectedFlagDetail.value = null;
+  logOutput.value = "Loading logs…";
+  try {
+    const detail = await fetchFlagDetail(id);
+    if (detail) {
+      selectedFlagDetail.value = detail;
+    }
+    const logs = await flagStore.loadLogs(id);
+    logOutput.value = logs.length ? logs.join("\n") : "No logs recorded.";
+  } catch (err) {
+    console.error(err);
+    detailError.value = "Failed to load flag detail";
+    logOutput.value = "Failed to load logs.";
+  } finally {
+    detailLoading.value = false;
+  }
 }
 
 async function retry(id: string) {
-  await flagStore.retry(id);
-  await flagStore.load();
+  if (retryingFlag.value) {
+    return;
+  }
+  retryingFlag.value = id;
+  try {
+    await flagStore.retry(id);
+    if (selectedFlagId.value === id) {
+      await loadFlagDetail(id);
+    }
+  } finally {
+    retryingFlag.value = null;
+  }
+}
+
+function truncateFlag(value: string, length = 24) {
+  if (!value) return "";
+  return value.length > length ? `${value.slice(0, length)}…` : value;
+}
+
+async function changeFilter() {
+  await flagStore.setStatusFilter(statusFilter.value);
+  selectedFlagId.value = null;
+  selectedFlagDetail.value = null;
+  logOutput.value = "Select a flag to view logs";
+}
+
+function formatTimestamp(value?: string) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleString();
 }
 
 onMounted(() => {
@@ -107,6 +263,28 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 1rem;
+}
+
+.actions {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.filter {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.85rem;
+  color: #94a3b8;
+}
+
+.filter select {
+  background: rgba(15, 23, 42, 0.85);
+  color: #f8fafc;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  border-radius: 999px;
+  padding: 0.35rem 0.9rem;
 }
 
 .table-wrapper {
@@ -154,6 +332,20 @@ tr.active {
   cursor: pointer;
 }
 
+.table-actions {
+  margin-top: 0.75rem;
+  display: flex;
+  justify-content: center;
+}
+
+.load-more {
+  background: rgba(148, 163, 184, 0.15);
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  color: #e2e8f0;
+  padding: 0.4rem 1.2rem;
+  border-radius: 999px;
+}
+
 .status {
   text-transform: capitalize;
   padding: 0.2rem 0.6rem;
@@ -178,6 +370,63 @@ tr.active {
   color: #f87171;
 }
 
+.detail header {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.35rem;
+}
+
+.detail header span {
+  color: rgba(148, 163, 184, 0.9);
+}
+
+.detail-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 0.85rem;
+  font-size: 0.9rem;
+  color: #cbd5f5;
+}
+
+.detail-meta strong {
+  color: #94a3b8;
+}
+
+.detail-meta div {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.75rem;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.6);
+  min-height: 80px;
+}
+
+.meta-id {
+  margin-left: 0.25rem;
+  color: rgba(148, 163, 184, 0.8);
+  font-size: 0.78rem;
+}
+
+.detail-meta span,
+.detail-meta small {
+  word-break: break-all;
+}
+
+.flag-value {
+  background: rgba(15, 23, 42, 0.9);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 8px;
+  padding: 0.75rem;
+  color: #f8fafc;
+  font-family: "JetBrains Mono", Menlo, monospace;
+  max-height: 180px;
+  overflow: auto;
+  word-break: break-all;
+}
+
 .detail textarea {
   width: 100%;
   padding: 0.75rem;
@@ -199,6 +448,12 @@ tr.active {
 .attempts-table td {
   padding: 0.5rem;
   border-bottom: 1px solid rgba(148, 163, 184, 0.15);
+}
+
+.empty {
+  text-align: center;
+  padding: 1rem;
+  color: rgba(148, 163, 184, 0.8);
 }
 
 @media (max-width: 960px) {

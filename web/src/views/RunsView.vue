@@ -81,9 +81,19 @@
       </header>
       <section class="meta">
         <div>
-          <strong>Exploit:</strong> <span>{{ runStore.selectedRun.exploitName ?? runStore.selectedRun.exploitId }}</span>
+          <strong>Exploit:</strong>
+          <span>
+            {{ runStore.selectedRun.exploitName ?? runStore.selectedRun.exploitId }}
+            <small v-if="runStore.selectedRun.exploitName" class="meta-id">({{ runStore.selectedRun.exploitId }})</small>
+          </span>
         </div>
-        <div><strong>Target:</strong> <span>{{ runStore.selectedRun.targetLabel ?? runStore.selectedRun.targetId }}</span></div>
+        <div>
+          <strong>Target:</strong>
+          <span>
+            {{ runStore.selectedRun.targetLabel ?? runStore.selectedRun.targetId }}
+            <small v-if="runStore.selectedRun.targetLabel" class="meta-id">({{ runStore.selectedRun.targetId }})</small>
+          </span>
+        </div>
         <div><strong>Status:</strong> <span class="status" :data-status="runStore.selectedRun.status">{{ runStore.selectedRun.status }}</span></div>
         <div><strong>Runner:</strong> <span>{{ runStore.selectedRun.runnerId ?? "not assigned" }}</span></div>
         <div><strong>Started:</strong> <span>{{ runStore.selectedRun.startedAt ?? "-" }}</span></div>
@@ -93,6 +103,49 @@
           <strong>Flag:</strong>
           <span class="flag-value">{{ runStore.selectedRun.flagValue }}</span>
           <small class="hint">Captured via {{ flagSourceLabel }}</small>
+        </div>
+        <div v-if="runStore.selectedRun.flagId" class="flag-panel">
+          <button type="button" class="ghost" @click="toggleFlagPanel">
+            {{ flagPanelOpen ? "Hide Flag Submission" : "View Flag Submission" }}
+          </button>
+          <div v-if="flagPanelOpen" class="flag-panel-body">
+            <p v-if="flagLoading">Loading flag details…</p>
+            <p v-else-if="flagError" class="error">{{ flagError }}</p>
+            <div v-else-if="flagDetail">
+              <div class="flag-status-row">
+                <div>
+                  <strong>Status:</strong>
+                  <span class="flag-status" :data-status="flagDetail.status">{{ flagStatusText }}</span>
+                  <small class="hint">Attempts: {{ flagDetail.submissionCount }}</small>
+                </div>
+                <button
+                  type="button"
+                  class="ghost danger"
+                  :disabled="flagRetrying"
+                  @click="retryFlagSubmission"
+                >
+                  {{ flagRetrying ? "Requeueing..." : "Retry Submission" }}
+                </button>
+              </div>
+              <div class="attempts">
+                <strong>Attempt History</strong>
+                <ul class="attempt-list" v-if="flagAttempts.length">
+                  <li v-for="attempt in flagAttempts" :key="attempt.id ?? attempt.submittedAt">
+                    <div class="attempt-main">
+                      <span>{{ formatTimestamp(attempt.submittedAt) || "Unknown time" }}</span>
+                      <span class="code">HTTP {{ attempt.statusCode || 0 }}</span>
+                    </div>
+                    <div class="attempt-meta">
+                      <span>Submitter: {{ attempt.submitterId ?? "unknown" }}</span>
+                      <span v-if="attempt.error">Error: {{ attempt.error }}</span>
+                      <span v-else>No error</span>
+                    </div>
+                  </li>
+                </ul>
+                <p v-else class="hint">No attempts recorded yet.</p>
+              </div>
+            </div>
+          </div>
         </div>
       </section>
       <section class="stdout">
@@ -108,11 +161,18 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { useRunStore } from "@/stores/runs";
+import type { FlagRecord } from "@/types";
+import { fetchFlagDetail, retryFlag as apiRetryFlag } from "@/api/flags";
 
 const runStore = useRunStore();
 const canceling = ref(false);
+const flagPanelOpen = ref(false);
+const flagDetail = ref<FlagRecord | null>(null);
+const flagLoading = ref(false);
+const flagError = ref<string | null>(null);
+const flagRetrying = ref(false);
 
 const cancelActionLabel = computed(() => {
   const status = runStore.selectedRun?.status;
@@ -135,7 +195,9 @@ const showFlagDetail = computed(
     )
 );
 const flagSourceLabel = computed(() => {
-  const source = runStore.selectedRun?.flagSource?.toLowerCase();
+  const source =
+    flagDetail.value?.flagSource?.toLowerCase() ??
+    runStore.selectedRun?.flagSource?.toLowerCase();
   if (source === "file") {
     return "flag file";
   }
@@ -144,6 +206,18 @@ const flagSourceLabel = computed(() => {
   }
   return "unknown source";
 });
+const flagStatusText = computed(() => flagDetail.value?.status ?? "unknown");
+const flagAttempts = computed(() => flagDetail.value?.attempts ?? []);
+
+watch(
+  () => runStore.selectedRun?.id,
+  () => {
+    flagPanelOpen.value = false;
+    flagDetail.value = null;
+    flagError.value = null;
+    flagRetrying.value = false;
+  }
+);
 
 function select(id: string) {
   runStore.selectRun(id);
@@ -159,6 +233,60 @@ async function cancelSelectedRun() {
   } finally {
     canceling.value = false;
   }
+}
+
+async function ensureFlagDetailLoaded() {
+  if (!runStore.selectedRun?.flagId || flagDetail.value || flagLoading.value) {
+    return;
+  }
+  flagLoading.value = true;
+  flagError.value = null;
+  try {
+    flagDetail.value = await fetchFlagDetail(runStore.selectedRun.flagId);
+  } catch (err) {
+    console.error(err);
+    flagError.value = "Failed to load flag details";
+  } finally {
+    flagLoading.value = false;
+  }
+}
+
+function toggleFlagPanel() {
+  if (!runStore.selectedRun?.flagId) {
+    return;
+  }
+  flagPanelOpen.value = !flagPanelOpen.value;
+  if (flagPanelOpen.value) {
+    ensureFlagDetailLoaded();
+  }
+}
+
+async function retryFlagSubmission() {
+  if (!runStore.selectedRun?.flagId || flagRetrying.value) {
+    return;
+  }
+  flagRetrying.value = true;
+  try {
+    await apiRetryFlag(runStore.selectedRun.flagId);
+    flagDetail.value = null;
+    await ensureFlagDetailLoaded();
+  } catch (err) {
+    console.error(err);
+    flagError.value = "Failed to retry flag submission";
+  } finally {
+    flagRetrying.value = false;
+  }
+}
+
+function formatTimestamp(value?: string) {
+  if (!value) {
+    return "";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleString();
 }
 
 onMounted(() => {
@@ -302,6 +430,105 @@ tr.active {
 .hint {
   color: rgba(148, 163, 184, 0.8);
   font-size: 0.8rem;
+}
+
+.meta-id {
+  margin-left: 0.35rem;
+  color: rgba(148, 163, 184, 0.8);
+  font-size: 0.75rem;
+}
+
+.flag-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.flag-panel-body {
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 10px;
+  padding: 0.75rem 1rem;
+  background: rgba(15, 23, 42, 0.6);
+}
+
+.flag-status-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 0.5rem;
+}
+
+.flag-status {
+  text-transform: capitalize;
+  margin-left: 0.5rem;
+}
+
+.attempts {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.attempt-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.attempt-list li {
+  border: 1px solid rgba(148, 163, 184, 0.15);
+  border-radius: 8px;
+  padding: 0.6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.attempt-main {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.9rem;
+}
+
+.attempt-meta {
+  font-size: 0.8rem;
+  color: rgba(226, 232, 240, 0.8);
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.code {
+  font-family: "JetBrains Mono", Menlo, monospace;
+  font-size: 0.8rem;
+}
+
+.error {
+  color: #f87171;
+}
+
+.ghost {
+  background: transparent;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  color: #e2e8f0;
+  padding: 0.4rem 0.9rem;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.ghost.danger {
+  border-color: rgba(248, 113, 113, 0.5);
+  color: #f87171;
+}
+
+.ghost:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .close,

@@ -4,6 +4,9 @@ services:
       context: ./flagserver
       dockerfile: Dockerfile
     container_name: flagserver
+    environment:
+      - time=5
+      - p=0.5
     ports:
       - "5000:5000"
     image: flagserver:latest

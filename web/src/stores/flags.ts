@@ -8,12 +8,39 @@ export const useFlagStore = defineStore("flags", () => {
   const loading = ref(false);
   const error = ref<string | null>(null);
   const logCache = ref<Record<string, string[]>>({});
+  const nextCursor = ref<string | null>(null);
+  const hasMore = ref(true);
+  const statusFilter = ref<string>("");
+
+  async function refresh() {
+    flags.value = [];
+    nextCursor.value = null;
+    hasMore.value = true;
+    await loadMore();
+  }
 
   async function load() {
+    await refresh();
+  }
+
+  async function loadMore() {
+    if (loading.value || !hasMore.value) {
+      return;
+    }
     loading.value = true;
     error.value = null;
     try {
-      flags.value = await fetchFlags();
+      const response = await fetchFlags({
+        status: statusFilter.value || undefined,
+        cursor: nextCursor.value || undefined
+      });
+      if (!nextCursor.value) {
+        flags.value = response.items;
+      } else {
+        flags.value = [...flags.value, ...response.items];
+      }
+      nextCursor.value = response.nextCursor ?? null;
+      hasMore.value = !!nextCursor.value;
     } catch (err) {
       error.value = "Failed to load flags";
       console.error(err);
@@ -22,10 +49,18 @@ export const useFlagStore = defineStore("flags", () => {
     }
   }
 
+  async function setStatusFilter(status: string) {
+    if (statusFilter.value === status) {
+      return;
+    }
+    statusFilter.value = status;
+    await refresh();
+  }
+
   async function retry(id: string) {
     await retryFlag(id);
-    await load();
     delete logCache.value[id];
+    await refresh();
   }
 
   async function loadLogs(id: string) {
@@ -37,5 +72,17 @@ export const useFlagStore = defineStore("flags", () => {
     return logs;
   }
 
-  return { flags, loading, error, load, retry, loadLogs };
+  return {
+    flags,
+    loading,
+    error,
+    hasMore,
+    statusFilter,
+    load,
+    refresh,
+    loadMore,
+    setStatusFilter,
+    retry,
+    loadLogs
+  };
 });
