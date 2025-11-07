@@ -94,22 +94,24 @@ type runStartRequest struct {
 }
 
 type runFinishRequest struct {
-	Secret    string `json:"secret"`
-	RunnerID  string `json:"runnerId"`
-	Status    string `json:"status"`
-	Error     string `json:"error,omitempty"`
-	FlagValue string `json:"flagValue,omitempty"`
-	Stdout    string `json:"stdout,omitempty"`
-	Stderr    string `json:"stderr,omitempty"`
+	Secret     string `json:"secret"`
+	RunnerID   string `json:"runnerId"`
+	Status     string `json:"status"`
+	Error      string `json:"error,omitempty"`
+	FlagValue  string `json:"flagValue,omitempty"`
+	FlagSource string `json:"flagSource,omitempty"`
+	Stdout     string `json:"stdout,omitempty"`
+	Stderr     string `json:"stderr,omitempty"`
 }
 
 // RunResult communicates the final status of an exploit execution.
 type RunResult struct {
-	Status    string
-	Error     string
-	FlagValue string
-	Stdout    string
-	Stderr    string
+	Status     string
+	Error      string
+	FlagValue  string
+	FlagSource string
+	Stdout     string
+	Stderr     string
 }
 
 func (c *ControlPlaneClient) RegisterRunner(ctx context.Context, req registerRunnerRequest) error {
@@ -139,15 +141,63 @@ func (c *ControlPlaneClient) CompleteRun(ctx context.Context, runID string, runn
 		return fmt.Errorf("control plane client not configured")
 	}
 	req := runFinishRequest{
-		RunnerID:  runnerID,
-		Status:    result.Status,
-		Error:     result.Error,
-		FlagValue: result.FlagValue,
-		Stdout:    result.Stdout,
-		Stderr:    result.Stderr,
-		Secret:    c.secret,
+		RunnerID:   runnerID,
+		Status:     result.Status,
+		Error:      result.Error,
+		FlagValue:  result.FlagValue,
+		FlagSource: result.FlagSource,
+		Stdout:     result.Stdout,
+		Stderr:     result.Stderr,
+		Secret:     c.secret,
 	}
 	return c.post(ctx, fmt.Sprintf("/api/v1/runs/%s/finish", strings.TrimSpace(runID)), req)
+}
+
+// RunInfo represents minimal run metadata fetched from the control plane.
+type RunInfo struct {
+	ID       string `json:"id"`
+	Status   string `json:"status"`
+	RunnerID string `json:"runnerId"`
+}
+
+func (c *ControlPlaneClient) GetRun(ctx context.Context, runID string) (RunInfo, error) {
+	if c.baseURL == nil {
+		return RunInfo{}, fmt.Errorf("control plane client not configured")
+	}
+	u := *c.baseURL
+	rel := strings.TrimPrefix(fmt.Sprintf("/api/v1/runs/%s", strings.TrimSpace(runID)), "/")
+	u.Path = path.Join(c.baseURL.Path, rel)
+	if !strings.HasPrefix(u.Path, "/") {
+		u.Path = "/" + u.Path
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return RunInfo{}, fmt.Errorf("create request: %w", err)
+	}
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return RunInfo{}, fmt.Errorf("perform request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(resp.Body)
+		message := strings.TrimSpace(string(respBody))
+		if message == "" {
+			message = http.StatusText(resp.StatusCode)
+		}
+		return RunInfo{}, &APIError{StatusCode: resp.StatusCode, Message: message}
+	}
+
+	var payload struct {
+		Run RunInfo `json:"run"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return RunInfo{}, fmt.Errorf("decode run payload: %w", err)
+	}
+	return payload.Run, nil
 }
 
 func (c *ControlPlaneClient) DownloadArtifact(ctx context.Context, artifactPath string) ([]byte, error) {

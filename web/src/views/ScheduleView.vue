@@ -21,14 +21,15 @@
           Scheduler {{ isEnabled ? "Active" : "Paused" }}
         </p>
         <label>
-          Round Interval (minutes)
+          Round Interval (seconds)
           <input
-            v-model.number="settingsForm.roundIntervalMinutes"
+            v-model.number="settingsForm.roundIntervalSeconds"
             type="number"
             min="1"
             required
             :disabled="savingSettings"
           />
+          <small class="hint">≈ {{ roundIntervalPreview }}</small>
         </label>
         <label>
           Max Dispatch Batch
@@ -149,7 +150,7 @@ const { settings, groupedTargets, loading, savingSettings, updatingTargets, erro
   storeToRefs(schedulerStore);
 
 const settingsForm = reactive({
-  roundIntervalMinutes: 5,
+  roundIntervalSeconds: 300,
   maxDispatchBatch: 50
 });
 
@@ -159,7 +160,11 @@ watch(
   settings,
   (value) => {
     if (value) {
-      settingsForm.roundIntervalMinutes = value.roundIntervalMinutes;
+      if (value.roundIntervalSeconds && value.roundIntervalSeconds > 0) {
+        settingsForm.roundIntervalSeconds = value.roundIntervalSeconds;
+      } else {
+        settingsForm.roundIntervalSeconds = Math.max(value.roundIntervalMinutes || 0, 1) * 60;
+      }
       settingsForm.maxDispatchBatch = value.maxDispatchBatch;
     }
   },
@@ -192,10 +197,28 @@ function isTargetUpdating(id: string) {
   return !!updatingTargets.value[id];
 }
 
+const roundIntervalPreview = computed(() => {
+  const seconds = Math.max(0, Number(settingsForm.roundIntervalSeconds) || 0);
+  if (seconds === 0) {
+    return "0 seconds";
+  }
+  if (seconds < 60) {
+    return `${seconds} second${seconds === 1 ? "" : "s"}`;
+  }
+  const minutes = seconds / 60;
+  const formatted = minutes >= 10 ? minutes.toFixed(1) : minutes.toFixed(2);
+  return `${formatted} minute${minutes === 1 ? "" : "s"}`;
+});
+
 async function handleSaveSettings() {
   try {
+    const intervalSeconds = Math.max(
+      1,
+      Math.round(Number(settingsForm.roundIntervalSeconds) || 0)
+    );
+    settingsForm.roundIntervalSeconds = intervalSeconds;
     await schedulerStore.saveSettings({
-      roundIntervalMinutes: settingsForm.roundIntervalMinutes,
+      roundIntervalSeconds: intervalSeconds,
       maxDispatchBatch: settingsForm.maxDispatchBatch
     });
   } catch (err) {
@@ -321,6 +344,11 @@ label {
   flex-direction: column;
   gap: 0.4rem;
   font-size: 0.9rem;
+}
+
+.hint {
+  color: rgba(148, 163, 184, 0.8);
+  font-size: 0.8rem;
 }
 
 input[type="number"] {

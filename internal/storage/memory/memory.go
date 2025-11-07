@@ -396,6 +396,50 @@ func (r *Repository) CreateTarget(ctx context.Context, target domain.Target) (do
 	return target, ctx.Err()
 }
 
+func (r *Repository) UpdateTarget(ctx context.Context, target domain.Target) (domain.Target, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	existing, ok := r.targets[target.ID]
+	if !ok {
+		return domain.Target{}, errors.New("target not found")
+	}
+	if strings.TrimSpace(target.TeamName) != "" {
+		existing.TeamName = target.TeamName
+	}
+	if strings.TrimSpace(target.IP) != "" {
+		existing.IP = target.IP
+	}
+	if target.Port > 0 {
+		existing.Port = target.Port
+	}
+	if strings.TrimSpace(target.Status) != "" {
+		existing.Status = target.Status
+	}
+	if target.ConcurrencyLimit > 0 {
+		existing.ConcurrencyLimit = target.ConcurrencyLimit
+	}
+	if target.Labels != nil {
+		existing.Labels = target.Labels
+	}
+	if target.ChallengeID != "" {
+		existing.ChallengeID = target.ChallengeID
+	}
+	existing.UpdatedAt = time.Now().UTC()
+	r.targets[target.ID] = existing
+	return existing, ctx.Err()
+}
+
+func (r *Repository) DeleteTarget(ctx context.Context, id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.targets[id]; !ok {
+		return errors.New("target not found")
+	}
+	delete(r.targets, id)
+	delete(r.overrides, id)
+	return ctx.Err()
+}
+
 func (r *Repository) BulkInsertTargets(ctx context.Context, targets []domain.Target) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

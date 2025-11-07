@@ -67,6 +67,8 @@ export interface RunDetail extends RunSummary {
   stderr?: string;
   flagId?: string;
   errorMessage?: string;
+  flagValue?: string;
+  flagSource?: string;
 }
 
 export interface FlagRecord {

@@ -16,7 +16,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -88,7 +87,7 @@ func (a *Agent) Run(ctx context.Context) error {
 
 func (a *Agent) consumeLoop(ctx context.Context) error {
 	group := runnerGroup(a.cfg.Runner.Type)
-	count := max(1, a.cfg.Runner.MaxParallelJobs)
+	maxParallel := max(1, a.cfg.Runner.MaxParallelJobs)
 	block := a.cfg.Runner.HeartbeatInterval * 2
 	if block <= 0 {
 		block = time.Second * 20
@@ -99,6 +98,8 @@ func (a *Agent) consumeLoop(ctx context.Context) error {
 		retryDelay = time.Second * 5
 	}
 
+	sema := make(chan struct{}, maxParallel)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -106,7 +107,13 @@ func (a *Agent) consumeLoop(ctx context.Context) error {
 		default:
 		}
 
-		messages, err := a.broker.Claim(ctx, a.cfg.RunQueue.Name, group, runnerID(a.cfg.Runner.ID), count, block)
+		available := maxParallel - len(sema)
+		if available <= 0 {
+			time.Sleep(time.Millisecond * 50)
+			continue
+		}
+
+		messages, err := a.broker.Claim(ctx, a.cfg.RunQueue.Name, group, runnerID(a.cfg.Runner.ID), available, block)
 		if err != nil {
 			if errors.Is(err, queue.ErrNoMessages) {
 				continue
@@ -116,15 +123,10 @@ func (a *Agent) consumeLoop(ctx context.Context) error {
 			continue
 		}
 
-		sema := make(chan struct{}, count)
-		var wg sync.WaitGroup
-
 		for _, message := range messages {
 			msgCopy := message
-			wg.Add(1)
 			sema <- struct{}{}
 			go func() {
-				defer wg.Done()
 				defer func() { <-sema }()
 				a.log.Debug("received job", slog.String("id", msgCopy.ID))
 				a.activeJobs.Add(1)
@@ -148,8 +150,6 @@ func (a *Agent) consumeLoop(ctx context.Context) error {
 				}
 			}()
 		}
-
-		wg.Wait()
 	}
 }
 
@@ -205,6 +205,11 @@ func (a *Agent) handleMessage(ctx context.Context, msg queue.Message) error {
 	runCtx, cancel := context.WithTimeout(ctx, payload.Timeout(a.cfg.Runner.DefaultTimeout))
 	defer cancel()
 
+	var remoteCanceled atomic.Bool
+	if a.controlClient != nil && strings.TrimSpace(runID) != "" {
+		go a.monitorRunCancellation(runCtx, payload.RunID, cancel, &remoteCanceled)
+	}
+
 	workspace, relPath, err := a.prepareWorkspace(payload.RunID, artifact)
 	a.log.Info("workspace prepared",
 		slog.String("run_id", runID),
@@ -247,12 +252,17 @@ func (a *Agent) handleMessage(ctx context.Context, msg queue.Message) error {
 
 	stdout, stderr, execErr := a.execute(runCtx, relPath, payload.TargetIP, payload.TargetPort)
 	if execErr != nil {
-		a.log.Warn("exploit execution failed",
-			slog.String("run_id", runID),
-			slog.Any("err", execErr))
+		if errors.Is(execErr, context.Canceled) && remoteCanceled.Load() {
+			a.log.Info("run canceled by control plane",
+				slog.String("run_id", runID))
+		} else {
+			a.log.Warn("exploit execution failed",
+				slog.String("run_id", runID),
+				slog.Any("err", execErr))
+		}
 	}
 
-	flagValue, flagErr := a.extractFlag(workspace, stdout, payload)
+	flagValue, flagSource, flagErr := a.extractFlag(workspace, stdout, payload)
 	if flagErr != nil {
 		a.log.Warn("flag extraction failed",
 			slog.String("run_id", runID),
@@ -260,7 +270,8 @@ func (a *Agent) handleMessage(ctx context.Context, msg queue.Message) error {
 	} else {
 		a.log.Info("flag captured",
 			slog.String("run_id", runID),
-			slog.String("flag", flagValue))
+			slog.String("flag", flagValue),
+			slog.String("source", flagSource))
 	}
 
 	if len(stderr) > 0 {
@@ -291,11 +302,17 @@ func (a *Agent) handleMessage(ctx context.Context, msg queue.Message) error {
 	}
 
 	result := RunResult{
-		Status:    status,
-		Error:     errorMessage,
-		FlagValue: flagValue,
-		Stdout:    trimOutputString(stdout),
-		Stderr:    trimOutputString(stderr),
+		Status:     status,
+		Error:      errorMessage,
+		FlagValue:  flagValue,
+		FlagSource: flagSource,
+		Stdout:     trimOutputString(stdout),
+		Stderr:     trimOutputString(stderr),
+	}
+
+	if remoteCanceled.Load() {
+		a.log.Info("skip completion report for canceled run", slog.String("run_id", runID))
+		return nil
 	}
 
 	if err := a.reportRunCompletion(ctx, payload, runnerIdent, result); err != nil {
@@ -478,6 +495,45 @@ func (a *Agent) reportRunCompletion(ctx context.Context, payload jobs.JobPayload
 	return a.controlClient.CompleteRun(finishCtx, payload.RunID, runnerID, result)
 }
 
+func (a *Agent) monitorRunCancellation(ctx context.Context, runID string, cancel context.CancelFunc, canceled *atomic.Bool) {
+	if a.controlClient == nil || strings.TrimSpace(runID) == "" {
+		return
+	}
+	interval := time.Second
+	if a.cfg.Runner.HeartbeatInterval > 0 && a.cfg.Runner.HeartbeatInterval < interval {
+		interval = a.cfg.Runner.HeartbeatInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			info, err := a.fetchRunInfo(ctx, runID)
+			if err != nil {
+				a.log.Debug("poll run status failed",
+					slog.String("run_id", runID),
+					slog.Any("err", err))
+				continue
+			}
+			if strings.EqualFold(info.Status, "canceled") {
+				canceled.Store(true)
+				cancel()
+				return
+			}
+		}
+	}
+}
+
+func (a *Agent) fetchRunInfo(ctx context.Context, runID string) (RunInfo, error) {
+	// Reuse parent context but ensure we bound request duration.
+	requestCtx, cancel := context.WithTimeout(ctx, time.Second*3)
+	defer cancel()
+	return a.controlClient.GetRun(requestCtx, runID)
+}
+
 func trimOutputString(data []byte) string {
 	text := strings.TrimSpace(string(data))
 	if text == "" {
@@ -590,12 +646,12 @@ func (a *Agent) execute(ctx context.Context, relPath string, ip string, port int
 	return stdout.Bytes(), stderr.Bytes(), err
 }
 
-func (a *Agent) extractFlag(workspace string, stdout []byte, payload jobs.JobPayload) (string, error) {
+func (a *Agent) extractFlag(workspace string, stdout []byte, payload jobs.JobPayload) (string, string, error) {
 	flagPath := filepath.Join(workspace, payload.FlagFileName(a.cfg.Runner.FlagFileName))
 	if data, err := os.ReadFile(flagPath); err == nil {
 		flag := strings.TrimSpace(string(data))
 		if flag != "" {
-			return flag, nil
+			return flag, "file", nil
 		}
 	}
 
@@ -606,14 +662,14 @@ func (a *Agent) extractFlag(workspace string, stdout []byte, payload jobs.JobPay
 
 	re, err := regexp.Compile(regexPattern)
 	if err != nil {
-		return "", fmt.Errorf("compile flag regex: %w", err)
+		return "", "", fmt.Errorf("compile flag regex: %w", err)
 	}
 
 	match := re.Find(stdout)
 	if match == nil {
-		return "", errors.New("flag not found in stdout or file")
+		return "", "", errors.New("flag not found in stdout or file")
 	}
-	return string(match), nil
+	return string(match), "stdout", nil
 }
 
 func unzipInto(dir string, artifact []byte) error {

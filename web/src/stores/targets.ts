@@ -1,7 +1,13 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
 import type { Target } from "@/types";
-import { fetchTargets, createTarget, importTargets } from "@/api/targets";
+import {
+  fetchTargets,
+  createTarget,
+  importTargets,
+  updateTarget as apiUpdateTarget,
+  deleteTarget as apiDeleteTarget
+} from "@/api/targets";
 
 export const useTargetStore = defineStore("targets", () => {
   const targets = ref<Target[]>([]);
@@ -37,5 +43,16 @@ export const useTargetStore = defineStore("targets", () => {
     await load();
   }
 
-  return { targets, loading, error, load, addTarget, bulkImport };
+  async function updateTarget(targetId: string, payload: { concurrencyLimit?: number; status?: string }) {
+    const updated = await apiUpdateTarget(targetId, payload);
+    targets.value = targets.value.map((item) => (item.id === updated.id ? updated : item));
+    return updated;
+  }
+
+  async function deleteTarget(targetId: string) {
+    await apiDeleteTarget(targetId);
+    targets.value = targets.value.filter((item) => item.id !== targetId);
+  }
+
+  return { targets, loading, error, load, addTarget, bulkImport, updateTarget, deleteTarget };
 });

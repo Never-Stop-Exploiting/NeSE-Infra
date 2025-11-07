@@ -89,6 +89,11 @@
         <div><strong>Started:</strong> <span>{{ runStore.selectedRun.startedAt ?? "-" }}</span></div>
         <div><strong>Finished:</strong> <span>{{ runStore.selectedRun.finishedAt ?? "-" }}</span></div>
         <div v-if="runStore.selectedRun.errorMessage"><strong>Error:</strong> <span>{{ runStore.selectedRun.errorMessage }}</span></div>
+        <div v-if="showFlagDetail" class="flag-detail">
+          <strong>Flag:</strong>
+          <span class="flag-value">{{ runStore.selectedRun.flagValue }}</span>
+          <small class="hint">Captured via {{ flagSourceLabel }}</small>
+        </div>
       </section>
       <section class="stdout">
         <h4>STDOUT</h4>
@@ -121,6 +126,24 @@ const cancelActionLabel = computed(() => {
 });
 
 const showCancelButton = computed(() => cancelActionLabel.value.length > 0);
+const showFlagDetail = computed(
+  () =>
+    !!(
+      runStore.selectedRun &&
+      runStore.selectedRun.flagValue &&
+      runStore.selectedRun.status === "succeeded"
+    )
+);
+const flagSourceLabel = computed(() => {
+  const source = runStore.selectedRun?.flagSource?.toLowerCase();
+  if (source === "file") {
+    return "flag file";
+  }
+  if (source === "stdout") {
+    return "stdout";
+  }
+  return "unknown source";
+});
 
 function select(id: string) {
   runStore.selectRun(id);
@@ -262,6 +285,23 @@ tr.active {
 .danger:disabled {
   opacity: 0.6;
   cursor: wait;
+}
+
+.flag-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.flag-value {
+  font-family: "JetBrains Mono", Menlo, monospace;
+  font-size: 0.9rem;
+  color: #facc15;
+}
+
+.hint {
+  color: rgba(148, 163, 184, 0.8);
+  font-size: 0.8rem;
 }
 
 .close,

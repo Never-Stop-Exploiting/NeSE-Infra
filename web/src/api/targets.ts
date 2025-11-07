@@ -12,6 +12,18 @@ export async function createTarget(target: Omit<Target, "id">): Promise<Target> 
   return res.data.target;
 }
 
+export async function updateTarget(
+  targetId: string,
+  payload: { concurrencyLimit?: number; status?: string }
+): Promise<Target> {
+  const res = await api.patch<{ target: Target }>(`${base}/${targetId}`, payload);
+  return res.data.target;
+}
+
+export async function deleteTarget(targetId: string): Promise<void> {
+  await api.delete(`${base}/${targetId}`);
+}
+
 export async function importTargets(payload: {
   challengeId: string;
   baseIp: string;

@@ -79,6 +79,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/challenges/", s.handleChallengeDetail)
 	mux.HandleFunc("/api/v1/targets", s.handleTargets)
 	mux.HandleFunc("/api/v1/targets/import", s.handleImportTargets)
+	mux.HandleFunc("/api/v1/targets/", s.handleTargetDetail)
 	mux.HandleFunc("/api/v1/exploits", s.handleExploits)
 	mux.HandleFunc("/api/v1/exploits/", s.handleExploitActions)
 	mux.HandleFunc("/api/v1/flags", s.handleFlags)
@@ -307,6 +308,73 @@ func (s *Server) handleTargets(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusCreated, map[string]any{"target": marshalTarget(created)})
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *Server) handleTargetDetail(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/targets/")
+	if path == "" {
+		writeError(w, http.StatusNotFound, "missing target id")
+		return
+	}
+	parts := strings.Split(path, "/")
+	targetID := strings.TrimSpace(parts[0])
+	if targetID == "" {
+		writeError(w, http.StatusNotFound, "missing target id")
+		return
+	}
+	if len(parts) > 1 && strings.TrimSpace(parts[1]) != "" {
+		writeError(w, http.StatusNotFound, "unknown target action")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodPatch:
+		var req struct {
+			ConcurrencyLimit *int    `json:"concurrencyLimit"`
+			Status           *string `json:"status"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid payload")
+			return
+		}
+		if req.ConcurrencyLimit == nil && req.Status == nil {
+			writeError(w, http.StatusBadRequest, "no fields to update")
+			return
+		}
+		update := domain.Target{ID: targetID}
+		if req.ConcurrencyLimit != nil {
+			if *req.ConcurrencyLimit <= 0 {
+				writeError(w, http.StatusBadRequest, "concurrencyLimit must be > 0")
+				return
+			}
+			update.ConcurrencyLimit = *req.ConcurrencyLimit
+		}
+		if req.Status != nil {
+			update.Status = strings.TrimSpace(*req.Status)
+		}
+		target, err := s.repository.UpdateTarget(r.Context(), update)
+		if err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				writeError(w, http.StatusNotFound, "target not found")
+			} else {
+				writeError(w, http.StatusInternalServerError, "failed to update target")
+			}
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"target": marshalTarget(target)})
+	case http.MethodDelete:
+		if err := s.repository.DeleteTarget(r.Context(), targetID); err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				writeError(w, http.StatusNotFound, "target not found")
+			} else {
+				writeError(w, http.StatusInternalServerError, "failed to delete target")
+			}
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
@@ -832,9 +900,9 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "run not found")
 			return
 		}
-		stdout, stderr := s.collectRunOutput(r.Context(), runID)
+		stdout, stderr, flagValue, flagSource := s.collectRunOutput(r.Context(), runID)
 		writeJSON(w, http.StatusOK, map[string]any{
-			"run": marshalRunDetail(run, stdout, stderr),
+			"run": marshalRunDetail(run, stdout, stderr, flagValue, flagSource),
 		})
 		return
 	}
@@ -914,13 +982,14 @@ func (s *Server) handleRunFinish(w http.ResponseWriter, r *http.Request, runID s
 		return
 	}
 	var req struct {
-		Secret    string `json:"secret"`
-		RunnerID  string `json:"runnerId"`
-		Status    string `json:"status"`
-		Error     string `json:"error"`
-		FlagValue string `json:"flagValue"`
-		Stdout    string `json:"stdout"`
-		Stderr    string `json:"stderr"`
+		Secret     string `json:"secret"`
+		RunnerID   string `json:"runnerId"`
+		Status     string `json:"status"`
+		Error      string `json:"error"`
+		FlagValue  string `json:"flagValue"`
+		FlagSource string `json:"flagSource"`
+		Stdout     string `json:"stdout"`
+		Stderr     string `json:"stderr"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid payload")
@@ -969,6 +1038,7 @@ func (s *Server) handleRunFinish(w http.ResponseWriter, r *http.Request, runID s
 
 	var createdFlag *domain.Flag
 	flagValue := strings.TrimSpace(req.FlagValue)
+	flagSource := strings.TrimSpace(req.FlagSource)
 	if flagValue != "" {
 		target, err := s.repository.GetTarget(ctx, run.TargetID)
 		if err != nil {
@@ -1007,6 +1077,9 @@ func (s *Server) handleRunFinish(w http.ResponseWriter, r *http.Request, runID s
 	}
 	if createdFlag != nil {
 		fields["flagId"] = createdFlag.ID
+		if flagSource != "" {
+			fields["flagSource"] = flagSource
+		}
 	}
 	_ = s.repository.AppendLog(ctx, domain.LogEntry{
 		Level:   logLevel,
@@ -1015,6 +1088,24 @@ func (s *Server) handleRunFinish(w http.ResponseWriter, r *http.Request, runID s
 		RunID:   runID,
 		Fields:  fields,
 	})
+
+	if createdFlag != nil {
+		flagFields := map[string]any{
+			"flag": flagValue,
+		}
+		if flagSource != "" {
+			flagFields["source"] = flagSource
+		}
+		flagFields["flagId"] = createdFlag.ID
+		_ = s.repository.AppendLog(ctx, domain.LogEntry{
+			Level:   "info",
+			Source:  "runner",
+			Message: fmt.Sprintf("run %s flag", runID),
+			RunID:   runID,
+			FlagID:  createdFlag.ID,
+			Fields:  flagFields,
+		})
+	}
 
 	if strings.TrimSpace(req.Stdout) != "" {
 		_ = s.repository.AppendLog(ctx, domain.LogEntry{
@@ -1119,9 +1210,9 @@ func (s *Server) handleRunCancel(w http.ResponseWriter, r *http.Request, runID s
 		s.logger.Warn("append cancel log failed", slog.Any("err", err), slog.String("run_id", runID))
 	}
 
-	stdout, stderr := s.collectRunOutput(ctx, runID)
+	stdout, stderr, flagValue, flagSource := s.collectRunOutput(ctx, runID)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"run": marshalRunDetail(run, stdout, stderr),
+		"run": marshalRunDetail(run, stdout, stderr, flagValue, flagSource),
 	})
 }
 
@@ -1302,40 +1393,55 @@ func (s *Server) handleRunnerRegister(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{"runner": marshalRunner(runner)})
 }
 
-func (s *Server) collectRunOutput(ctx context.Context, runID string) (string, string) {
+func (s *Server) collectRunOutput(ctx context.Context, runID string) (string, string, string, string) {
 	filter := domain.LogFilter{
 		RunID: runID,
 	}
 	logs, err := s.repository.ListLogs(ctx, filter)
 	if err != nil {
 		s.logger.Warn("collect run output failed", slog.Any("err", err), slog.String("run_id", runID))
-		return "", ""
+		return "", "", "", ""
 	}
 	var stdout string
 	var stderr string
+	var flagValue string
+	var flagSource string
 	for _, entry := range logs {
-		if entry.Fields == nil {
+		fields := entry.Fields
+		if fields == nil {
 			continue
 		}
-		output, _ := entry.Fields["output"].(string)
-		if output == "" {
-			continue
-		}
-		switch strings.ToLower(entry.Message) {
-		case fmt.Sprintf("run %s stdout", runID):
-			stdout = output
-		case fmt.Sprintf("run %s stderr", runID):
-			stderr = output
-		default:
-			if stdout == "" && strings.Contains(strings.ToLower(entry.Message), "stdout") {
+		message := strings.ToLower(entry.Message)
+		if output, _ := fields["output"].(string); output != "" {
+			switch message {
+			case fmt.Sprintf("run %s stdout", runID):
 				stdout = output
-			}
-			if stderr == "" && strings.Contains(strings.ToLower(entry.Message), "stderr") {
+			case fmt.Sprintf("run %s stderr", runID):
 				stderr = output
+			default:
+				if stdout == "" && strings.Contains(message, "stdout") {
+					stdout = output
+				}
+				if stderr == "" && strings.Contains(message, "stderr") {
+					stderr = output
+				}
+			}
+			continue
+		}
+		if message == fmt.Sprintf("run %s flag", runID) {
+			if flagValue == "" {
+				if value, ok := fields["flag"].(string); ok {
+					flagValue = value
+				}
+			}
+			if flagSource == "" {
+				if source, ok := fields["source"].(string); ok {
+					flagSource = source
+				}
 			}
 		}
 	}
-	return stdout, stderr
+	return stdout, stderr, flagValue, flagSource
 }
 
 func (s *Server) handleRunnerHeartbeat(w http.ResponseWriter, r *http.Request) {
@@ -1900,7 +2006,7 @@ func marshalLog(entry domain.LogEntry) map[string]any {
 	}
 }
 
-func marshalRunDetail(run domain.Run, stdout, stderr string) map[string]any {
+func marshalRunDetail(run domain.Run, stdout, stderr, flagValue, flagSource string) map[string]any {
 	return map[string]any{
 		"id":           run.ID,
 		"exploitId":    run.ExploitID,
@@ -1914,6 +2020,8 @@ func marshalRunDetail(run domain.Run, stdout, stderr string) map[string]any {
 		"flagId":       run.FlagID,
 		"stdout":       stdout,
 		"stderr":       stderr,
+		"flagValue":    flagValue,
+		"flagSource":   flagSource,
 	}
 }
 

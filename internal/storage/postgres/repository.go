@@ -1004,6 +1004,95 @@ func (r *Repository) CreateTarget(ctx context.Context, target domain.Target) (do
 	return target, nil
 }
 
+func (r *Repository) UpdateTarget(ctx context.Context, target domain.Target) (domain.Target, error) {
+	if strings.TrimSpace(target.ID) == "" {
+		return domain.Target{}, errors.New("target id required")
+	}
+	existing, err := r.GetTarget(ctx, target.ID)
+	if err != nil {
+		return domain.Target{}, err
+	}
+	updated := existing
+	if strings.TrimSpace(target.TeamName) != "" {
+		updated.TeamName = target.TeamName
+	}
+	if target.Port > 0 {
+		updated.Port = target.Port
+	}
+	if strings.TrimSpace(target.IP) != "" {
+		updated.IP = target.IP
+	}
+	if strings.TrimSpace(target.Status) != "" {
+		updated.Status = target.Status
+	}
+	if strings.TrimSpace(target.ChallengeID) != "" {
+		updated.ChallengeID = target.ChallengeID
+	}
+	if target.ConcurrencyLimit > 0 {
+		updated.ConcurrencyLimit = target.ConcurrencyLimit
+	}
+	if target.Labels != nil {
+		updated.Labels = target.Labels
+	}
+	updated.UpdatedAt = time.Now().UTC()
+
+	labels, err := marshalJSON(updated.Labels)
+	if err != nil {
+		return domain.Target{}, err
+	}
+
+	_, err = r.db.ExecContext(ctx, `
+		UPDATE targets
+		SET challenge_id=$1,
+			team_name=$2,
+			ip=$3,
+			port=$4,
+			status=$5,
+			concurrency_limit=$6,
+			labels=$7,
+			updated_at=$8
+		WHERE id=$9`,
+		nullString(updated.ChallengeID),
+		updated.TeamName,
+		updated.IP,
+		updated.Port,
+		updated.Status,
+		updated.ConcurrencyLimit,
+		labels,
+		updated.UpdatedAt,
+		updated.ID,
+	)
+	if err != nil {
+		return domain.Target{}, err
+	}
+	return updated, nil
+}
+
+func (r *Repository) DeleteTarget(ctx context.Context, id string) error {
+	if strings.TrimSpace(id) == "" {
+		return errors.New("target id required")
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM target_exploit_overrides WHERE target_id = $1`, id); err != nil {
+		return err
+	}
+
+	res, err := tx.ExecContext(ctx, `DELETE FROM targets WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return errors.New("target not found")
+	}
+	return tx.Commit()
+}
+
 func (r *Repository) BulkInsertTargets(ctx context.Context, targets []domain.Target) error {
 	if len(targets) == 0 {
 		return nil

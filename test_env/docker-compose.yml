@@ -22,10 +22,22 @@ services:
       context: ..
       dockerfile: ./test_env/exp/Dockerfile
     container_name: runner-exp
-    image: runner-exp:latest
-    pull_policy: never
+    environment:
+      RUNNER_ID: requests-exp
+      RUNNER_MAX_PARALLEL: 10
+      RUNNER_TYPE: python
+      RUNNER_SECRET: ${RUNNER_SECRET:-dev-runner-secret}
+      CONTROL_PLANE_URL: ${CONTROL_PLANE_URL:-http://192.168.66.206:8080}
+      REDIS_ADDR: ${REDIS_ADDR:-192.168.66.206:6379}
+      RUNNER_TAGS: ${RUNNER_TAGS:-requests}
+  runner-exp2:
+    build:
+      context: ..
+      dockerfile: ./test_env/exp/Dockerfile
+    container_name: runner-exp2
     environment:
       RUNNER_ID: requests-exp2
+      RUNNER_MAX_PARALLEL: 10
       RUNNER_TYPE: python
       RUNNER_SECRET: ${RUNNER_SECRET:-dev-runner-secret}
       CONTROL_PLANE_URL: ${CONTROL_PLANE_URL:-http://192.168.66.206:8080}

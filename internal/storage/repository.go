@@ -36,6 +36,8 @@ type Repository interface {
 	ListTargets(ctx context.Context) ([]domain.Target, error)
 	GetTarget(ctx context.Context, id string) (domain.Target, error)
 	CreateTarget(ctx context.Context, target domain.Target) (domain.Target, error)
+	UpdateTarget(ctx context.Context, target domain.Target) (domain.Target, error)
+	DeleteTarget(ctx context.Context, id string) error
 	BulkInsertTargets(ctx context.Context, targets []domain.Target) error
 	ListExploits(ctx context.Context) ([]domain.Exploit, error)
 	CreateExploit(ctx context.Context, exploit domain.Exploit) (domain.Exploit, error)

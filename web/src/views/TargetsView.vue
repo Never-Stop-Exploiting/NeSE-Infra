@@ -98,6 +98,7 @@
               <th>Address</th>
               <th>Status</th>
               <th>Concurrency</th>
+              <th>Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -106,7 +107,34 @@
               <td>{{ target.teamName }}</td>
               <td>{{ target.ip }}:{{ target.port }}</td>
               <td>{{ target.status ?? "active" }}</td>
-              <td>{{ target.concurrencyLimit }}</td>
+              <td>
+                <div class="concurrency-editor">
+                  <input
+                    type="number"
+                    min="1"
+                    max="64"
+                    v-model.number="concurrencyDraft[target.id]"
+                  />
+                  <button
+                    type="button"
+                    class="ghost"
+                    :disabled="pendingConcurrency === target.id"
+                    @click="handleConcurrencySave(target.id)"
+                  >
+                    {{ pendingConcurrency === target.id ? "Saving..." : "Save" }}
+                  </button>
+                </div>
+              </td>
+              <td>
+                <button
+                  type="button"
+                  class="ghost danger"
+                  :disabled="pendingDelete === target.id"
+                  @click="handleDeleteTarget(target.id)"
+                >
+                  {{ pendingDelete === target.id ? "Deleting..." : "Delete" }}
+                </button>
+              </td>
             </tr>
           </tbody>
         </table>
@@ -126,6 +154,9 @@ const challengeStore = useChallengeStore();
 const { challenges } = storeToRefs(challengeStore);
 const pending = ref(false);
 const challengeOptions = computed(() => challenges.value);
+const concurrencyDraft = ref<Record<string, number>>({});
+const pendingConcurrency = ref<string | null>(null);
+const pendingDelete = ref<string | null>(null);
 const challengeNames = computed<Record<string, string>>(() => {
   const mapping: Record<string, string> = {};
   challenges.value.forEach((challenge) => {
@@ -168,6 +199,19 @@ const previewTargets = computed(() => {
   }
   return previews;
 });
+
+watch(
+  () => targetStore.targets.slice(),
+  (items) => {
+    const next: Record<string, number> = {};
+    for (const target of items) {
+      const cached = concurrencyDraft.value[target.id];
+      next[target.id] = typeof cached === "number" ? cached : target.concurrencyLimit;
+    }
+    concurrencyDraft.value = next;
+  },
+  { immediate: true }
+);
 
 watch(
   challenges,
@@ -217,6 +261,33 @@ async function handleImport() {
     teamNames: teamNames.length ? teamNames : undefined
   });
   pending.value = false;
+}
+
+async function handleConcurrencySave(targetId: string) {
+  const value = Math.max(1, Math.round(Number(concurrencyDraft.value[targetId]) || 1));
+  concurrencyDraft.value[targetId] = value;
+  pendingConcurrency.value = targetId;
+  try {
+    await targetStore.updateTarget(targetId, { concurrencyLimit: value });
+  } catch (err) {
+    console.error(err);
+  } finally {
+    pendingConcurrency.value = null;
+  }
+}
+
+async function handleDeleteTarget(targetId: string) {
+  if (!window.confirm("Delete this target?")) {
+    return;
+  }
+  pendingDelete.value = targetId;
+  try {
+    await targetStore.deleteTarget(targetId);
+  } catch (err) {
+    console.error(err);
+  } finally {
+    pendingDelete.value = null;
+  }
 }
 
 onMounted(() => {
@@ -284,6 +355,29 @@ button {
   border-radius: 999px;
   font-weight: 600;
   cursor: pointer;
+}
+
+.concurrency-editor {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.concurrency-editor input {
+  width: 4.5rem;
+  padding: 0.35rem 0.4rem;
+}
+
+button.ghost {
+  background: transparent;
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  color: #e2e8f0;
+  padding: 0.35rem 0.9rem;
+}
+
+button.ghost.danger {
+  border-color: rgba(248, 113, 113, 0.6);
+  color: #f87171;
 }
 
 .preview {

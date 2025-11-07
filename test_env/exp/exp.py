@@ -17,8 +17,10 @@ flags = [
 r = requests.get(f"http://{HOST}:{PORT}/flag?flag={random.choice(flags)}")
 
 print(r.status_code, flush=True)
-# print(r.text, flush=True)
 flag = r.json().get("flag")
 
-with open("flag", "w") as f:
-    f.write(flag)
+if random.randint(0, 1) == 0:
+    print(r.text, flush=True)
+else:
+    with open("flag", "w") as f:
+        f.write(flag)
