@@ -115,20 +115,16 @@
                 </button>
               </div>
             </div>
-            <ul class="exploit-list">
-              <li v-for="status in item.exploits" :key="status.exploitId">
-                <label>
-                  <input
-                    type="checkbox"
-                    :checked="status.enabled"
-                    :disabled="isTargetUpdating(item.target.id)"
-                    @change="handleToggle(item, status, $event)"
-                  />
-                  <span>{{ status.exploitName }}</span>
-                  <span v-if="status.enabled !== status.defaultEnabled" class="badge">
-                    Override
-                  </span>
-                </label>
+            <ul class="exploit-grid">
+              <li v-for="status in item.exploits" :key="status.exploitId" class="exploit-card">
+                <input
+                  type="checkbox"
+                  :checked="status.enabled"
+                  :disabled="isTargetUpdating(item.target.id)"
+                  @change="handleToggle(item, status, $event)"
+                />
+                <span class="name">{{ status.exploitName }}</span>
+                <span v-if="status.enabled !== status.defaultEnabled" class="badge">Override</span>
               </li>
             </ul>
           </div>
@@ -487,26 +483,31 @@ button.secondary {
   gap: 0.5rem;
 }
 
-.exploit-list {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-  display: flex;
-  flex-direction: column;
+.exploit-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
   gap: 0.6rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
-.exploit-list label {
+.exploit-card {
+  border: 1px solid rgba(148, 163, 184, 0.15);
+  border-radius: 10px;
+  padding: 0.55rem 0.75rem;
+  background: rgba(15, 23, 42, 0.6);
   display: flex;
   align-items: center;
-  gap: 0.6rem;
+  gap: 0.45rem;
   font-size: 0.95rem;
 }
 
-.exploit-list input[type="checkbox"] {
+.exploit-card input[type="checkbox"] {
   width: 18px;
   height: 18px;
   accent-color: #38bdf8;
+  flex-shrink: 0;
 }
 
 .badge {

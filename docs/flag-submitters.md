@@ -34,16 +34,18 @@ type SubmissionResult struct {
 type SubmissionStatus string
 
 const (
-    SubmissionStatusAccept  SubmissionStatus = "accept"
-    SubmissionStatusFail    SubmissionStatus = "fail"    // permanent failure (e.g. already submitted)
-    SubmissionStatusUnknown SubmissionStatus = "unknown" // transient error; scheduler will retry
+    SubmissionStatusAccept    SubmissionStatus = "accept"
+    SubmissionStatusFail      SubmissionStatus = "fail"      // permanent failure (invalid payload, etc.)
+    SubmissionStatusDuplicate SubmissionStatus = "duplicate" // duplicate flag submission
+    SubmissionStatusUnknown   SubmissionStatus = "unknown"   // transient error; scheduler will retry
 )
 ```
 
 ### Return Semantics
 
 - `Accept`: the flag has been confirmed by the remote platform; it will be marked as accepted and removed from retry queues.
-- `Fail`: the remote platform definitively refused the flag (duplicate/invalid). No further retries will be scheduled unless an operator manually requeues it.
+- `Fail`: the remote platform definitively refused the flag (invalid payload, already expired, etc.). No further retries will be scheduled unless an operator manually requeues it.
+- `Duplicate`: the remote platform accepted the request but reports the flag was already submitted. The flag will be marked rejected and no further retries scheduled.
 - `Unknown`: the submission failed for a recoverable reason (network, rate limit). The scheduler will schedule another attempt after the default backoff or the optional `NextTry` delay.
 
 Returning an error from `Submit` is equivalent to `Unknown`; the framework records the error text and applies exponential backoff.

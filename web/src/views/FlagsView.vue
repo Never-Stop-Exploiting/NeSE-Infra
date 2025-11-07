@@ -166,6 +166,7 @@ const statusOptions = [
   { label: "Submitting", value: "submitting" },
   { label: "Accepted", value: "accepted" },
   { label: "Rejected", value: "rejected" },
+  { label: "Duplicate", value: "duplicate" },
   { label: "Retry", value: "retry" },
   { label: "Dropped", value: "dropped" }
 ];
@@ -368,6 +369,11 @@ tr.active {
 .status[data-status="dropped"] {
   background: rgba(248, 113, 113, 0.2);
   color: #f87171;
+}
+
+.status[data-status="duplicate"] {
+  background: rgba(167, 139, 250, 0.2);
+  color: #c4b5fd;
 }
 
 .detail header {

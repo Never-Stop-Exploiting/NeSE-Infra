@@ -89,56 +89,71 @@
         <h2>Registered Targets</h2>
         <p>{{ targetStore.targets.length }} items</p>
       </header>
-      <div class="table-wrapper">
-        <table>
-          <thead>
-            <tr>
-              <th>Challenge</th>
-              <th>Team</th>
-              <th>Address</th>
-              <th>Status</th>
-              <th>Concurrency</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="target in targetStore.targets" :key="target.id">
-              <td>{{ challengeNames[target.challengeId] ?? target.challengeId }}</td>
-              <td>{{ target.teamName }}</td>
-              <td>{{ target.ip }}:{{ target.port }}</td>
-              <td>{{ target.status ?? "active" }}</td>
+      <div class="target-groups" v-if="groupedTargets.length">
+        <section v-for="group in groupedTargets" :key="group.challengeId" class="group-card">
+          <header>
+            <div>
+              <strong>{{ group.challengeName }}</strong>
+              <small class="meta-id">({{ group.challengeId }})</small>
+            </div>
+            <div class="group-actions">
+              <span class="count-chip">{{ group.targets.length }}</span>
+              <button class="ghost" type="button" @click="toggleGroup(group.challengeId)">
+                {{ isGroupExpanded(group.challengeId) ? "Collapse" : "Expand" }}
+              </button>
+            </div>
+          </header>
+          <div class="table-wrapper" v-if="isGroupExpanded(group.challengeId)">
+            <table>
+              <thead>
+                <tr>
+                  <th>Team</th>
+                  <th>Address</th>
+                  <th>Status</th>
+                  <th>Concurrency</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="target in group.targets" :key="target.id">
+                  <td>{{ target.teamName }}</td>
+                  <td>{{ target.ip }}:{{ target.port }}</td>
+                  <td>{{ target.status ?? "active" }}</td>
               <td>
                 <div class="concurrency-editor">
                   <input
                     type="number"
                     min="1"
-                    max="64"
-                    v-model.number="concurrencyDraft[target.id]"
-                  />
-                  <button
-                    type="button"
-                    class="ghost"
-                    :disabled="pendingConcurrency === target.id"
-                    @click="handleConcurrencySave(target.id)"
-                  >
-                    {{ pendingConcurrency === target.id ? "Saving..." : "Save" }}
-                  </button>
-                </div>
-              </td>
-              <td>
-                <button
-                  type="button"
-                  class="ghost danger"
-                  :disabled="pendingDelete === target.id"
-                  @click="handleDeleteTarget(target.id)"
-                >
-                  {{ pendingDelete === target.id ? "Deleting..." : "Delete" }}
-                </button>
-              </td>
-            </tr>
-          </tbody>
-        </table>
+                        max="64"
+                        v-model.number="concurrencyDraft[target.id]"
+                      />
+                      <button
+                        type="button"
+                        class="ghost"
+                        :disabled="pendingConcurrency === target.id"
+                        @click.stop="handleConcurrencySave(target.id)"
+                      >
+                        {{ pendingConcurrency === target.id ? "Saving..." : "Save" }}
+                      </button>
+                    </div>
+                  </td>
+                  <td>
+                    <button
+                      type="button"
+                      class="ghost danger"
+                      :disabled="pendingDelete === target.id"
+                      @click.stop="handleDeleteTarget(target.id)"
+                    >
+                      {{ pendingDelete === target.id ? "Deleting..." : "Delete" }}
+                    </button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
       </div>
+      <p v-else class="empty">No targets registered yet.</p>
     </article>
   </section>
 </template>
@@ -146,6 +161,7 @@
 <script setup lang="ts">
 import { computed, reactive, ref, onMounted, watch } from "vue";
 import { storeToRefs } from "pinia";
+import type { Target } from "@/types";
 import { useTargetStore } from "@/stores/targets";
 import { useChallengeStore } from "@/stores/challenges";
 
@@ -164,6 +180,47 @@ const challengeNames = computed<Record<string, string>>(() => {
   });
   return mapping;
 });
+
+const groupedTargets = computed(() => {
+  type Group = { challengeId: string; challengeName: string; targets: Target[] };
+  const groups = new Map<string, Group>();
+  for (const target of targetStore.targets as Target[]) {
+    const challengeId = target.challengeId || "unknown";
+    if (!groups.has(challengeId)) {
+      groups.set(challengeId, {
+        challengeId,
+        challengeName: challengeNames.value[challengeId] ?? challengeId,
+        targets: []
+      });
+    }
+    groups.get(challengeId)!.targets.push(target);
+  }
+  return Array.from(groups.values()).sort((a, b) => a.challengeName.localeCompare(b.challengeName));
+});
+
+const expandedGroups = ref<Record<string, boolean>>({});
+
+watch(
+  groupedTargets,
+  (groups) => {
+    const next: Record<string, boolean> = { ...expandedGroups.value };
+    groups.forEach((group) => {
+      if (next[group.challengeId] === undefined) {
+        next[group.challengeId] = true;
+      }
+    });
+    expandedGroups.value = next;
+  },
+  { immediate: true }
+);
+
+function isGroupExpanded(id: string) {
+  return expandedGroups.value[id] ?? true;
+}
+
+function toggleGroup(id: string) {
+  expandedGroups.value = { ...expandedGroups.value, [id]: !isGroupExpanded(id) };
+}
 
 const singleForm = reactive({
   challengeId: "",
@@ -398,6 +455,51 @@ button.ghost.danger {
 
 .table-wrapper {
   overflow-x: auto;
+}
+
+.target-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.group-card {
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 12px;
+  padding: 1rem;
+  background: rgba(15, 23, 42, 0.5);
+}
+
+.group-card > header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.75rem;
+  gap: 0.75rem;
+}
+
+.group-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.group-card header strong {
+  font-size: 1rem;
+}
+
+.count-chip {
+  background: rgba(148, 163, 184, 0.2);
+  color: #e2e8f0;
+  border-radius: 999px;
+  padding: 0.15rem 0.65rem;
+  font-size: 0.8rem;
+}
+
+.empty {
+  text-align: center;
+  padding: 1rem 0;
+  color: rgba(148, 163, 184, 0.8);
 }
 
 table {

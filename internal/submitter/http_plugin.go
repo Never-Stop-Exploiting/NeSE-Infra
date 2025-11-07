@@ -45,6 +45,8 @@ func (p *HTTPPlugin) Submit(ctx context.Context, req SubmissionRequest) Submissi
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
 		result.Status = SubmissionStatusAccept
 		result.Message = "success"
+	case resp.StatusCode == http.StatusConflict || resp.StatusCode == http.StatusTooManyRequests:
+		result.Status = SubmissionStatusDuplicate
 	case resp.StatusCode >= 400 && resp.StatusCode < 500:
 		result.Status = SubmissionStatusFail
 	default:

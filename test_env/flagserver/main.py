@@ -24,8 +24,8 @@ def upload_flag():
     # 模拟延迟逻辑
     if random.random() < DELAY_PROBABILITY:
         time.sleep(DELAY_TIME)
-
-    return jsonify({"status": "success", "message": "Flag is valid"}), 200
+    status = random.choice([200, 409])  # 随机返回200或409状态码
+    return jsonify({"status": "success", "message": "Flag is valid"}), status
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)

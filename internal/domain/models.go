@@ -134,6 +134,7 @@ const (
 	FlagStatusSubmitting FlagStatus = "submitting"
 	FlagStatusAccepted   FlagStatus = "accepted"
 	FlagStatusRejected   FlagStatus = "rejected"
+	FlagStatusDuplicate  FlagStatus = "duplicate"
 	FlagStatusRetry      FlagStatus = "retry"
 	FlagStatusDropped    FlagStatus = "dropped"
 )

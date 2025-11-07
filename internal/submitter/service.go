@@ -120,6 +120,8 @@ func (s *Service) processMessage(ctx context.Context, msg queue.Message) error {
 		switch result.Status {
 		case SubmissionStatusAccept:
 			flag.Status = domain.FlagStatusAccepted
+		case SubmissionStatusDuplicate:
+			flag.Status = domain.FlagStatusDuplicate
 		case SubmissionStatusFail:
 			flag.Status = domain.FlagStatusRejected
 		default:
@@ -142,6 +144,8 @@ func (s *Service) processMessage(ctx context.Context, msg queue.Message) error {
 		// keep default info level
 	case SubmissionStatusFail:
 		logEntry.Level = "warn"
+	case SubmissionStatusDuplicate:
+		logEntry.Level = "info"
 	default:
 		logEntry.Level = "error"
 	}
