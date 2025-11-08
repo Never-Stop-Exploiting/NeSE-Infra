@@ -37,6 +37,7 @@ var errFlagCancelNotAllowed = errors.New("flag cannot be canceled")
 // New returns a configured control plane server.
 func New(cfg config.Config, logger *slog.Logger, repository storage.Repository, broker queue.Broker) *Server {
 	mux := http.NewServeMux()
+	protectedMux := authMiddleware(mux, cfg.ControlPlane.AdminToken, cfg.RunnerSecret)
 	server := &Server{
 		cfg:        cfg,
 		logger:     logger,
@@ -45,7 +46,7 @@ func New(cfg config.Config, logger *slog.Logger, repository storage.Repository, 
 		httpServer: &http.Server{
 			Addr:              cfg.ControlPlane.BindAddr,
 			ReadHeaderTimeout: 5 * time.Second,
-			Handler:           mux,
+			Handler:           protectedMux,
 		},
 	}
 

@@ -133,6 +133,7 @@ docker/                 # 服务 Dockerfile + web Nginx
 | `RUN_QUEUE_NAME` / `FLAG_QUEUE_NAME` | 队列名称与可见性、重试间隔 | `exp:pending` / `flag:pending`（在 `internal/config` 中有默认值） |
 | `SCHEDULER_POLL_INTERVAL` / `SCHEDULER_MAX_BATCH` | 调度轮询间隔与单轮派发上限 | `5s` / `50` |
 | `RUNNER_SECRET` | Runner 调用 `/runs/*`、`/runners/*` 的共享密钥 | `dev-runner-secret` |
+| `CONTROL_PLANE_TOKEN` | 访问 `/api/v1/**` 运维接口时需要携带的 `Authorization: Bearer` Token | _无默认值，必须显式设置_ |
 | `CONTROL_PLANE_URL` | Runner 注册/下载 artifact 时访问的控制面地址 | `http://control-plane:8080` |
 | `RUNNER_CHROOT_PATH` / `RUNNER_WORKSPACE_ROOT` | Runner chroot 根目录与临时工作区 | `/env` / `/env/tmp` |
 | `RUNNER_FLAG_FILE` / `RUNNER_FLAG_REGEX` | Flag 文件名与匹配正则 | `flag` / `flag\{[a-zA-Z0-9_\-]+\}` |
@@ -156,6 +157,7 @@ docker/                 # 服务 Dockerfile + web Nginx
 - Flags 页面展示状态、Run 关联、提交历史，支持一键重试与查看日志。
 - Scheduler 视图列出每个 Target 能匹配的 Exploit 并可针对单个 Target 覆写启停。
 - Logs 与 Runners 视图分别提供结构化日志筛选、Runner 心跳状态监控。
+- 访问 Web UI 时需先在登录页输入 `CONTROL_PLANE_TOKEN`，浏览器会缓存该 Token 并自动为后续请求附加 `Authorization: Bearer` 头。
 
 ## 测试与质量
 

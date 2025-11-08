@@ -12,8 +12,25 @@
       <RouterLink to="/runners">Runners</RouterLink>
       <RouterLink to="/logs">Logs</RouterLink>
     </nav>
+    <div class="actions">
+      <span class="token-status">Token 已加载</span>
+      <button type="button" @click="handleLogout">注销</button>
+    </div>
   </header>
 </template>
+
+<script setup lang="ts">
+import { useRouter } from "vue-router";
+import { useAuthStore } from "@/stores/auth";
+
+const router = useRouter();
+const auth = useAuthStore();
+
+const handleLogout = () => {
+  auth.clearToken();
+  router.push("/login");
+};
+</script>
 
 <style scoped>
 .nav {
@@ -43,6 +60,31 @@ a {
 }
 
 .router-link-active {
+  color: #38bdf8;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.token-status {
+  font-size: 0.85rem;
+  color: #a5b4fc;
+}
+
+button {
+  background: transparent;
+  border: 1px solid rgba(148, 163, 184, 0.5);
+  color: #e2e8f0;
+  padding: 0.35rem 0.75rem;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: #38bdf8;
   color: #38bdf8;
 }
 </style>

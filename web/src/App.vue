@@ -1,7 +1,7 @@
 <template>
   <div class="layout">
-    <nav-bar />
-    <main class="content">
+    <nav-bar v-if="auth.isAuthenticated" />
+    <main class="content" :class="{ 'content--full': !auth.isAuthenticated }">
       <RouterView />
     </main>
   </div>
@@ -9,6 +9,9 @@
 
 <script setup lang="ts">
 import NavBar from "@/components/NavBar.vue";
+import { useAuthStore } from "@/stores/auth";
+
+const auth = useAuthStore();
 </script>
 
 <style scoped>
@@ -23,5 +26,9 @@ import NavBar from "@/components/NavBar.vue";
 .content {
   padding: 1.5rem;
   background: #0b1120;
+}
+
+.content--full {
+  padding: 0;
 }
 </style>

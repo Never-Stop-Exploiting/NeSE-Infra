@@ -25,6 +25,8 @@ type ControlPlaneClient struct {
 	log     *slog.Logger
 }
 
+const runnerSecretHeader = "X-Runner-Secret"
+
 // APIError captures non-2xx responses from the control plane.
 type APIError struct {
 	StatusCode int
@@ -175,6 +177,7 @@ func (c *ControlPlaneClient) GetRun(ctx context.Context, runID string) (RunInfo,
 	if err != nil {
 		return RunInfo{}, fmt.Errorf("create request: %w", err)
 	}
+	req.Header.Set(runnerSecretHeader, c.secret)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -215,6 +218,7 @@ func (c *ControlPlaneClient) DownloadArtifact(ctx context.Context, artifactPath 
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
+	req.Header.Set(runnerSecretHeader, c.secret)
 
 	resp, err := c.client.Do(req)
 	if err != nil {

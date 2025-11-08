@@ -43,6 +43,7 @@ type ControlPlaneConfig struct {
 	BindAddr        string
 	MetricsAddr     string
 	WebsocketOrigin string
+	AdminToken      string
 }
 
 type SchedulerConfig struct {
@@ -101,6 +102,9 @@ func Load() (Config, error) {
 	if cfg.RunnerSecret == "" {
 		return cfg, fmt.Errorf("RUNNER_SECRET cannot be empty")
 	}
+	if strings.TrimSpace(cfg.ControlPlane.AdminToken) == "" {
+		return cfg, fmt.Errorf("CONTROL_PLANE_TOKEN cannot be empty")
+	}
 
 	return cfg, nil
 }
@@ -129,6 +133,7 @@ func loadControlPlane() ControlPlaneConfig {
 		BindAddr:        getenv("CONTROL_PLANE_BIND", ":8080"),
 		MetricsAddr:     getenv("CONTROL_PLANE_METRICS", ":9100"),
 		WebsocketOrigin: getenv("CONTROL_PLANE_WS_ORIGIN", "*"),
+		AdminToken:      getenv("CONTROL_PLANE_TOKEN", ""),
 	}
 }
 
