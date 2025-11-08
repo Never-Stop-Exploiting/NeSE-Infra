@@ -36,7 +36,7 @@ type SubmissionStatus string
 const (
     SubmissionStatusAccepted   SubmissionStatus = "accepted"
     SubmissionStatusFailed     SubmissionStatus = "failed"      // permanent failure (invalid payload, etc.)
-    SubmissionStatusDuplicated SubmissionStatus = "duplicated"  // duplicate flag submission
+    SubmissionStatusDuplicated SubmissionStatus = "duplicated"  // duplicated flag submission
     SubmissionStatusUnknown    SubmissionStatus = "unknown"     // transient error; scheduler will retry
 )
 ```

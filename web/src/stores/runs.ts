@@ -11,8 +11,8 @@ import type { BulkRunCancelResponse, RunQueryParams } from "@/api/runs";
 
 export interface RunFilters {
   status?: string;
-  exploitId?: string;
-  targetId?: string;
+  exploitName?: string;
+  targetName?: string;
 }
 
 export const useRunStore = defineStore("runs", () => {
@@ -38,11 +38,11 @@ export const useRunStore = defineStore("runs", () => {
     if (filters.value.status) {
       params.status = filters.value.status;
     }
-    if (filters.value.exploitId) {
-      params.exploitId = filters.value.exploitId;
+    if (filters.value.exploitName) {
+      params.exploitName = filters.value.exploitName;
     }
-    if (filters.value.targetId) {
-      params.targetId = filters.value.targetId;
+    if (filters.value.targetName) {
+      params.targetName = filters.value.targetName;
     }
     return params;
   }
@@ -150,11 +150,11 @@ export const useRunStore = defineStore("runs", () => {
     if (input.status?.trim()) {
       result.status = input.status.trim();
     }
-    if (input.exploitId?.trim()) {
-      result.exploitId = input.exploitId.trim();
+    if (input.exploitName?.trim()) {
+      result.exploitName = input.exploitName.trim();
     }
-    if (input.targetId?.trim()) {
-      result.targetId = input.targetId.trim();
+    if (input.targetName?.trim()) {
+      result.targetName = input.targetName.trim();
     }
     return result;
   }

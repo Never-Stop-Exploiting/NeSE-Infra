@@ -93,9 +93,11 @@ type Run struct {
 
 // RunFilter captures query parameters for run listing.
 type RunFilter struct {
-	Status    string
-	ExploitID string
-	TargetID  string
+	Status      string
+	ExploitID   string
+	TargetID    string
+	ExploitName string
+	TargetName  string
 }
 
 // RunWorkItem aggregates the ready-to-dispatch exploit, target, and packaged artifact bytes.
@@ -142,10 +144,10 @@ const (
 	FlagStatusAccepted   FlagStatus = "accepted"
 	FlagStatusFailed     FlagStatus = "failed"
 	// FlagStatusRejected is kept for backward compatibility; maps to failed.
-	FlagStatusRejected  FlagStatus = FlagStatusFailed
-	FlagStatusDuplicate FlagStatus = "duplicate"
-	FlagStatusRetry     FlagStatus = "retry"
-	FlagStatusDropped   FlagStatus = "dropped"
+	FlagStatusRejected   FlagStatus = FlagStatusFailed
+	FlagStatusDuplicated FlagStatus = "duplicated"
+	FlagStatusRetry      FlagStatus = "retry"
+	FlagStatusDropped    FlagStatus = "dropped"
 )
 
 // DashboardStats aggregates counts for the overview dashboard.

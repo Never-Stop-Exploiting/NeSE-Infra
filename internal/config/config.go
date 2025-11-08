@@ -72,6 +72,7 @@ type FlagSubmitterConfig struct {
 	MaxAttempts       int
 	Endpoint          string
 	RequestTimeout    time.Duration
+	Concurrency       int
 }
 
 type QueueConfig struct {
@@ -163,6 +164,7 @@ func loadFlagSubmitter() FlagSubmitterConfig {
 		MaxAttempts:       getenvInt("FLAG_SUBMIT_MAX_ATTEMPTS", 5),
 		Endpoint:          getenv("FLAG_SUBMIT_URL", "http://flagserver:5000/upload_flag"),
 		RequestTimeout:    getenvDuration("FLAG_SUBMIT_TIMEOUT", time.Second*5),
+		Concurrency:       getenvInt("FLAG_SUBMIT_CONCURRENCY", 1),
 	}
 }
 

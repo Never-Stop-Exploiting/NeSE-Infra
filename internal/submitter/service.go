@@ -10,6 +10,8 @@ import (
 	"awdinfra/internal/domain"
 	"awdinfra/internal/queue"
 	"awdinfra/internal/storage"
+
+	"golang.org/x/sync/errgroup"
 )
 
 // Service processes captured flags and forwards them using pluggable adapters.
@@ -35,17 +37,36 @@ func New(cfg config.Config, log *slog.Logger, repo storage.Repository, broker qu
 
 // Run begins polling the flag queue until context cancellation.
 func (s *Service) Run(ctx context.Context) error {
+	workers := s.cfg.FlagSubmitter.Concurrency
+	if workers <= 0 {
+		workers = 1
+	}
+	s.log.Info("flag submitter starting", slog.Int("workers", workers))
+	g, ctx := errgroup.WithContext(ctx)
+	for i := 0; i < workers; i++ {
+		workerID := i + 1
+		g.Go(func() error {
+			return s.worker(ctx, workerID)
+		})
+	}
+	return g.Wait()
+}
+
+func (s *Service) worker(ctx context.Context, workerID int) error {
 	for {
 		select {
 		case <-ctx.Done():
-			s.log.Info("flag submitter stopping")
+			s.log.Info("submitter worker stopping", slog.Int("worker", workerID))
 			return ctx.Err()
 		default:
-			if err := s.poll(ctx); err != nil && err != queue.ErrNoMessages {
-				s.log.Error("submitter poll failed", slog.Any("err", err))
-				time.Sleep(time.Second)
+		}
+		if err := s.poll(ctx); err != nil {
+			if err == queue.ErrNoMessages {
+				time.Sleep(time.Millisecond * 200)
+				continue
 			}
-			time.Sleep(time.Millisecond * 200)
+			s.log.Error("submitter poll failed", slog.Any("err", err), slog.Int("worker", workerID))
+			time.Sleep(time.Second)
 		}
 	}
 }
@@ -80,6 +101,14 @@ func (s *Service) processMessage(ctx context.Context, msg queue.Message) error {
 	}
 	if payload.FlagID == "" || payload.FlagValue == "" {
 		return fmt.Errorf("invalid payload")
+	}
+
+	ready, err := s.prepareFlagSubmission(ctx, payload.FlagID)
+	if err != nil {
+		return err
+	}
+	if !ready {
+		return nil
 	}
 
 	request := SubmissionRequest{
@@ -121,7 +150,7 @@ func (s *Service) processMessage(ctx context.Context, msg queue.Message) error {
 		case SubmissionStatusAccepted:
 			flag.Status = domain.FlagStatusAccepted
 		case SubmissionStatusDuplicated:
-			flag.Status = domain.FlagStatusDuplicate
+			flag.Status = domain.FlagStatusDuplicated
 		case SubmissionStatusFailed:
 			flag.Status = domain.FlagStatusFailed
 		default:
@@ -173,4 +202,22 @@ func (s *Service) recordAttempt(ctx context.Context, flagID string, status int, 
 		s.log.Warn("store attempt failed", slog.Any("err", err), slog.String("flag_id", flagID))
 	}
 	return attempt.SubmittedAt
+}
+
+func (s *Service) prepareFlagSubmission(ctx context.Context, flagID string) (bool, error) {
+	flag, err := s.repo.GetFlag(ctx, flagID)
+	if err != nil {
+		return false, fmt.Errorf("load flag: %w", err)
+	}
+	if flag.Status == domain.FlagStatusDropped {
+		s.log.Info("flag skipped (dropped)", slog.String("flag_id", flagID))
+		return false, nil
+	}
+	if flag.Status != domain.FlagStatusSubmitting {
+		flag.Status = domain.FlagStatusSubmitting
+		if err := s.repo.UpdateFlag(ctx, &flag); err != nil {
+			s.log.Warn("mark flag submitting failed", slog.Any("err", err), slog.String("flag_id", flagID))
+		}
+	}
+	return true, nil
 }

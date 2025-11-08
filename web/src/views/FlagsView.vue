@@ -12,15 +12,32 @@
               </option>
             </select>
           </label>
+          <button
+            class="ghost danger"
+            type="button"
+            :disabled="!canBulkCancel"
+            @click="cancelSelectedFlags"
+          >
+            {{ bulkCanceling ? "Canceling..." : `Cancel Selected (${selectedCount})` }}
+          </button>
           <button class="refresh" :disabled="flagStore.loading" @click="flagStore.refresh">
             {{ flagStore.loading ? "Refreshing..." : "Refresh" }}
           </button>
         </div>
+        <p v-if="bulkError" class="error-text">{{ bulkError }}</p>
       </header>
       <div class="table-wrapper">
         <table>
           <thead>
             <tr>
+              <th class="select-col">
+                <input
+                  type="checkbox"
+                  :checked="allVisibleSelected"
+                  :disabled="!flagStore.flags.length"
+                  @change="toggleSelectAll(($event.target as HTMLInputElement).checked)"
+                />
+              </th>
               <th>Flag</th>
               <th>Status</th>
               <th>Attempts</th>
@@ -36,6 +53,15 @@
               :class="{ active: selectedFlag?.id === flag.id }"
               @click="selectFlag(flag.id)"
             >
+              <td class="select-col">
+                <input
+                  type="checkbox"
+                  :checked="isSelected(flag.id)"
+                  :disabled="!canCancelFlag(flag)"
+                  @click.stop
+                  @change.stop="toggleFlagSelection(flag, ($event.target as HTMLInputElement).checked)"
+                />
+              </td>
               <td>
                 <code :title="flag.value">{{ truncateFlag(flag.value) }}</code>
               </td>
@@ -44,6 +70,13 @@
               <td>{{ flag.challengeName || flag.challengeId || "—" }}</td>
               <td>{{ flag.targetLabel || flag.targetId || "—" }}</td>
               <td>
+                <button
+                  class="cancel"
+                  :disabled="!canCancelFlag(flag) || cancelingFlag === flag.id"
+                  @click.stop="cancelFlagAction(flag.id)"
+                >
+                  {{ cancelingFlag === flag.id ? "Canceling..." : "Cancel" }}
+                </button>
                 <button
                   class="retry"
                   :disabled="retryingFlag === flag.id"
@@ -54,7 +87,7 @@
               </td>
             </tr>
             <tr v-if="!flagStore.flags.length && !flagStore.loading">
-              <td colspan="6" class="empty">No flags found</td>
+              <td colspan="7" class="empty">No flags found</td>
             </tr>
           </tbody>
         </table>
@@ -155,6 +188,10 @@ const detailError = ref<string | null>(null);
 const logOutput = ref("Select a flag to view logs");
 const statusFilter = ref("");
 const retryingFlag = ref<string | null>(null);
+const selectedFlags = ref<Set<string>>(new Set());
+const cancelingFlag = ref<string | null>(null);
+const bulkCanceling = ref(false);
+const bulkError = ref<string | null>(null);
 
 const selectedFlag = computed(() =>
   flagStore.flags.find((flag) => flag.id === selectedFlagId.value)
@@ -166,7 +203,7 @@ const statusOptions = [
   { label: "Submitting", value: "submitting" },
   { label: "Accepted", value: "accepted" },
   { label: "Failed", value: "failed" },
-  { label: "Duplicated", value: "duplicate" },
+  { label: "Duplicated", value: "duplicated" },
   { label: "Retry", value: "retry" },
   { label: "Dropped", value: "dropped" },
 ];
@@ -176,10 +213,20 @@ const statusTextMap: Record<string, string> = {
   submitting: "Submitting",
   accepted: "Accepted",
   failed: "Failed",
-  duplicate: "Duplicated",
+  duplicated: "Duplicated",
   retry: "Retry",
   dropped: "Dropped"
 };
+
+const selectedCount = computed(() => selectedFlags.value.size);
+const allVisibleSelected = computed(() => {
+  const cancellable = flagStore.flags.filter((flag) => canCancelFlag(flag));
+  if (!cancellable.length) {
+    return false;
+  }
+  return cancellable.every((flag) => selectedFlags.value.has(flag.id));
+});
+const canBulkCancel = computed(() => selectedCount.value > 0 && !bulkCanceling.value);
 
 watch(
   () => flagStore.statusFilter,
@@ -187,6 +234,14 @@ watch(
     statusFilter.value = value;
   },
   { immediate: true }
+);
+
+watch(
+  () => flagStore.flags.map((flag) => `${flag.id}:${flag.status}`),
+  () => {
+    const allowed = new Set(flagStore.flags.filter((flag) => canCancelFlag(flag)).map((flag) => flag.id));
+    selectedFlags.value = new Set([...selectedFlags.value].filter((id) => allowed.has(id)));
+  }
 );
 
 async function selectFlag(id: string) {
@@ -238,11 +293,82 @@ function truncateFlag(value: string, length = 24) {
   return value.length > length ? `${value.slice(0, length)}…` : value;
 }
 
+function isSelected(id: string) {
+  return selectedFlags.value.has(id);
+}
+
+function toggleFlagSelection(flag: FlagRecord, checked: boolean) {
+  if (!canCancelFlag(flag)) {
+    return;
+  }
+  const next = new Set(selectedFlags.value);
+  if (checked) {
+    next.add(flag.id);
+  } else {
+    next.delete(flag.id);
+  }
+  selectedFlags.value = next;
+}
+
+function toggleSelectAll(checked: boolean) {
+  if (!checked) {
+    selectedFlags.value = new Set();
+    return;
+  }
+  const ids = flagStore.flags.filter((flag) => canCancelFlag(flag)).map((flag) => flag.id);
+  selectedFlags.value = new Set(ids);
+}
+
+function canCancelFlag(flag: FlagRecord) {
+  return !["accepted", "dropped", "submitting", "failed", "duplicated"].includes(flag.status);
+}
+
 async function changeFilter() {
   await flagStore.setStatusFilter(statusFilter.value);
   selectedFlagId.value = null;
   selectedFlagDetail.value = null;
   logOutput.value = "Select a flag to view logs";
+  selectedFlags.value = new Set();
+  bulkError.value = null;
+}
+
+async function cancelFlagAction(id: string) {
+  if (cancelingFlag.value) {
+    return;
+  }
+  cancelingFlag.value = id;
+  try {
+    await flagStore.cancel(id);
+    const next = new Set(selectedFlags.value);
+    next.delete(id);
+    selectedFlags.value = next;
+    if (selectedFlagId.value === id) {
+      await loadFlagDetail(id);
+    }
+  } finally {
+    cancelingFlag.value = null;
+  }
+}
+
+async function cancelSelectedFlags() {
+  if (!selectedCount.value || bulkCanceling.value) {
+    return;
+  }
+  bulkCanceling.value = true;
+  bulkError.value = null;
+  try {
+    const response = await flagStore.cancelSelected(Array.from(selectedFlags.value));
+    const errors = (response.results ?? [])
+      .filter((result) => result.error)
+      .map((result) => `${result.flagId ?? "unknown"}: ${result.error}`);
+    if (errors.length) {
+      bulkError.value = errors.join("; ");
+    } else {
+      selectedFlags.value = new Set();
+    }
+  } finally {
+    bulkCanceling.value = false;
+  }
 }
 
 function formatTimestamp(value?: string) {
@@ -305,6 +431,26 @@ onMounted(() => {
   padding: 0.35rem 0.9rem;
 }
 
+.actions .ghost {
+  background: transparent;
+  border: 1px solid rgba(148, 163, 184, 0.5);
+  color: #e2e8f0;
+  border-radius: 999px;
+  padding: 0.35rem 0.9rem;
+  cursor: pointer;
+}
+
+.actions .ghost.danger {
+  border-color: rgba(248, 113, 113, 0.8);
+  color: #fecaca;
+}
+
+.error-text {
+  color: #fca5a5;
+  font-size: 0.85rem;
+  margin-top: 0.35rem;
+}
+
 .table-wrapper {
   overflow-x: auto;
 }
@@ -318,6 +464,11 @@ th,
 td {
   padding: 0.75rem;
   border-bottom: 1px solid rgba(148, 163, 184, 0.15);
+}
+
+.select-col {
+  width: 2.5rem;
+  text-align: center;
 }
 
 th {
@@ -350,6 +501,16 @@ tr.active {
   cursor: pointer;
 }
 
+.cancel {
+  background: transparent;
+  border: 1px solid rgba(248, 113, 113, 0.6);
+  color: #fecaca;
+  border-radius: 999px;
+  padding: 0.25rem 0.9rem;
+  cursor: pointer;
+  margin-right: 0.4rem;
+}
+
 .table-actions {
   margin-top: 0.75rem;
   display: flex;
@@ -362,6 +523,13 @@ tr.active {
   color: #e2e8f0;
   padding: 0.4rem 1.2rem;
   border-radius: 999px;
+}
+
+.retry:disabled,
+.cancel:disabled,
+.actions .ghost:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .status {

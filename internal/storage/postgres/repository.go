@@ -1961,22 +1961,35 @@ func (r *Repository) AddFlagAttempt(ctx context.Context, flagID string, attempt 
 const runOrderingExpression = "COALESCE(queued_at, started_at, finished_at, TIMESTAMP '1970-01-01')"
 
 func buildRunFilterClause(filter domain.RunFilter, startIdx int) (string, []any) {
-	clauses := make([]string, 0, 4)
-	args := make([]any, 0, 4)
+	clauses := make([]string, 0, 6)
+	args := make([]any, 0, 6)
 
-	addClause := func(value string, column string) {
+	addEquality := func(value string, column string) {
 		value = strings.TrimSpace(value)
 		if value == "" {
 			return
 		}
 		position := startIdx + len(args)
-		clauses = append(clauses, fmt.Sprintf("%s = $%d", column, position))
+		clauses = append(clauses, fmt.Sprintf("runs.%s = $%d", column, position))
 		args = append(args, value)
 	}
 
-	addClause(filter.Status, "status")
-	addClause(filter.ExploitID, "exploit_id")
-	addClause(filter.TargetID, "target_id")
+	addLike := func(value string, clause string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		position := startIdx + len(args)
+		clauses = append(clauses, fmt.Sprintf(clause, position))
+		args = append(args, "%"+strings.ToLower(value)+"%")
+	}
+
+	addEquality(filter.Status, "status")
+	addEquality(filter.ExploitID, "exploit_id")
+	addEquality(filter.TargetID, "target_id")
+	addLike(filter.ExploitName, "runs.exploit_id IN (SELECT id FROM exploits WHERE LOWER(name) LIKE $%d)")
+	addLike(filter.TargetName, "runs.target_id IN (SELECT id FROM targets WHERE LOWER(team_name) LIKE $%d)")
+
 	if len(clauses) == 0 {
 		return "", nil
 	}

@@ -1002,7 +1002,7 @@ func (r *Repository) ListRuns(ctx context.Context, filter domain.RunFilter, limi
 	defer r.mu.RUnlock()
 	items := make([]domain.Run, 0, len(r.runs))
 	for _, run := range r.runs {
-		if !matchesRunFilter(run, filter) {
+		if !matchesRunFilter(run, filter, r) {
 			continue
 		}
 		items = append(items, run)
@@ -1428,7 +1428,7 @@ func jobHintsFromMetadata(meta map[string]any) (string, string, time.Duration) {
 	return flagRegex, flagFile, timeout
 }
 
-func matchesRunFilter(run domain.Run, filter domain.RunFilter) bool {
+func matchesRunFilter(run domain.Run, filter domain.RunFilter, repo *Repository) bool {
 	if value := strings.TrimSpace(filter.Status); value != "" && !strings.EqualFold(value, string(run.Status)) {
 		return false
 	}
@@ -1437,6 +1437,24 @@ func matchesRunFilter(run domain.Run, filter domain.RunFilter) bool {
 	}
 	if value := strings.TrimSpace(filter.TargetID); value != "" && !strings.EqualFold(value, run.TargetID) {
 		return false
+	}
+	if value := strings.TrimSpace(filter.ExploitName); value != "" {
+		name := ""
+		if exploit, ok := repo.exploits[run.ExploitID]; ok {
+			name = exploit.Name
+		}
+		if name == "" || !strings.Contains(strings.ToLower(name), strings.ToLower(value)) {
+			return false
+		}
+	}
+	if value := strings.TrimSpace(filter.TargetName); value != "" {
+		name := ""
+		if target, ok := repo.targets[run.TargetID]; ok {
+			name = target.TeamName
+		}
+		if name == "" || !strings.Contains(strings.ToLower(name), strings.ToLower(value)) {
+			return false
+		}
 	}
 	return true
 }

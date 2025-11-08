@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -30,6 +31,8 @@ type Server struct {
 	broker     queue.Broker
 	httpServer *http.Server
 }
+
+var errFlagCancelNotAllowed = errors.New("flag cannot be canceled")
 
 // New returns a configured control plane server.
 func New(cfg config.Config, logger *slog.Logger, repository storage.Repository, broker queue.Broker) *Server {
@@ -85,9 +88,9 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/exploits", s.handleExploits)
 	mux.HandleFunc("/api/v1/exploits/", s.handleExploitActions)
 	mux.HandleFunc("/api/v1/flags", s.handleFlags)
+	mux.HandleFunc("/api/v1/flags/cancel", s.handleFlagBulkCancel)
 	mux.HandleFunc("/api/v1/flags/", s.handleFlagDetail)
 	mux.HandleFunc("/api/v1/runs", s.handleRuns)
-	mux.HandleFunc("/api/v1/runs/options", s.handleRunFilterOptions)
 	mux.HandleFunc("/api/v1/runs/cancel", s.handleRunBulkCancel)
 	mux.HandleFunc("/api/v1/runs/", s.handleRunDetail)
 	mux.HandleFunc("/api/v1/logs", s.handleLogs)
@@ -982,9 +985,87 @@ func (s *Server) handleFlagDetail(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"logs": logs})
+	case "cancel":
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		var req struct {
+			Reason string `json:"reason"`
+		}
+		if r.Body != nil {
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+				writeError(w, http.StatusBadRequest, "invalid payload")
+				return
+			}
+		}
+		flag, err := s.cancelFlag(r.Context(), id, req.Reason)
+		if err != nil {
+			if errors.Is(err, errFlagCancelNotAllowed) {
+				writeError(w, http.StatusConflict, "flag cannot be canceled")
+				return
+			}
+			if errors.Is(err, sql.ErrNoRows) {
+				writeError(w, http.StatusNotFound, "flag not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "failed to cancel flag")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"flag_id": flag.ID, "status": flag.Status})
 	default:
 		writeError(w, http.StatusNotFound, "unknown flag action")
 	}
+}
+
+func (s *Server) handleFlagBulkCancel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req struct {
+		FlagIDs []string `json:"flagIds"`
+		Reason  string   `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid payload")
+		return
+	}
+	if len(req.FlagIDs) == 0 {
+		writeError(w, http.StatusBadRequest, "flagIds is required")
+		return
+	}
+	ctx := r.Context()
+	results := make([]map[string]any, 0, len(req.FlagIDs))
+	seen := make(map[string]struct{})
+	for _, raw := range req.FlagIDs {
+		flagID := strings.TrimSpace(raw)
+		if flagID == "" {
+			continue
+		}
+		if _, exists := seen[flagID]; exists {
+			continue
+		}
+		seen[flagID] = struct{}{}
+
+		flag, err := s.cancelFlag(ctx, flagID, req.Reason)
+		if err != nil {
+			switch {
+			case errors.Is(err, sql.ErrNoRows):
+				results = append(results, map[string]any{"flagId": flagID, "error": "flag not found"})
+			case errors.Is(err, errFlagCancelNotAllowed):
+				results = append(results, map[string]any{"flagId": flagID, "error": "flag cannot be canceled"})
+			default:
+				results = append(results, map[string]any{"flagId": flagID, "error": "failed to cancel flag"})
+			}
+			continue
+		}
+		results = append(results, map[string]any{
+			"flagId": flag.ID,
+			"status": flag.Status,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"results": results})
 }
 
 func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
@@ -1004,9 +1085,11 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	cursor := strings.TrimSpace(query.Get("cursor"))
 	filter := domain.RunFilter{
-		Status:    strings.TrimSpace(query.Get("status")),
-		ExploitID: strings.TrimSpace(query.Get("exploitId")),
-		TargetID:  strings.TrimSpace(query.Get("targetId")),
+		Status:      strings.TrimSpace(query.Get("status")),
+		ExploitID:   strings.TrimSpace(query.Get("exploitId")),
+		TargetID:    strings.TrimSpace(query.Get("targetId")),
+		ExploitName: strings.TrimSpace(query.Get("exploitName")),
+		TargetName:  strings.TrimSpace(query.Get("targetName")),
 	}
 	runs, nextCursor, err := s.repository.ListRuns(r.Context(), filter, limit, cursor)
 	if err != nil {
@@ -1413,78 +1496,6 @@ func (s *Server) handleRunBulkCancel(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"results": results})
 }
 
-func (s *Server) handleRunFilterOptions(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	query := r.URL.Query()
-	kind := strings.ToLower(strings.TrimSpace(query.Get("type")))
-	if kind != "exploit" && kind != "target" {
-		writeError(w, http.StatusBadRequest, "type must be exploit or target")
-		return
-	}
-	search := strings.ToLower(strings.TrimSpace(query.Get("q")))
-	limit := 20
-
-	items := make([]map[string]string, 0, limit)
-	ctx := r.Context()
-
-	match := func(id, label string) bool {
-		if search == "" {
-			return true
-		}
-		return strings.Contains(strings.ToLower(id), search) || strings.Contains(strings.ToLower(label), search)
-	}
-
-	switch kind {
-	case "exploit":
-		exploits, err := s.repository.ListExploits(ctx)
-		if err != nil {
-			s.logger.Error("list exploits for filter failed", slog.Any("err", err))
-			writeError(w, http.StatusInternalServerError, "failed to load options")
-			return
-		}
-		for _, exploit := range exploits {
-			if !match(exploit.ID, exploit.Name) {
-				continue
-			}
-			items = append(items, map[string]string{
-				"id":    exploit.ID,
-				"label": exploit.Name,
-			})
-			if len(items) >= limit {
-				break
-			}
-		}
-	case "target":
-		targets, err := s.repository.ListTargets(ctx)
-		if err != nil {
-			s.logger.Error("list targets for filter failed", slog.Any("err", err))
-			writeError(w, http.StatusInternalServerError, "failed to load options")
-			return
-		}
-		for _, target := range targets {
-			label := target.TeamName
-			if strings.TrimSpace(label) == "" {
-				label = target.ID
-			}
-			if !match(target.ID, label) {
-				continue
-			}
-			items = append(items, map[string]string{
-				"id":    target.ID,
-				"label": label,
-			})
-			if len(items) >= limit {
-				break
-			}
-		}
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
-}
-
 func (s *Server) cancelRunInternal(ctx context.Context, run domain.Run, reason string) (domain.Run, error) {
 	reason = strings.TrimSpace(reason)
 	if reason == "" {
@@ -1528,6 +1539,39 @@ func (s *Server) cancelRunInternal(ctx context.Context, run domain.Run, reason s
 		s.logger.Warn("append cancel log failed", slog.Any("err", err), slog.String("run_id", run.ID))
 	}
 	return run, nil
+}
+
+func (s *Server) cancelFlag(ctx context.Context, flagID string, reason string) (domain.Flag, error) {
+	flag, err := s.repository.GetFlag(ctx, flagID)
+	if err != nil {
+		return domain.Flag{}, err
+	}
+	switch flag.Status {
+	case domain.FlagStatusAccepted, domain.FlagStatusDropped, domain.FlagStatusFailed, domain.FlagStatusDuplicated:
+		return domain.Flag{}, errFlagCancelNotAllowed
+	case domain.FlagStatusSubmitting:
+		return domain.Flag{}, errFlagCancelNotAllowed
+	}
+	flag.Status = domain.FlagStatusDropped
+	if err := s.repository.UpdateFlag(ctx, &flag); err != nil {
+		return domain.Flag{}, err
+	}
+	logFields := map[string]any{
+		"status": flag.Status,
+	}
+	if strings.TrimSpace(reason) != "" {
+		logFields["reason"] = reason
+	}
+	if err := s.repository.AppendLog(ctx, domain.LogEntry{
+		Level:   "warn",
+		Source:  "control-plane",
+		Message: fmt.Sprintf("flag %s dropped", flag.ID),
+		FlagID:  flag.ID,
+		Fields:  logFields,
+	}); err != nil {
+		s.logger.Warn("append flag cancel log failed", slog.Any("err", err), slog.String("flag_id", flag.ID))
+	}
+	return flag, nil
 }
 
 func (s *Server) enqueueFlag(ctx context.Context, flag domain.Flag) {

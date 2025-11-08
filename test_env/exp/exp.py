@@ -7,7 +7,7 @@ HOST = sys.argv[1]
 PORT = sys.argv[2]
 
 print(f"Start testing challenge upload to {HOST}:{PORT}", flush=True)
-time.sleep(10)
+time.sleep(0.5)
 print("Sending request...", flush=True)
 
 flags = [

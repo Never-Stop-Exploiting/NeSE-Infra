@@ -20,49 +20,11 @@
           </div>
           <div class="filter-group">
             <label>Exploit</label>
-            <div class="lookup-input">
-              <input v-model.trim="filterDraft.exploitId" type="text" placeholder="Exploit ID or name" />
-              <button
-                type="button"
-                class="ghost small"
-                :disabled="suggestionLoading.exploit"
-                @click="lookupOptions('exploitId')"
-              >
-                {{ suggestionLoading.exploit ? "..." : "Lookup" }}
-              </button>
-            </div>
-            <p v-if="suggestionError.exploit" class="error-text">{{ suggestionError.exploit }}</p>
-            <ul v-if="exploitSuggestions.length" class="suggestion-list">
-              <li v-for="option in exploitSuggestions" :key="option.id">
-                <button type="button" @click="applySuggestion('exploitId', option)">
-                  <strong>{{ option.label }}</strong>
-                  <small>{{ option.id }}</small>
-                </button>
-              </li>
-            </ul>
+            <input v-model.trim="filterDraft.exploitName" type="text" placeholder="Exploit name" />
           </div>
           <div class="filter-group">
             <label>Target</label>
-            <div class="lookup-input">
-              <input v-model.trim="filterDraft.targetId" type="text" placeholder="Target ID or team" />
-              <button
-                type="button"
-                class="ghost small"
-                :disabled="suggestionLoading.target"
-                @click="lookupOptions('targetId')"
-              >
-                {{ suggestionLoading.target ? "..." : "Lookup" }}
-              </button>
-            </div>
-            <p v-if="suggestionError.target" class="error-text">{{ suggestionError.target }}</p>
-            <ul v-if="targetSuggestions.length" class="suggestion-list">
-              <li v-for="option in targetSuggestions" :key="option.id">
-                <button type="button" @click="applySuggestion('targetId', option)">
-                  <strong>{{ option.label }}</strong>
-                  <small>{{ option.id }}</small>
-                </button>
-              </li>
-            </ul>
+            <input v-model.trim="filterDraft.targetName" type="text" placeholder="Target or team" />
           </div>
           <div class="filter-actions">
             <button type="submit" class="ghost" :disabled="!filterDirty">Apply</button>
@@ -260,9 +222,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { useRunStore, type RunFilters } from "@/stores/runs";
-import type { FlagRecord, RunFilterOption } from "@/types";
+import type { FlagRecord } from "@/types";
 import { fetchFlagDetail, retryFlag as apiRetryFlag } from "@/api/flags";
-import { fetchRunFilterOptions } from "@/api/runs";
 
 const runStore = useRunStore();
 const canceling = ref(false);
@@ -277,13 +238,6 @@ const flagDetail = ref<FlagRecord | null>(null);
 const flagLoading = ref(false);
 const flagError = ref<string | null>(null);
 const flagRetrying = ref(false);
-const exploitSuggestions = ref<RunFilterOption[]>([]);
-const targetSuggestions = ref<RunFilterOption[]>([]);
-const suggestionLoading = ref<Record<"exploit" | "target", boolean>>({ exploit: false, target: false });
-const suggestionError = ref<Record<"exploit" | "target", string | null>>({
-  exploit: null,
-  target: null
-});
 
 const cancelActionLabel = computed(() => {
   const status = runStore.selectedRun?.status;
@@ -322,7 +276,7 @@ const flagAttempts = computed(() => flagDetail.value?.attempts ?? []);
 
 const hasActiveFilters = computed(() => {
   const value = runStore.filters as RunFilters;
-  return Boolean(value.status || value.exploitId || value.targetId);
+  return Boolean(value.status || value.exploitName || value.targetName);
 });
 
 const filterDirty = computed(
@@ -357,28 +311,8 @@ watch(
   () => ({ ...(runStore.filters as RunFilters) }),
   (value) => {
     filterDraft.value = cloneFilters(value);
-    clearSuggestions("exploitId");
-    clearSuggestions("targetId");
   },
   { deep: true }
-);
-
-watch(
-  () => filterDraft.value.exploitId,
-  (value) => {
-    if (!value) {
-      clearSuggestions("exploitId");
-    }
-  }
-);
-
-watch(
-  () => filterDraft.value.targetId,
-  (value) => {
-    if (!value) {
-      clearSuggestions("targetId");
-    }
-  }
 );
 
 function select(id: string) {
@@ -421,48 +355,9 @@ async function applyFilters() {
 }
 
 async function resetFilters() {
-  filterDraft.value = { status: "", exploitId: "", targetId: "" };
+  filterDraft.value = { status: "", exploitName: "", targetName: "" };
   await runStore.setFilters({});
   selectedRuns.value = new Set();
-}
-
-async function lookupOptions(field: "exploitId" | "targetId") {
-  const query = filterDraft.value[field]?.trim();
-  if (!query) {
-    clearSuggestions(field);
-    return;
-  }
-  const key = field === "exploitId" ? "exploit" : "target";
-  suggestionLoading.value[key] = true;
-  suggestionError.value[key] = null;
-  try {
-    const options = await fetchRunFilterOptions(key, query);
-    if (field === "exploitId") {
-      exploitSuggestions.value = options;
-    } else {
-      targetSuggestions.value = options;
-    }
-  } catch (err) {
-    console.error("lookup options failed", err);
-    suggestionError.value[key] = "Lookup failed";
-  } finally {
-    suggestionLoading.value[key] = false;
-  }
-}
-
-function clearSuggestions(field: "exploitId" | "targetId") {
-  if (field === "exploitId") {
-    exploitSuggestions.value = [];
-    suggestionError.value.exploit = null;
-  } else {
-    targetSuggestions.value = [];
-    suggestionError.value.target = null;
-  }
-}
-
-function applySuggestion(field: "exploitId" | "targetId", option: RunFilterOption) {
-  filterDraft.value[field] = option.id;
-  clearSuggestions(field);
 }
 
 function toggleRowSelection(id: string, checked: boolean) {
@@ -542,8 +437,8 @@ function formatTimestamp(value?: string) {
 function cloneFilters(source?: RunFilters): RunFilters {
   return {
     status: source?.status ?? "",
-    exploitId: source?.exploitId ?? "",
-    targetId: source?.targetId ?? ""
+    exploitName: source?.exploitName ?? "",
+    targetName: source?.targetName ?? ""
   };
 }
 
@@ -552,11 +447,11 @@ function normalizeFilter(source: RunFilters): RunFilters {
   if (source.status?.trim()) {
     target.status = source.status.trim();
   }
-  if (source.exploitId?.trim()) {
-    target.exploitId = source.exploitId.trim();
+  if (source.exploitName?.trim()) {
+    target.exploitName = source.exploitName.trim();
   }
-  if (source.targetId?.trim()) {
-    target.targetId = source.targetId.trim();
+  if (source.targetName?.trim()) {
+    target.targetName = source.targetName.trim();
   }
   return target;
 }
@@ -566,8 +461,8 @@ function filtersEqual(a: RunFilters, b: RunFilters) {
   const right = normalizeFilter(b);
   return (
     (left.status ?? "") === (right.status ?? "") &&
-    (left.exploitId ?? "") === (right.exploitId ?? "") &&
-    (left.targetId ?? "") === (right.targetId ?? "")
+    (left.exploitName ?? "") === (right.exploitName ?? "") &&
+    (left.targetName ?? "") === (right.targetName ?? "")
   );
 }
 
@@ -640,59 +535,9 @@ onMounted(() => {
   padding: 0.35rem 0.9rem;
 }
 
-.ghost.small {
-  padding: 0.25rem 0.6rem;
-  font-size: 0.8rem;
-}
-
 .filters .secondary {
   border-color: rgba(148, 163, 184, 0.5);
   color: #e2e8f0;
-}
-
-.lookup-input {
-  display: flex;
-  gap: 0.4rem;
-}
-
-.lookup-input input {
-  flex: 1;
-}
-
-.suggestion-list {
-  list-style: none;
-  padding: 0.35rem;
-  margin: 0.35rem 0 0;
-  border: 1px solid rgba(148, 163, 184, 0.25);
-  border-radius: 8px;
-  background: rgba(15, 23, 42, 0.85);
-  max-height: 200px;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-}
-
-.suggestion-list button {
-  width: 100%;
-  text-align: left;
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  padding: 0.35rem 0.5rem;
-  color: #e2e8f0;
-  display: flex;
-  flex-direction: column;
-}
-
-.suggestion-list button:hover {
-  border-color: rgba(59, 130, 246, 0.6);
-  background: rgba(59, 130, 246, 0.15);
-}
-
-.suggestion-list small {
-  color: #94a3b8;
-  font-size: 0.75rem;
 }
 
 .bulk-actions {

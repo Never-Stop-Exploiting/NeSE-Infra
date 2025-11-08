@@ -1,7 +1,7 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
 import type { FlagRecord } from "@/types";
-import { fetchFlags, retryFlag, fetchFlagLogs } from "@/api/flags";
+import { fetchFlags, retryFlag, fetchFlagLogs, cancelFlag as apiCancelFlag, cancelFlags } from "@/api/flags";
 
 export const useFlagStore = defineStore("flags", () => {
   const flags = ref<FlagRecord[]>([]);
@@ -63,6 +63,26 @@ export const useFlagStore = defineStore("flags", () => {
     await refresh();
   }
 
+  async function cancel(id: string, reason?: string) {
+    await apiCancelFlag(id, reason);
+    delete logCache.value[id];
+    await refresh();
+  }
+
+  async function cancelSelected(ids: string[], reason?: string) {
+    if (!ids.length) {
+      return { results: [] };
+    }
+    const response = await cancelFlags(ids, reason);
+    for (const result of response.results ?? []) {
+      if (result.flagId) {
+        delete logCache.value[result.flagId];
+      }
+    }
+    await refresh();
+    return response;
+  }
+
   async function loadLogs(id: string) {
     if (logCache.value[id]) {
       return logCache.value[id];
@@ -83,6 +103,8 @@ export const useFlagStore = defineStore("flags", () => {
     loadMore,
     setStatusFilter,
     retry,
-    loadLogs
+    loadLogs,
+    cancel,
+    cancelSelected
   };
 });

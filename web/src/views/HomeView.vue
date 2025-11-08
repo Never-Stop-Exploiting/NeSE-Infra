@@ -67,6 +67,21 @@
         </div>
       </div>
 
+      <div class="matrix-custom">
+        <div class="custom-field">
+          <span>开始</span>
+          <input type="datetime-local" v-model="customStart" />
+        </div>
+        <div class="custom-field">
+          <span>结束</span>
+          <input type="datetime-local" v-model="customEnd" />
+        </div>
+        <button class="control primary" @click="applyCustomWindow" :disabled="matrixLoading">
+          应用窗口
+        </button>
+      </div>
+      <p v-if="matrixInputError" class="error-text matrix-error">{{ matrixInputError }}</p>
+
       <div class="matrix-body">
         <div v-if="matrixLoading" class="matrix-empty">Loading matrix…</div>
         <div v-else-if="matrixError" class="matrix-empty error">{{ matrixError }}</div>
@@ -137,6 +152,9 @@ const matrixRangeOptions = [5, 15, 30, 60];
 const rangeMinutes = ref(15);
 const endTime = ref(new Date());
 const startTime = ref(new Date(endTime.value.getTime() - rangeMinutes.value * 60 * 1000));
+const customStart = ref("");
+const customEnd = ref("");
+const matrixInputError = ref<string | null>(null);
 
 watch(rangeMinutes, (minutes, previous) => {
   if (previous === undefined) {
@@ -146,6 +164,15 @@ watch(rangeMinutes, (minutes, previous) => {
   startTime.value = new Date(endTime.value.getTime() - delta);
   loadMatrix();
 });
+
+watch(
+  () => [startTime.value.getTime(), endTime.value.getTime()],
+  () => {
+    customStart.value = formatInputDate(startTime.value);
+    customEnd.value = formatInputDate(endTime.value);
+  },
+  { immediate: true }
+);
 
 const exploitCount = computed(() => overview.value.exploitCount);
 const targetCount = computed(() => overview.value.targetCount);
@@ -195,10 +222,27 @@ const matrixRows = computed(() => {
   });
 });
 
-const matrixWindowLabel = computed(() => `${formatTimestamp(startTime.value)} → ${formatTimestamp(endTime.value)}`);
+const matrixWindowLabel = computed(
+  () => `${formatTimestamp(startTime.value)} → ${formatTimestamp(endTime.value)}`
+);
 
 function formatTimestamp(date: Date): string {
   return date.toLocaleString();
+}
+
+function formatInputDate(date: Date): string {
+  const pad = (value: number) => value.toString().padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(
+    date.getHours()
+  )}:${pad(date.getMinutes())}`;
+}
+
+function parseInputDate(value: string): Date | null {
+  if (!value) {
+    return null;
+  }
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
 function tooltipItems(cell: OverviewMatrixCell): string[] {
@@ -252,6 +296,31 @@ function setMatrixNow() {
   endTime.value = new Date();
   startTime.value = new Date(endTime.value.getTime() - rangeMinutes.value * 60 * 1000);
   loadMatrix();
+}
+
+function applyCustomWindow() {
+  matrixInputError.value = null;
+  const parsedStart = parseInputDate(customStart.value);
+  const parsedEnd = parseInputDate(customEnd.value);
+  if (!parsedStart || !parsedEnd) {
+    matrixInputError.value = "请输入有效的开始和结束时间";
+    return;
+  }
+  if (parsedEnd.getTime() <= parsedStart.getTime()) {
+    matrixInputError.value = "结束时间必须晚于开始时间";
+    return;
+  }
+  startTime.value = parsedStart;
+  endTime.value = parsedEnd;
+  const diffMinutes = Math.max(
+    1,
+    Math.round((parsedEnd.getTime() - parsedStart.getTime()) / (60 * 1000))
+  );
+  if (rangeMinutes.value !== diffMinutes) {
+    rangeMinutes.value = diffMinutes;
+  } else {
+    loadMatrix();
+  }
 }
 
 async function refreshAll() {
@@ -447,6 +516,44 @@ article li div {
 .matrix-body {
   width: 100%;
   overflow-x: auto;
+}
+
+.matrix-custom {
+  display: flex;
+  align-items: flex-end;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.25rem;
+}
+
+.matrix-custom .custom-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.82rem;
+  color: #94a3b8;
+}
+
+.matrix-custom input {
+  background: rgba(15, 23, 42, 0.85);
+  border: 1px solid rgba(148, 163, 184, 0.5);
+  border-radius: 10px;
+  padding: 0.4rem 0.6rem;
+  color: #e2e8f0;
+  min-width: 190px;
+}
+
+.matrix-custom .control.primary {
+  border-radius: 999px;
+  padding: 0.4rem 1rem;
+  background: #38bdf8;
+  color: #0f172a;
+  border: none;
+  font-weight: 600;
+}
+
+.matrix-error {
+  margin: 0;
 }
 
 .matrix-grid {

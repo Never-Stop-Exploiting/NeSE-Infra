@@ -63,11 +63,6 @@ export interface RunSummary {
   errorMessage?: string;
 }
 
-export interface RunFilterOption {
-  id: string;
-  label: string;
-}
-
 export interface RunDetail extends RunSummary {
   stdout?: string;
   stderr?: string;
@@ -81,8 +76,9 @@ export interface FlagRecord {
   id: string;
   value: string;
   challengeId: string;
-  status: "new" | "submitting" | "accepted" | "failed" | "duplicate" | "retry" | "dropped";
+  status: "new" | "submitting" | "accepted" | "failed" | "duplicated" | "retry" | "dropped";
   challengeName?: string;
+  flagSource?: string;
   targetId: string;
   targetLabel?: string;
   submissionCount: number;

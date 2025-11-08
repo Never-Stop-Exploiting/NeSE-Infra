@@ -3,6 +3,7 @@ import logging
 import os
 import secrets
 import socket
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -33,6 +34,15 @@ def parse_duration(value: str | None, fallback: float) -> float:
         return fallback
 
 
+def parse_int(value: str | None, fallback: int) -> int:
+    if value is None:
+        return fallback
+    try:
+        return int(value)
+    except ValueError:
+        return fallback
+
+
 def generate_id(prefix: str) -> str:
     return f"{prefix}-{secrets.token_hex(16)}"
 
@@ -56,7 +66,7 @@ class FlagSubmitter:
         self.stream = env("FLAG_QUEUE_NAME", "flag:pending")
         self.group = env("FLAG_SUBMITTER_GROUP", "submitter")
         consumer_suffix = socket.gethostname().split(".")[0]
-        self.consumer = env("FLAG_SUBMITTER_CONSUMER", f"python-{consumer_suffix}")
+        self.consumer_base = env("FLAG_SUBMITTER_CONSUMER", f"python-{consumer_suffix}")
 
         self.endpoint = env("FLAG_SUBMIT_URL", "http://flagserver:5000/upload_flag")
         self.timeout = parse_duration(env("FLAG_SUBMIT_TIMEOUT", "5s"), 5.0)
@@ -65,6 +75,7 @@ class FlagSubmitter:
 
         self.block_ms = int(parse_duration(env("FLAG_QUEUE_BLOCK", "5s"), 5.0) * 1000)
         self.plugin: FlagPlugin = HttpFlagPlugin(self.endpoint, self.timeout)
+        self.concurrency = max(1, parse_int(env("FLAG_SUBMIT_CONCURRENCY", "1"), 1))
 
     def ensure_group(self) -> None:
         try:
@@ -76,18 +87,33 @@ class FlagSubmitter:
 
     def run(self) -> None:
         self.ensure_group()
-        logging.info("python flag submitter started")
+        logging.info("python flag submitter started workers=%d", self.concurrency)
+        threads: list[threading.Thread] = []
+        for idx in range(self.concurrency):
+            consumer = self.consumer_base if self.concurrency == 1 else f"{self.consumer_base}-{idx + 1}"
+            thread = threading.Thread(
+                target=self.worker_loop,
+                args=(consumer,),
+                name=f"flag-submit-worker-{idx + 1}",
+                daemon=True,
+            )
+            thread.start()
+            threads.append(thread)
+        for thread in threads:
+            thread.join()
+
+    def worker_loop(self, consumer: str) -> None:
         while True:
             try:
-                self.consume_once()
+                self.consume_once(consumer)
             except Exception as exc:  # pylint: disable=broad-except
-                logging.exception("submitter loop error: %s", exc)
+                logging.exception("submitter worker error: %s", exc)
                 time.sleep(1)
 
-    def consume_once(self) -> None:
+    def consume_once(self, consumer: str) -> None:
         messages = self.redis.xreadgroup(
             self.group,
-            self.consumer,
+            consumer,
             {self.stream: ">"},
             count=1,
             block=self.block_ms,
@@ -123,20 +149,31 @@ class FlagSubmitter:
         if not flag_id or not flag_value:
             raise ValueError("invalid payload")
 
+        if not self.mark_flag_submitting(flag_id):
+            logging.info("flag %s is dropped or missing, skipping submission", flag_id)
+            return False
+
         result: SubmissionResult = self.plugin.submit(flag_value)
         status = result.status
         status_code = result.status_code
         message = result.message
         now = datetime.now(timezone.utc)
+        final_status = self.normalize_status(status)
         retry_delay = result.retry_after if result.retry_after is not None else self.retry_backoff
-        next_retry_at = now + timedelta(seconds=retry_delay) if status == "unknown" else None
+        next_retry_at = now + timedelta(seconds=retry_delay) if final_status == "retry" else None
 
         self.record_attempt(flag_id, status_code, message, next_retry_at, now)
-        self.update_flag(flag_id, status, now)
-        self.append_log(flag_id, status, status_code, message)
+        self.update_flag(flag_id, final_status, now)
+        self.append_log(flag_id, final_status, status_code, message)
 
-        logging.info("flag submitted flag_id=%s status=%s code=%s message=%s", flag_id, status, status_code, message)
-        return status == "unknown"
+        logging.info(
+            "flag submitted flag_id=%s status=%s code=%s message=%s",
+            flag_id,
+            final_status,
+            status_code,
+            message,
+        )
+        return final_status == "retry"
 
     def record_attempt(
         self,
@@ -212,6 +249,35 @@ class FlagSubmitter:
         self.redis.xack(self.stream, self.group, message_id)
         time.sleep(self.retry_backoff)
         self.redis.xadd(self.stream, {"data": body})
+
+    def mark_flag_submitting(self, flag_id: str) -> bool:
+        with psycopg.connect(self.dsn) as conn, conn.cursor() as cur:
+            cur.execute("SELECT status FROM flags WHERE id = %s", (flag_id,))
+            row = cur.fetchone()
+            if not row:
+                logging.warning("flag %s not found while marking submitting", flag_id)
+                conn.commit()
+                return False
+            status = (row[0] or "").strip().lower()
+            if status in {"dropped", "accepted", "failed", "duplicated"}:
+                conn.commit()
+                return False
+            if status != "submitting":
+                cur.execute("UPDATE flags SET status = %s WHERE id = %s", ("submitting", flag_id))
+            conn.commit()
+        return True
+
+    @staticmethod
+    def normalize_status(raw: str) -> str:
+        mapping = {
+            "accepted": "accepted",
+            "duplicated": "duplicated",
+            "duplicate": "duplicated",
+            "failed": "failed",
+            "retry": "retry",
+            "unknown": "retry",
+        }
+        return mapping.get(raw, "retry")
 
 
 def main() -> None:

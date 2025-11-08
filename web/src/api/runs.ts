@@ -1,5 +1,5 @@
 import { api, fallback } from "./client";
-import type { RunDetail, RunSummary, RunFilterOption } from "@/types";
+import type { RunDetail, RunSummary } from "@/types";
 
 const base = "/api/v1/runs";
 
@@ -7,8 +7,8 @@ export interface RunQueryParams {
   cursor?: string;
   limit?: number;
   status?: string;
-  exploitId?: string;
-  targetId?: string;
+  exploitName?: string;
+  targetName?: string;
 }
 
 export interface BulkRunCancelResponse {
@@ -33,11 +33,11 @@ export async function fetchRuns(params?: RunQueryParams): Promise<{
   if (params?.status) {
     query.set("status", params.status);
   }
-  if (params?.exploitId) {
-    query.set("exploitId", params.exploitId);
+  if (params?.exploitName) {
+    query.set("exploitName", params.exploitName);
   }
-  if (params?.targetId) {
-    query.set("targetId", params.targetId);
+  if (params?.targetName) {
+    query.set("targetName", params.targetName);
   }
   const url = query.toString() ? `${base}?${query.toString()}` : base;
   return fallback(
@@ -81,21 +81,5 @@ export async function cancelRunsBulk(
         results: res.data.results ?? []
       })),
     { results: [] }
-  );
-}
-
-export async function fetchRunFilterOptions(
-  type: "exploit" | "target",
-  query: string
-): Promise<RunFilterOption[]> {
-  const params = new URLSearchParams();
-  params.set("type", type);
-  if (query) {
-    params.set("q", query);
-  }
-  const url = `${base}/options?${params.toString()}`;
-  return fallback(
-    api.get<{ items: RunFilterOption[] }>(url).then((res) => res.data.items ?? []),
-    []
   );
 }
