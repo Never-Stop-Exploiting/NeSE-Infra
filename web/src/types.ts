@@ -75,10 +75,10 @@ export interface FlagRecord {
   id: string;
   value: string;
   challengeId: string;
+  status: "new" | "submitting" | "accepted" | "failed" | "duplicate" | "retry" | "dropped";
   challengeName?: string;
   targetId: string;
   targetLabel?: string;
-  status: "new" | "submitting" | "accepted" | "rejected" | "retry" | "dropped";
   submissionCount: number;
   attempts?: SubmissionAttempt[];
   runId?: string;

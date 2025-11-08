@@ -123,7 +123,7 @@ func (s *Service) processMessage(ctx context.Context, msg queue.Message) error {
 		case SubmissionStatusDuplicated:
 			flag.Status = domain.FlagStatusDuplicate
 		case SubmissionStatusFailed:
-			flag.Status = domain.FlagStatusRejected
+			flag.Status = domain.FlagStatusFailed
 		default:
 			flag.Status = domain.FlagStatusRetry
 		}

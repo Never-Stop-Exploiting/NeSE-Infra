@@ -165,17 +165,17 @@ const statusOptions = [
   { label: "New", value: "new" },
   { label: "Submitting", value: "submitting" },
   { label: "Accepted", value: "accepted" },
-  { label: "Rejected", value: "rejected" },
+  { label: "Failed", value: "failed" },
   { label: "Duplicated", value: "duplicate" },
   { label: "Retry", value: "retry" },
-  { label: "Dropped", value: "dropped" }
+  { label: "Dropped", value: "dropped" },
 ];
 
 const statusTextMap: Record<string, string> = {
   new: "New",
   submitting: "Submitting",
   accepted: "Accepted",
-  rejected: "Rejected",
+  failed: "Failed",
   duplicate: "Duplicated",
   retry: "Retry",
   dropped: "Dropped"
@@ -382,13 +382,13 @@ tr.active {
   color: #facc15;
 }
 
-.status[data-status="rejected"],
+.status[data-status="failed"],
 .status[data-status="dropped"] {
   background: rgba(248, 113, 113, 0.2);
   color: #f87171;
 }
 
-.status[data-status="duplicate"] {
+.status[data-status="duplicated"] {
   background: rgba(167, 139, 250, 0.2);
   color: #c4b5fd;
 }

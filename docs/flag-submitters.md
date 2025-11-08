@@ -45,7 +45,7 @@ const (
 
 - `Accepted`: the flag has been confirmed by the remote platform; it will be marked as accepted and removed from retry queues.
 - `Failed`: the remote platform definitively refused the flag (invalid payload, already expired, etc.). No further retries will be scheduled unless an operator manually requeues it.
-- `Duplicated`: the remote platform accepted the request but reports the flag was already submitted. The flag will be marked rejected and no further retries scheduled.
+- `Duplicated`: the remote platform accepted the request but reports the flag was already submitted. The flag will be marked failed and no further retries scheduled.
 - `Unknown`: the submission failed for a recoverable reason (network, rate limit). The scheduler will schedule another attempt after the default backoff or the optional `NextTry` delay.
 
 Returning an error from `Submit` is equivalent to `Unknown`; the framework records the error text and applies exponential backoff.

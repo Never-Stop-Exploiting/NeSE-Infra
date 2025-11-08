@@ -133,10 +133,12 @@ const (
 	FlagStatusNew        FlagStatus = "new"
 	FlagStatusSubmitting FlagStatus = "submitting"
 	FlagStatusAccepted   FlagStatus = "accepted"
-	FlagStatusRejected   FlagStatus = "rejected"
-	FlagStatusDuplicate  FlagStatus = "duplicate"
-	FlagStatusRetry      FlagStatus = "retry"
-	FlagStatusDropped    FlagStatus = "dropped"
+	FlagStatusFailed     FlagStatus = "failed"
+	// FlagStatusRejected is kept for backward compatibility; maps to failed.
+	FlagStatusRejected  FlagStatus = FlagStatusFailed
+	FlagStatusDuplicate FlagStatus = "duplicate"
+	FlagStatusRetry     FlagStatus = "retry"
+	FlagStatusDropped   FlagStatus = "dropped"
 )
 
 // SubmissionAttempt tracks outbound flag submission requests.
