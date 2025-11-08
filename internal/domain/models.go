@@ -141,6 +141,55 @@ const (
 	FlagStatusDropped   FlagStatus = "dropped"
 )
 
+// DashboardStats aggregates counts for the overview dashboard.
+type DashboardStats struct {
+	ExploitCount    int
+	TargetCount     int
+	PendingFlags    int
+	RunningRuns     int
+	FlagStatusCount map[FlagStatus]int
+}
+
+// OverviewMatrixStatus enumerates cell states in the overview heatmap.
+type OverviewMatrixStatus string
+
+const (
+	OverviewMatrixStatusSuccess OverviewMatrixStatus = "success"
+	OverviewMatrixStatusFailed  OverviewMatrixStatus = "failed"
+	OverviewMatrixStatusNone    OverviewMatrixStatus = "none"
+)
+
+// OverviewMatrixChallenge holds metadata for the matrix columns.
+type OverviewMatrixChallenge struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// OverviewMatrixTeam tracks the row label (team).
+type OverviewMatrixTeam struct {
+	Name string `json:"name"`
+}
+
+// OverviewMatrixCell summarises exploit attempts for a target/challenge pair.
+type OverviewMatrixCell struct {
+	ChallengeID     string               `json:"challengeId"`
+	TeamName        string               `json:"teamName"`
+	TargetID        string               `json:"targetId,omitempty"`
+	Status          OverviewMatrixStatus `json:"status"`
+	SuccessExploits []string             `json:"successExploits,omitempty"`
+	FailedExploits  []string             `json:"failedExploits,omitempty"`
+}
+
+// OverviewMatrix aggregates state for the front-end heatmap.
+type OverviewMatrix struct {
+	Start        time.Time                 `json:"start"`
+	End          time.Time                 `json:"end"`
+	RangeMinutes int                       `json:"rangeMinutes"`
+	Challenges   []OverviewMatrixChallenge `json:"challenges"`
+	Teams        []OverviewMatrixTeam      `json:"teams"`
+	Cells        []OverviewMatrixCell      `json:"cells"`
+}
+
 // SubmissionAttempt tracks outbound flag submission requests.
 type SubmissionAttempt struct {
 	ID          string

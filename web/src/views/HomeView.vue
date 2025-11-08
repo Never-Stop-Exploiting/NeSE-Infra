@@ -17,10 +17,6 @@
         <strong>{{ targetCount }}</strong>
       </div>
       <div class="card">
-        <span class="label">Flags Awaiting Submit</span>
-        <strong>{{ pendingFlags }}</strong>
-      </div>
-      <div class="card">
         <span class="label">Runs In Flight</span>
         <strong>{{ runningRuns }}</strong>
       </div>
@@ -49,50 +45,224 @@
         </ul>
       </article>
     </div>
+
+    <section class="matrix-section">
+      <div class="matrix-header">
+        <div>
+          <h3>Attack Coverage Matrix</h3>
+          <small class="hint">窗口：{{ matrixWindowLabel }}</small>
+        </div>
+        <div class="matrix-controls">
+          <label>
+            范围
+            <select v-model.number="rangeMinutes">
+              <option v-for="option in matrixRangeOptions" :key="option" :value="option">
+                {{ option }}m
+              </option>
+            </select>
+          </label>
+          <button class="control" @click="shiftMatrix(-1)" :disabled="matrixLoading">←</button>
+          <button class="control" @click="shiftMatrix(1)" :disabled="matrixLoading">→</button>
+          <button class="control" @click="setMatrixNow" :disabled="matrixLoading">Now</button>
+        </div>
+      </div>
+
+      <div class="matrix-body">
+        <div v-if="matrixLoading" class="matrix-empty">Loading matrix…</div>
+        <div v-else-if="matrixError" class="matrix-empty error">{{ matrixError }}</div>
+        <template v-else>
+          <div v-if="matrixRows.length && matrixChallenges.length" class="matrix-grid">
+            <div class="matrix-row matrix-header-row" :style="matrixColumnStyle">
+              <div class="matrix-cell team-header">队伍 / 题目</div>
+              <div
+                class="matrix-cell challenge-header"
+                v-for="challenge in matrixChallenges"
+                :key="challenge.id"
+              >
+                {{ challenge.name }}
+              </div>
+            </div>
+            <div class="matrix-row" v-for="row in matrixRows" :key="row.team" :style="matrixColumnStyle">
+              <div class="matrix-cell team-label">{{ row.team }}</div>
+              <div
+                class="matrix-cell status-cell"
+                v-for="cell in row.cells"
+                :key="row.team + '-' + cell.challengeId"
+                :data-status="cell.status"
+              >
+                <div v-if="tooltipItems(cell).length" class="matrix-tooltip">
+                  <strong>{{ tooltipLabel(cell) }}</strong>
+                  <ul>
+                    <li v-for="name in tooltipItems(cell)" :key="name">{{ name }}</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div v-else class="matrix-empty">No data for selected window</div>
+        </template>
+      </div>
+    </section>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
+import { fetchOverviewStats, fetchOverviewMatrix } from "@/api/overview";
+import type { OverviewStats, OverviewMatrix, OverviewMatrixCell, OverviewMatrixStatus } from "@/types";
 import { useExploitStore } from "@/stores/exploits";
 import { useTargetStore } from "@/stores/targets";
-import { useFlagStore } from "@/stores/flags";
 import { useRunStore } from "@/stores/runs";
 import { useRunnerStore } from "@/stores/runners";
 
 const exploitStore = useExploitStore();
 const targetStore = useTargetStore();
-const flagStore = useFlagStore();
 const runStore = useRunStore();
 const runnerStore = useRunnerStore();
 
 const busy = ref(false);
-
-const exploitCount = computed(() => exploitStore.exploits.length);
-const targetCount = computed(() => targetStore.targets.length);
-const pendingFlags = computed(
-  () => flagStore.flags.filter((flag) => flag.status !== "accepted").length
-);
-const runningRuns = computed(
-  () => runStore.runs.filter((run) => run.status === "pending" || run.status === "running").length
-);
-
-const flagStatuses = computed(() => {
-  const groups: Record<string, number> = {};
-  for (const flag of flagStore.flags) {
-    groups[flag.status] = (groups[flag.status] ?? 0) + 1;
-  }
-  return Object.entries(groups).map(([label, count]) => ({ label, count }));
+const overview = ref<OverviewStats>({
+  exploitCount: 0,
+  targetCount: 0,
+  pendingFlags: 0,
+  runningRuns: 0,
+  flagStatuses: {}
 });
+
+const matrix = ref<OverviewMatrix | null>(null);
+const matrixLoading = ref(false);
+const matrixError = ref<string | null>(null);
+const matrixRangeOptions = [5, 15, 30, 60];
+
+const rangeMinutes = ref(15);
+const endTime = ref(new Date());
+const startTime = ref(new Date(endTime.value.getTime() - rangeMinutes.value * 60 * 1000));
+
+watch(rangeMinutes, (minutes, previous) => {
+  if (previous === undefined) {
+    return;
+  }
+  const delta = minutes * 60 * 1000;
+  startTime.value = new Date(endTime.value.getTime() - delta);
+  loadMatrix();
+});
+
+const exploitCount = computed(() => overview.value.exploitCount);
+const targetCount = computed(() => overview.value.targetCount);
+const runningRuns = computed(() => overview.value.runningRuns);
+
+const flagStatuses = computed(() =>
+  Object.entries(overview.value.flagStatuses ?? {}).map(([label, count]) => ({ label, count }))
+);
+
+const matrixChallenges = computed(() => matrix.value?.challenges ?? []);
+const matrixColumnStyle = computed(() => ({
+  gridTemplateColumns: `repeat(${Math.max(1, (matrixChallenges.value.length || 0) + 1)}, minmax(120px, 1fr))`
+}));
+
+const matrixRows = computed(() => {
+  if (!matrix.value) {
+    return [];
+  }
+  const index = new Map<string, OverviewMatrixCell>();
+  for (const cell of matrix.value.cells ?? []) {
+    index.set(`${cell.teamName}|${cell.challengeId}`, cell);
+  }
+  return (matrix.value.teams ?? []).map((team) => {
+    const cells = matrixChallenges.value.map((challenge) => {
+      const key = `${team.name}|${challenge.id}`;
+      const baseCell =
+        index.get(key) ??
+        ({
+          challengeId: challenge.id,
+          teamName: team.name,
+          status: "none",
+          successExploits: [],
+          failedExploits: []
+        } as OverviewMatrixCell);
+      const status: OverviewMatrixStatus =
+        baseCell.successExploits && baseCell.successExploits.length
+          ? "success"
+          : baseCell.failedExploits && baseCell.failedExploits.length
+            ? "failed"
+            : "none";
+      return {
+        ...baseCell,
+        status
+      };
+    });
+    return { team: team.name, cells };
+  });
+});
+
+const matrixWindowLabel = computed(() => `${formatTimestamp(startTime.value)} → ${formatTimestamp(endTime.value)}`);
+
+function formatTimestamp(date: Date): string {
+  return date.toLocaleString();
+}
+
+function tooltipItems(cell: OverviewMatrixCell): string[] {
+  if (cell.successExploits?.length) {
+    return cell.successExploits;
+  }
+  if (cell.failedExploits?.length) {
+    return cell.failedExploits;
+  }
+  return [];
+}
+
+function tooltipLabel(cell: OverviewMatrixCell): string {
+  if (cell.successExploits?.length) {
+    return "成功 EXP";
+  }
+  if (cell.failedExploits?.length) {
+    return "失败 EXP";
+  }
+  return "";
+}
+
+async function loadOverviewStats() {
+  overview.value = await fetchOverviewStats();
+}
+
+async function loadMatrix() {
+  matrixLoading.value = true;
+  matrixError.value = null;
+  try {
+    matrix.value = await fetchOverviewMatrix({
+      start: startTime.value.toISOString(),
+      end: endTime.value.toISOString()
+    });
+  } catch (err) {
+    console.error(err);
+    matrixError.value = "Failed to load matrix";
+  } finally {
+    matrixLoading.value = false;
+  }
+}
+
+function shiftMatrix(direction: number) {
+  const delta = rangeMinutes.value * 60 * 1000 * direction;
+  startTime.value = new Date(startTime.value.getTime() + delta);
+  endTime.value = new Date(endTime.value.getTime() + delta);
+  loadMatrix();
+}
+
+function setMatrixNow() {
+  endTime.value = new Date();
+  startTime.value = new Date(endTime.value.getTime() - rangeMinutes.value * 60 * 1000);
+  loadMatrix();
+}
 
 async function refreshAll() {
   busy.value = true;
   await Promise.all([
     exploitStore.load(),
     targetStore.load(),
-    flagStore.load(),
     runStore.refresh(),
-    runnerStore.load()
+    runnerStore.load(),
+    loadOverviewStats(),
+    loadMatrix()
   ]);
   busy.value = false;
 }
@@ -217,6 +387,175 @@ article li div {
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+
+.matrix-section {
+  background: rgba(30, 41, 59, 0.7);
+  border-radius: 12px;
+  padding: 1.5rem;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  overflow: hidden;
+}
+
+.matrix-header {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 1rem;
+  align-items: center;
+}
+
+.matrix-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.matrix-controls label {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+}
+
+.matrix-controls select {
+  background: rgba(15, 23, 42, 0.9);
+  color: #e2e8f0;
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  border-radius: 8px;
+  padding: 0.25rem 0.5rem;
+}
+
+.matrix-controls .control {
+  background: rgba(59, 130, 246, 0.2);
+  color: #bae6fd;
+  border: 1px solid rgba(59, 130, 246, 0.4);
+  border-radius: 8px;
+  padding: 0.3rem 0.75rem;
+  cursor: pointer;
+}
+
+.matrix-controls .control:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.matrix-body {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.matrix-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.matrix-row {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.matrix-cell {
+  border-radius: 6px;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  font-size: 0.85rem;
+  background: rgba(15, 23, 42, 0.4);
+}
+
+.team-header,
+.team-label {
+  font-weight: 600;
+  text-align: left;
+  justify-content: flex-start;
+  background: rgba(37, 99, 235, 0.15);
+}
+
+.challenge-header {
+  font-weight: 600;
+}
+
+.status-cell {
+  cursor: default;
+  transition: transform 0.1s ease;
+  position: relative;
+}
+
+.status-cell:hover {
+  transform: scale(1.02);
+}
+
+.status-cell[data-status="success"] {
+  background: rgba(34, 197, 94, 0.85);
+  color: #052e16;
+}
+
+.status-cell[data-status="failed"] {
+  background: rgba(248, 113, 113, 0.9);
+  color: #450a0a;
+}
+
+.status-cell[data-status="none"] {
+  background: rgba(51, 65, 85, 0.6);
+  color: #cbd5f5;
+}
+
+.matrix-empty {
+  text-align: center;
+  padding: 1rem;
+  border: 1px dashed rgba(148, 163, 184, 0.4);
+  border-radius: 8px;
+  color: #cbd5f5;
+}
+
+.matrix-tooltip {
+  display: none;
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform: translateY(-100%);
+  background: rgba(15, 23, 42, 0.95);
+  border: 1px solid rgba(148, 163, 184, 0.5);
+  border-radius: 8px;
+  padding: 0.5rem 0.75rem;
+  min-width: 160px;
+  text-align: left;
+  z-index: 5;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.35);
+}
+
+.status-cell:hover .matrix-tooltip {
+  display: block;
+}
+
+.matrix-tooltip strong {
+  display: block;
+  font-size: 0.75rem;
+  margin-bottom: 0.25rem;
+  color: #e0f2fe;
+}
+
+.matrix-tooltip ul {
+  list-style: disc;
+  padding-left: 1rem;
+  margin: 0;
+  color: #cbd5f5;
+  font-size: 0.75rem;
+}
+
+.matrix-empty.error {
+  color: #fca5a5;
+  border-color: rgba(248, 113, 113, 0.6);
 }
 
 article li small {

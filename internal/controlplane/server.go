@@ -75,6 +75,8 @@ func (s *Server) Run(ctx context.Context) error {
 
 func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/healthz", s.handleHealth)
+	mux.HandleFunc("/api/v1/overview", s.handleOverview)
+	mux.HandleFunc("/api/v1/overview/matrix", s.handleOverviewMatrix)
 	mux.HandleFunc("/api/v1/challenges", s.handleChallenges)
 	mux.HandleFunc("/api/v1/challenges/", s.handleChallengeDetail)
 	mux.HandleFunc("/api/v1/targets", s.handleTargets)
@@ -104,6 +106,75 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"status": "ok",
 		"time":   time.Now().UTC(),
 	})
+}
+
+func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	stats, err := s.repository.DashboardStats(r.Context())
+	if err != nil {
+		s.logger.Error("load overview stats failed", slog.Any("err", err))
+		writeError(w, http.StatusInternalServerError, "failed to load overview")
+		return
+	}
+	flagStatuses := make(map[string]int, len(stats.FlagStatusCount))
+	for status, count := range stats.FlagStatusCount {
+		flagStatuses[string(status)] = count
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"overview": map[string]any{
+			"exploitCount": stats.ExploitCount,
+			"targetCount":  stats.TargetCount,
+			"pendingFlags": stats.PendingFlags,
+			"runningRuns":  stats.RunningRuns,
+			"flagStatuses": flagStatuses,
+		},
+	})
+}
+
+func (s *Server) handleOverviewMatrix(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	query := r.URL.Query()
+	end := time.Now().UTC()
+	if raw := strings.TrimSpace(query.Get("end")); raw != "" {
+		parsed, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid end timestamp")
+			return
+		}
+		end = parsed.UTC()
+	}
+	windowMinutes := 15
+	if raw := strings.TrimSpace(query.Get("minutes")); raw != "" {
+		if value, err := strconv.Atoi(raw); err == nil && value > 0 {
+			windowMinutes = value
+		}
+	}
+	start := end.Add(-time.Duration(windowMinutes) * time.Minute)
+	if raw := strings.TrimSpace(query.Get("start")); raw != "" {
+		parsed, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid start timestamp")
+			return
+		}
+		start = parsed.UTC()
+	}
+	if !end.After(start) {
+		writeError(w, http.StatusBadRequest, "end must be after start")
+		return
+	}
+	matrix, err := s.repository.OverviewMatrix(r.Context(), start, end)
+	if err != nil {
+		s.logger.Error("load overview matrix failed", slog.Any("err", err))
+		writeError(w, http.StatusInternalServerError, "failed to load overview matrix")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"matrix": matrix})
 }
 
 func (s *Server) handleChallenges(w http.ResponseWriter, r *http.Request) {

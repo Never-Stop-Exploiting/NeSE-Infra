@@ -86,6 +86,43 @@ export interface FlagRecord {
   lastSubmittedAt?: string;
 }
 
+export interface OverviewStats {
+  exploitCount: number;
+  targetCount: number;
+  pendingFlags: number;
+  runningRuns: number;
+  flagStatuses: Record<string, number>;
+}
+
+export type OverviewMatrixStatus = "success" | "failed" | "none";
+
+export interface OverviewMatrixChallenge {
+  id: string;
+  name: string;
+}
+
+export interface OverviewMatrixTeam {
+  name: string;
+}
+
+export interface OverviewMatrixCell {
+  challengeId: string;
+  teamName: string;
+  targetId?: string;
+  status: OverviewMatrixStatus;
+  successExploits?: string[];
+  failedExploits?: string[];
+}
+
+export interface OverviewMatrix {
+  start: string;
+  end: string;
+  rangeMinutes: number;
+  challenges: OverviewMatrixChallenge[];
+  teams: OverviewMatrixTeam[];
+  cells: OverviewMatrixCell[];
+}
+
 export interface SubmissionAttempt {
   id: string;
   submitterId: string;

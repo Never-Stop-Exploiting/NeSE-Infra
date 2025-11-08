@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -1616,6 +1617,229 @@ func (r *Repository) GetFlagLogs(ctx context.Context, id string) ([]string, erro
 		return nil, err
 	}
 	return logs, nil
+}
+
+func (r *Repository) DashboardStats(ctx context.Context) (domain.DashboardStats, error) {
+	stats := domain.DashboardStats{
+		FlagStatusCount: make(map[domain.FlagStatus]int),
+	}
+
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM exploits`).Scan(&stats.ExploitCount); err != nil {
+		return stats, err
+	}
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM targets`).Scan(&stats.TargetCount); err != nil {
+		return stats, err
+	}
+	if err := r.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM runs WHERE status IN ('pending', 'running')`).Scan(&stats.RunningRuns); err != nil {
+		return stats, err
+	}
+	if err := r.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM flags WHERE status <> 'accepted'`).Scan(&stats.PendingFlags); err != nil {
+		return stats, err
+	}
+
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT status, COUNT(*) 
+		FROM flags
+		GROUP BY status`)
+	if err != nil {
+		return stats, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var status string
+		var count int
+		if err := rows.Scan(&status, &count); err != nil {
+			return stats, err
+		}
+		stats.FlagStatusCount[domain.FlagStatus(status)] = count
+	}
+	if err := rows.Err(); err != nil {
+		return stats, err
+	}
+	return stats, nil
+}
+
+func (r *Repository) OverviewMatrix(ctx context.Context, start, end time.Time) (domain.OverviewMatrix, error) {
+	start = start.UTC()
+	end = end.UTC()
+	if !end.After(start) {
+		end = start.Add(time.Minute)
+	}
+	matrix := domain.OverviewMatrix{
+		Start:        start,
+		End:          end,
+		RangeMinutes: int(end.Sub(start).Minutes()),
+	}
+	if matrix.RangeMinutes <= 0 {
+		matrix.RangeMinutes = 1
+	}
+
+	challengeRows, err := r.db.QueryContext(ctx, `SELECT id, name FROM challenges ORDER BY name ASC`)
+	if err != nil {
+		return matrix, err
+	}
+	defer challengeRows.Close()
+	for challengeRows.Next() {
+		var challenge domain.OverviewMatrixChallenge
+		if err := challengeRows.Scan(&challenge.ID, &challenge.Name); err != nil {
+			return matrix, err
+		}
+		matrix.Challenges = append(matrix.Challenges, challenge)
+	}
+	if err := challengeRows.Err(); err != nil {
+		return matrix, err
+	}
+
+	targetRows, err := r.db.QueryContext(ctx, `SELECT id, challenge_id, team_name FROM targets`)
+	if err != nil {
+		return matrix, err
+	}
+	defer targetRows.Close()
+
+	targetByChallenge := make(map[string]map[string]string)
+	teamSet := make(map[string]struct{})
+	for targetRows.Next() {
+		var id, challengeID, teamName string
+		if err := targetRows.Scan(&id, &challengeID, &teamName); err != nil {
+			return matrix, err
+		}
+		teamName = strings.TrimSpace(teamName)
+		if teamName == "" {
+			continue
+		}
+		teamSet[teamName] = struct{}{}
+		if targetByChallenge[challengeID] == nil {
+			targetByChallenge[challengeID] = make(map[string]string)
+		}
+		if _, exists := targetByChallenge[challengeID][teamName]; !exists {
+			targetByChallenge[challengeID][teamName] = id
+		}
+	}
+	if err := targetRows.Err(); err != nil {
+		return matrix, err
+	}
+
+	teamNames := make([]string, 0, len(teamSet))
+	for name := range teamSet {
+		teamNames = append(teamNames, name)
+	}
+	sort.Strings(teamNames)
+	matrix.Teams = make([]domain.OverviewMatrixTeam, len(teamNames))
+	for i, name := range teamNames {
+		matrix.Teams[i] = domain.OverviewMatrixTeam{Name: name}
+	}
+
+	type cellAccumulator struct {
+		success map[string]struct{}
+		failed  map[string]struct{}
+	}
+	accum := make(map[string]*cellAccumulator)
+
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT r.target_id, r.status, e.name, COALESCE(f.status, '')
+		FROM runs r
+		JOIN exploits e ON e.id = r.exploit_id
+		LEFT JOIN flags f ON f.run_id = r.id
+		WHERE r.target_id IS NOT NULL AND (
+			(COALESCE(r.finished_at, r.started_at, r.queued_at) BETWEEN $1 AND $2)
+			OR (f.id IS NOT NULL AND COALESCE(f.last_submitted_at, f.created_at, r.finished_at, r.started_at, r.queued_at) BETWEEN $1 AND $2)
+		)
+	`, start, end)
+	if err != nil {
+		return matrix, err
+	}
+	defer rows.Close()
+
+	toSortedSlice := func(set map[string]struct{}) []string {
+		if len(set) == 0 {
+			return nil
+		}
+		items := make([]string, 0, len(set))
+		for value := range set {
+			items = append(items, value)
+		}
+		sort.Strings(items)
+		return items
+	}
+
+	for rows.Next() {
+		var targetID, runStatus, exploitName, flagStatus string
+		if err := rows.Scan(&targetID, &runStatus, &exploitName, &flagStatus); err != nil {
+			return matrix, err
+		}
+		targetID = strings.TrimSpace(targetID)
+		if targetID == "" {
+			continue
+		}
+		runStatus = strings.ToLower(strings.TrimSpace(runStatus))
+		flagStatus = strings.ToLower(strings.TrimSpace(flagStatus))
+
+		acc := accum[targetID]
+		if acc == nil {
+			acc = &cellAccumulator{
+				success: make(map[string]struct{}),
+				failed:  make(map[string]struct{}),
+			}
+			accum[targetID] = acc
+		}
+
+		if runStatus == string(domain.RunStatusSucceeded) && flagStatus == string(domain.FlagStatusAccepted) {
+			acc.success[exploitName] = struct{}{}
+			continue
+		}
+
+		failure := false
+		switch runStatus {
+		case string(domain.RunStatusFailed), string(domain.RunStatusTimeout), string(domain.RunStatusCanceled):
+			failure = true
+		}
+		if flagStatus != "" && flagStatus != string(domain.FlagStatusAccepted) {
+			failure = true
+		}
+		if runStatus == string(domain.RunStatusSucceeded) && flagStatus == "" {
+			failure = true
+		}
+
+		if failure {
+			acc.failed[exploitName] = struct{}{}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return matrix, err
+	}
+
+	totalCells := len(matrix.Challenges) * len(matrix.Teams)
+	matrix.Cells = make([]domain.OverviewMatrixCell, 0, totalCells)
+	for _, teamName := range teamNames {
+		for _, challenge := range matrix.Challenges {
+			targetID := ""
+			if byTeam := targetByChallenge[challenge.ID]; byTeam != nil {
+				targetID = byTeam[teamName]
+			}
+			cell := domain.OverviewMatrixCell{
+				ChallengeID: challenge.ID,
+				TeamName:    teamName,
+				TargetID:    targetID,
+				Status:      domain.OverviewMatrixStatusNone,
+			}
+			if targetID != "" {
+				if acc := accum[targetID]; acc != nil {
+					if len(acc.success) > 0 {
+						cell.Status = domain.OverviewMatrixStatusSuccess
+						cell.SuccessExploits = toSortedSlice(acc.success)
+					} else if len(acc.failed) > 0 {
+						cell.Status = domain.OverviewMatrixStatusFailed
+						cell.FailedExploits = toSortedSlice(acc.failed)
+					}
+				}
+			}
+			matrix.Cells = append(matrix.Cells, cell)
+		}
+	}
+	return matrix, nil
 }
 
 func (r *Repository) ListFlagAttempts(ctx context.Context, flagID string) ([]domain.SubmissionAttempt, error) {

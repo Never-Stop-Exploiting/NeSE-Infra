@@ -792,6 +792,211 @@ func (r *Repository) AddFlagAttempt(ctx context.Context, flagID string, attempt 
 	return ctx.Err()
 }
 
+func (r *Repository) DashboardStats(ctx context.Context) (domain.DashboardStats, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	stats := domain.DashboardStats{
+		FlagStatusCount: make(map[domain.FlagStatus]int),
+	}
+	stats.ExploitCount = len(r.exploits)
+	stats.TargetCount = len(r.targets)
+	for _, run := range r.runs {
+		if run.Status == domain.RunStatusPending || run.Status == domain.RunStatusRunning {
+			stats.RunningRuns++
+		}
+	}
+	for _, flag := range r.flags {
+		stats.FlagStatusCount[flag.Status]++
+		if flag.Status != domain.FlagStatusAccepted {
+			stats.PendingFlags++
+		}
+	}
+	return stats, ctx.Err()
+}
+
+func (r *Repository) OverviewMatrix(ctx context.Context, start, end time.Time) (domain.OverviewMatrix, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	start = start.UTC()
+	end = end.UTC()
+	if !end.After(start) {
+		end = start.Add(time.Minute)
+	}
+	matrix := domain.OverviewMatrix{
+		Start:        start,
+		End:          end,
+		RangeMinutes: int(end.Sub(start).Minutes()),
+	}
+	if matrix.RangeMinutes <= 0 {
+		matrix.RangeMinutes = 1
+	}
+
+	challengeList := make([]domain.Challenge, 0, len(r.challenges))
+	for _, challenge := range r.challenges {
+		challengeList = append(challengeList, challenge)
+	}
+	sort.Slice(challengeList, func(i, j int) bool {
+		return strings.ToLower(challengeList[i].Name) < strings.ToLower(challengeList[j].Name)
+	})
+	for _, challenge := range challengeList {
+		matrix.Challenges = append(matrix.Challenges, domain.OverviewMatrixChallenge{
+			ID:   challenge.ID,
+			Name: challenge.Name,
+		})
+	}
+
+	targetByChallenge := make(map[string]map[string]string)
+	teamSet := make(map[string]struct{})
+	for id, target := range r.targets {
+		teamName := strings.TrimSpace(target.TeamName)
+		if teamName == "" {
+			continue
+		}
+		teamSet[teamName] = struct{}{}
+		if targetByChallenge[target.ChallengeID] == nil {
+			targetByChallenge[target.ChallengeID] = make(map[string]string)
+		}
+		if _, exists := targetByChallenge[target.ChallengeID][teamName]; !exists {
+			targetByChallenge[target.ChallengeID][teamName] = id
+		}
+	}
+
+	teamNames := make([]string, 0, len(teamSet))
+	for name := range teamSet {
+		teamNames = append(teamNames, name)
+	}
+	sort.Strings(teamNames)
+	matrix.Teams = make([]domain.OverviewMatrixTeam, len(teamNames))
+	for i, name := range teamNames {
+		matrix.Teams[i] = domain.OverviewMatrixTeam{Name: name}
+	}
+
+	type cellAccumulator struct {
+		success map[string]struct{}
+		failed  map[string]struct{}
+	}
+	accum := make(map[string]*cellAccumulator)
+
+	getExploitName := func(exploitID string) string {
+		if exploit, ok := r.exploits[exploitID]; ok {
+			if strings.TrimSpace(exploit.Name) != "" {
+				return exploit.Name
+			}
+		}
+		return exploitID
+	}
+
+	for _, run := range r.runs {
+		targetID := strings.TrimSpace(run.TargetID)
+		if targetID == "" {
+			continue
+		}
+		eventTime := run.FinishedAt
+		if eventTime.IsZero() {
+			eventTime = run.StartedAt
+		}
+		if eventTime.IsZero() {
+			eventTime = run.QueuedAt
+		}
+
+		flag, hasFlag := r.flags[run.FlagID]
+		if !hasFlag && run.FlagID == "" {
+			for _, candidate := range r.flags {
+				if candidate.RunID == run.ID {
+					flag = candidate
+					hasFlag = true
+					break
+				}
+			}
+		}
+
+		flagTime := flag.LastSubmittedAt
+		if flagTime.IsZero() {
+			flagTime = flag.CreatedAt
+		}
+
+		inWindow := (!eventTime.IsZero() && !eventTime.Before(start) && !eventTime.After(end)) ||
+			(hasFlag && !flagTime.IsZero() && !flagTime.Before(start) && !flagTime.After(end))
+		if !inWindow {
+			continue
+		}
+
+		exploitName := getExploitName(run.ExploitID)
+		acc := accum[targetID]
+		if acc == nil {
+			acc = &cellAccumulator{
+				success: make(map[string]struct{}),
+				failed:  make(map[string]struct{}),
+			}
+			accum[targetID] = acc
+		}
+
+		success := run.Status == domain.RunStatusSucceeded && hasFlag && flag.Status == domain.FlagStatusAccepted
+		if success {
+			acc.success[exploitName] = struct{}{}
+			continue
+		}
+
+		failure := false
+		switch run.Status {
+		case domain.RunStatusFailed, domain.RunStatusTimeout, domain.RunStatusCanceled:
+			failure = true
+		}
+		if hasFlag && flag.Status != domain.FlagStatusAccepted {
+			failure = true
+		}
+		if run.Status == domain.RunStatusSucceeded && !hasFlag {
+			failure = true
+		}
+		if failure {
+			acc.failed[exploitName] = struct{}{}
+		}
+	}
+
+	toSortedSlice := func(set map[string]struct{}) []string {
+		if len(set) == 0 {
+			return nil
+		}
+		items := make([]string, 0, len(set))
+		for value := range set {
+			items = append(items, value)
+		}
+		sort.Strings(items)
+		return items
+	}
+
+	totalCells := len(matrix.Challenges) * len(matrix.Teams)
+	matrix.Cells = make([]domain.OverviewMatrixCell, 0, totalCells)
+	for _, teamName := range teamNames {
+		for _, challenge := range matrix.Challenges {
+			targetID := ""
+			if byTeam := targetByChallenge[challenge.ID]; byTeam != nil {
+				targetID = byTeam[teamName]
+			}
+			cell := domain.OverviewMatrixCell{
+				ChallengeID: challenge.ID,
+				TeamName:    teamName,
+				TargetID:    targetID,
+				Status:      domain.OverviewMatrixStatusNone,
+			}
+			if targetID != "" {
+				if acc := accum[targetID]; acc != nil {
+					if len(acc.success) > 0 {
+						cell.Status = domain.OverviewMatrixStatusSuccess
+						cell.SuccessExploits = toSortedSlice(acc.success)
+					} else if len(acc.failed) > 0 {
+						cell.Status = domain.OverviewMatrixStatusFailed
+						cell.FailedExploits = toSortedSlice(acc.failed)
+					}
+				}
+			}
+			matrix.Cells = append(matrix.Cells, cell)
+		}
+	}
+
+	return matrix, ctx.Err()
+}
+
 func (r *Repository) ListRuns(ctx context.Context, limit int, cursor string) ([]domain.Run, string, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
