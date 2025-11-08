@@ -1960,7 +1960,30 @@ func (r *Repository) AddFlagAttempt(ctx context.Context, flagID string, attempt 
 
 const runOrderingExpression = "COALESCE(queued_at, started_at, finished_at, TIMESTAMP '1970-01-01')"
 
-func (r *Repository) ListRuns(ctx context.Context, limit int, cursor string) ([]domain.Run, string, error) {
+func buildRunFilterClause(filter domain.RunFilter, startIdx int) (string, []any) {
+	clauses := make([]string, 0, 4)
+	args := make([]any, 0, 4)
+
+	addClause := func(value string, column string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		position := startIdx + len(args)
+		clauses = append(clauses, fmt.Sprintf("%s = $%d", column, position))
+		args = append(args, value)
+	}
+
+	addClause(filter.Status, "status")
+	addClause(filter.ExploitID, "exploit_id")
+	addClause(filter.TargetID, "target_id")
+	if len(clauses) == 0 {
+		return "", nil
+	}
+	return " AND " + strings.Join(clauses, " AND "), args
+}
+
+func (r *Repository) ListRuns(ctx context.Context, filter domain.RunFilter, limit int, cursor string) ([]domain.Run, string, error) {
 	if limit <= 0 {
 		limit = 50
 	}
@@ -1973,26 +1996,46 @@ func (r *Repository) ListRuns(ctx context.Context, limit int, cursor string) ([]
 			cursor = ""
 		} else {
 			anchorTime := runOrderingTime(anchor)
-			rows, err = r.db.QueryContext(ctx, `
-				SELECT id, exploit_id, exploit_revision, target_id, runner_id, status, queued_at, started_at, finished_at, log_uri, flag_id, error_message
-				FROM runs
-				WHERE (`+runOrderingExpression+`) < $1 OR ((`+runOrderingExpression+`) = $1 AND id < $2)
-				ORDER BY `+runOrderingExpression+` DESC, id DESC
-				LIMIT $3`,
+			args := []any{
 				anchorTime,
 				cursor,
-				queryLimit,
+			}
+			filterClause, filterArgs := buildRunFilterClause(filter, len(args)+1)
+			args = append(args, filterArgs...)
+			args = append(args, queryLimit)
+			limitPos := len(args)
+			query := fmt.Sprintf(`
+				SELECT id, exploit_id, exploit_revision, target_id, runner_id, status, queued_at, started_at, finished_at, log_uri, flag_id, error_message
+				FROM runs
+				WHERE ((%s) < $1 OR ((%s) = $1 AND id < $2))%s
+				ORDER BY %s DESC, id DESC
+				LIMIT $%d`,
+				runOrderingExpression,
+				runOrderingExpression,
+				filterClause,
+				runOrderingExpression,
+				limitPos,
 			)
+			rows, err = r.db.QueryContext(ctx, query, args...)
 		}
 	}
 	if cursor == "" && rows == nil {
-		rows, err = r.db.QueryContext(ctx, `
+		args := []any{}
+		filterClause, filterArgs := buildRunFilterClause(filter, len(args)+1)
+		args = append(args, filterArgs...)
+		args = append(args, queryLimit)
+		limitPos := len(args)
+		query := fmt.Sprintf(`
 			SELECT id, exploit_id, exploit_revision, target_id, runner_id, status, queued_at, started_at, finished_at, log_uri, flag_id, error_message
 			FROM runs
-			ORDER BY `+runOrderingExpression+` DESC, id DESC
-			LIMIT $1`,
-			queryLimit,
+			WHERE 1=1%s
+			ORDER BY %s DESC, id DESC
+			LIMIT $%d`,
+			filterClause,
+			runOrderingExpression,
+			limitPos,
 		)
+		rows, err = r.db.QueryContext(ctx, query, args...)
 	}
 	if err != nil {
 		return nil, "", err

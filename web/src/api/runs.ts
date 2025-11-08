@@ -1,9 +1,25 @@
 import { api, fallback } from "./client";
-import type { RunDetail, RunSummary } from "@/types";
+import type { RunDetail, RunSummary, RunFilterOption } from "@/types";
 
 const base = "/api/v1/runs";
 
-export async function fetchRuns(params?: { cursor?: string; limit?: number }): Promise<{
+export interface RunQueryParams {
+  cursor?: string;
+  limit?: number;
+  status?: string;
+  exploitId?: string;
+  targetId?: string;
+}
+
+export interface BulkRunCancelResponse {
+  results: Array<{
+    run?: RunSummary;
+    runId?: string;
+    error?: string;
+  }>;
+}
+
+export async function fetchRuns(params?: RunQueryParams): Promise<{
   items: RunSummary[];
   nextCursor: string | null;
 }> {
@@ -13,6 +29,15 @@ export async function fetchRuns(params?: { cursor?: string; limit?: number }): P
   }
   if (params?.limit) {
     query.set("limit", params.limit.toString());
+  }
+  if (params?.status) {
+    query.set("status", params.status);
+  }
+  if (params?.exploitId) {
+    query.set("exploitId", params.exploitId);
+  }
+  if (params?.targetId) {
+    query.set("targetId", params.targetId);
   }
   const url = query.toString() ? `${base}?${query.toString()}` : base;
   return fallback(
@@ -39,5 +64,38 @@ export async function cancelRun(
   return fallback(
     api.post<{ run: RunDetail }>(`${base}/${runId}/cancel`, body).then((res) => res.data.run),
     null
+  );
+}
+
+export async function cancelRunsBulk(
+  runIds: string[],
+  payload?: { reason?: string }
+): Promise<BulkRunCancelResponse> {
+  return fallback(
+    api
+      .post<BulkRunCancelResponse>(`${base}/cancel`, {
+        runIds,
+        ...(payload?.reason ? { reason: payload.reason } : {})
+      })
+      .then((res) => ({
+        results: res.data.results ?? []
+      })),
+    { results: [] }
+  );
+}
+
+export async function fetchRunFilterOptions(
+  type: "exploit" | "target",
+  query: string
+): Promise<RunFilterOption[]> {
+  const params = new URLSearchParams();
+  params.set("type", type);
+  if (query) {
+    params.set("q", query);
+  }
+  const url = `${base}/options?${params.toString()}`;
+  return fallback(
+    api.get<{ items: RunFilterOption[] }>(url).then((res) => res.data.items ?? []),
+    []
   );
 }

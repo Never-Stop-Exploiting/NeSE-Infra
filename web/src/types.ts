@@ -60,6 +60,12 @@ export interface RunSummary {
   queuedAt: string;
   startedAt?: string;
   finishedAt?: string;
+  errorMessage?: string;
+}
+
+export interface RunFilterOption {
+  id: string;
+  label: string;
 }
 
 export interface RunDetail extends RunSummary {

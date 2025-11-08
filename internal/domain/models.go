@@ -91,6 +91,13 @@ type Run struct {
 	ErrorMessage    string
 }
 
+// RunFilter captures query parameters for run listing.
+type RunFilter struct {
+	Status    string
+	ExploitID string
+	TargetID  string
+}
+
 // RunWorkItem aggregates the ready-to-dispatch exploit, target, and packaged artifact bytes.
 type RunWorkItem struct {
 	RunID     string

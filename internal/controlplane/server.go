@@ -87,6 +87,8 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/flags", s.handleFlags)
 	mux.HandleFunc("/api/v1/flags/", s.handleFlagDetail)
 	mux.HandleFunc("/api/v1/runs", s.handleRuns)
+	mux.HandleFunc("/api/v1/runs/options", s.handleRunFilterOptions)
+	mux.HandleFunc("/api/v1/runs/cancel", s.handleRunBulkCancel)
 	mux.HandleFunc("/api/v1/runs/", s.handleRunDetail)
 	mux.HandleFunc("/api/v1/logs", s.handleLogs)
 	mux.HandleFunc("/api/v1/runners/register", s.handleRunnerRegister)
@@ -999,8 +1001,14 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 			limit = value
 		}
 	}
-	cursor := strings.TrimSpace(r.URL.Query().Get("cursor"))
-	runs, nextCursor, err := s.repository.ListRuns(r.Context(), limit, cursor)
+	query := r.URL.Query()
+	cursor := strings.TrimSpace(query.Get("cursor"))
+	filter := domain.RunFilter{
+		Status:    strings.TrimSpace(query.Get("status")),
+		ExploitID: strings.TrimSpace(query.Get("exploitId")),
+		TargetID:  strings.TrimSpace(query.Get("targetId")),
+	}
+	runs, nextCursor, err := s.repository.ListRuns(r.Context(), filter, limit, cursor)
 	if err != nil {
 		s.logger.Error("list runs failed", slog.Any("err", err))
 		writeError(w, http.StatusInternalServerError, "failed to list runs")
@@ -1024,18 +1032,7 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 	}
 	responses := make([]map[string]any, 0, len(runs))
 	for _, run := range runs {
-		responses = append(responses, map[string]any{
-			"id":          run.ID,
-			"exploitId":   run.ExploitID,
-			"exploitName": exploitNames[run.ExploitID],
-			"targetId":    run.TargetID,
-			"targetLabel": targetNames[run.TargetID],
-			"runnerId":    run.RunnerID,
-			"status":      run.Status,
-			"queuedAt":    run.QueuedAt,
-			"startedAt":   run.StartedAt,
-			"finishedAt":  run.FinishedAt,
-		})
+		responses = append(responses, marshalRunSummary(run, exploitNames[run.ExploitID], targetNames[run.TargetID]))
 	}
 	var result = map[string]any{"items": responses}
 	if nextCursor != "" {
@@ -1336,7 +1333,160 @@ func (s *Server) handleRunCancel(w http.ResponseWriter, r *http.Request, runID s
 		return
 	}
 
-	reason := strings.TrimSpace(req.Reason)
+	run, err = s.cancelRunInternal(ctx, run, req.Reason)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update run")
+		return
+	}
+
+	exploitName := s.lookupExploitName(ctx, run.ExploitID)
+	targetLabel := s.lookupTargetLabel(ctx, run.TargetID)
+	stdout, stderr, flagValue, flagSource := s.collectRunOutput(ctx, runID)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"run": marshalRunDetail(run, stdout, stderr, flagValue, flagSource, exploitName, targetLabel),
+	})
+}
+
+func (s *Server) handleRunBulkCancel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req struct {
+		RunIDs []string `json:"runIds"`
+		Reason string   `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid payload")
+		return
+	}
+	if len(req.RunIDs) == 0 {
+		writeError(w, http.StatusBadRequest, "runIds is required")
+		return
+	}
+
+	ctx := r.Context()
+	results := make([]map[string]any, 0, len(req.RunIDs))
+	seen := make(map[string]struct{})
+	for _, rawID := range req.RunIDs {
+		runID := strings.TrimSpace(rawID)
+		if runID == "" {
+			continue
+		}
+		if _, exists := seen[runID]; exists {
+			continue
+		}
+		seen[runID] = struct{}{}
+
+		run, err := s.repository.GetRun(ctx, runID)
+		if err != nil {
+			results = append(results, map[string]any{
+				"runId": runID,
+				"error": "run not found",
+			})
+			continue
+		}
+		switch run.Status {
+		case domain.RunStatusPending, domain.RunStatusRunning:
+		default:
+			results = append(results, map[string]any{
+				"runId": runID,
+				"error": "run cannot be canceled",
+			})
+			continue
+		}
+		updated, err := s.cancelRunInternal(ctx, run, req.Reason)
+		if err != nil {
+			s.logger.Error("bulk cancel run failed", slog.Any("err", err), slog.String("run_id", runID))
+			results = append(results, map[string]any{
+				"runId": runID,
+				"error": "failed to cancel run",
+			})
+			continue
+		}
+		exploitName := s.lookupExploitName(ctx, updated.ExploitID)
+		targetLabel := s.lookupTargetLabel(ctx, updated.TargetID)
+		results = append(results, map[string]any{
+			"run": marshalRunSummary(updated, exploitName, targetLabel),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"results": results})
+}
+
+func (s *Server) handleRunFilterOptions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	query := r.URL.Query()
+	kind := strings.ToLower(strings.TrimSpace(query.Get("type")))
+	if kind != "exploit" && kind != "target" {
+		writeError(w, http.StatusBadRequest, "type must be exploit or target")
+		return
+	}
+	search := strings.ToLower(strings.TrimSpace(query.Get("q")))
+	limit := 20
+
+	items := make([]map[string]string, 0, limit)
+	ctx := r.Context()
+
+	match := func(id, label string) bool {
+		if search == "" {
+			return true
+		}
+		return strings.Contains(strings.ToLower(id), search) || strings.Contains(strings.ToLower(label), search)
+	}
+
+	switch kind {
+	case "exploit":
+		exploits, err := s.repository.ListExploits(ctx)
+		if err != nil {
+			s.logger.Error("list exploits for filter failed", slog.Any("err", err))
+			writeError(w, http.StatusInternalServerError, "failed to load options")
+			return
+		}
+		for _, exploit := range exploits {
+			if !match(exploit.ID, exploit.Name) {
+				continue
+			}
+			items = append(items, map[string]string{
+				"id":    exploit.ID,
+				"label": exploit.Name,
+			})
+			if len(items) >= limit {
+				break
+			}
+		}
+	case "target":
+		targets, err := s.repository.ListTargets(ctx)
+		if err != nil {
+			s.logger.Error("list targets for filter failed", slog.Any("err", err))
+			writeError(w, http.StatusInternalServerError, "failed to load options")
+			return
+		}
+		for _, target := range targets {
+			label := target.TeamName
+			if strings.TrimSpace(label) == "" {
+				label = target.ID
+			}
+			if !match(target.ID, label) {
+				continue
+			}
+			items = append(items, map[string]string{
+				"id":    target.ID,
+				"label": label,
+			})
+			if len(items) >= limit {
+				break
+			}
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) cancelRunInternal(ctx context.Context, run domain.Run, reason string) (domain.Run, error) {
+	reason = strings.TrimSpace(reason)
 	if reason == "" {
 		if run.Status == domain.RunStatusPending {
 			reason = "canceled before execution"
@@ -1358,8 +1508,7 @@ func (s *Server) handleRunCancel(w http.ResponseWriter, r *http.Request, runID s
 	run.ErrorMessage = reason
 
 	if err := s.repository.UpdateRun(ctx, &run); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to update run")
-		return
+		return run, err
 	}
 
 	logFields := map[string]any{
@@ -1372,19 +1521,13 @@ func (s *Server) handleRunCancel(w http.ResponseWriter, r *http.Request, runID s
 	if err := s.repository.AppendLog(ctx, domain.LogEntry{
 		Level:   "warn",
 		Source:  "control-plane",
-		Message: fmt.Sprintf("run %s canceled", runID),
-		RunID:   runID,
+		Message: fmt.Sprintf("run %s canceled", run.ID),
+		RunID:   run.ID,
 		Fields:  logFields,
 	}); err != nil {
-		s.logger.Warn("append cancel log failed", slog.Any("err", err), slog.String("run_id", runID))
+		s.logger.Warn("append cancel log failed", slog.Any("err", err), slog.String("run_id", run.ID))
 	}
-
-	exploitName := s.lookupExploitName(ctx, run.ExploitID)
-	targetLabel := s.lookupTargetLabel(ctx, run.TargetID)
-	stdout, stderr, flagValue, flagSource := s.collectRunOutput(ctx, runID)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"run": marshalRunDetail(run, stdout, stderr, flagValue, flagSource, exploitName, targetLabel),
-	})
+	return run, nil
 }
 
 func (s *Server) enqueueFlag(ctx context.Context, flag domain.Flag) {
@@ -2263,7 +2406,7 @@ func marshalLog(entry domain.LogEntry) map[string]any {
 	}
 }
 
-func marshalRunDetail(run domain.Run, stdout, stderr, flagValue, flagSource, exploitName, targetLabel string) map[string]any {
+func marshalRunSummary(run domain.Run, exploitName, targetLabel string) map[string]any {
 	return map[string]any{
 		"id":           run.ID,
 		"exploitId":    run.ExploitID,
@@ -2276,12 +2419,17 @@ func marshalRunDetail(run domain.Run, stdout, stderr, flagValue, flagSource, exp
 		"startedAt":    run.StartedAt,
 		"finishedAt":   run.FinishedAt,
 		"errorMessage": run.ErrorMessage,
-		"flagId":       run.FlagID,
-		"stdout":       stdout,
-		"stderr":       stderr,
-		"flagValue":    flagValue,
-		"flagSource":   flagSource,
 	}
+}
+
+func marshalRunDetail(run domain.Run, stdout, stderr, flagValue, flagSource, exploitName, targetLabel string) map[string]any {
+	data := marshalRunSummary(run, exploitName, targetLabel)
+	data["flagId"] = run.FlagID
+	data["stdout"] = stdout
+	data["stderr"] = stderr
+	data["flagValue"] = flagValue
+	data["flagSource"] = flagSource
+	return data
 }
 
 func marshalRunner(runner domain.Runner) map[string]any {

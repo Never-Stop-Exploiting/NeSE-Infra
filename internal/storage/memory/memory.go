@@ -997,11 +997,14 @@ func (r *Repository) OverviewMatrix(ctx context.Context, start, end time.Time) (
 	return matrix, ctx.Err()
 }
 
-func (r *Repository) ListRuns(ctx context.Context, limit int, cursor string) ([]domain.Run, string, error) {
+func (r *Repository) ListRuns(ctx context.Context, filter domain.RunFilter, limit int, cursor string) ([]domain.Run, string, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	items := make([]domain.Run, 0, len(r.runs))
 	for _, run := range r.runs {
+		if !matchesRunFilter(run, filter) {
+			continue
+		}
 		items = append(items, run)
 	}
 	sort.Slice(items, func(i, j int) bool {
@@ -1423,6 +1426,19 @@ func jobHintsFromMetadata(meta map[string]any) (string, string, time.Duration) {
 		}
 	}
 	return flagRegex, flagFile, timeout
+}
+
+func matchesRunFilter(run domain.Run, filter domain.RunFilter) bool {
+	if value := strings.TrimSpace(filter.Status); value != "" && !strings.EqualFold(value, string(run.Status)) {
+		return false
+	}
+	if value := strings.TrimSpace(filter.ExploitID); value != "" && !strings.EqualFold(value, run.ExploitID) {
+		return false
+	}
+	if value := strings.TrimSpace(filter.TargetID); value != "" && !strings.EqualFold(value, run.TargetID) {
+		return false
+	}
+	return true
 }
 
 func runReferenceTime(run domain.Run) time.Time {

@@ -7,10 +7,99 @@
           {{ runStore.loading ? "Refreshing..." : "Refresh" }}
         </button>
       </header>
+      <div class="toolbar">
+        <form class="filters" @submit.prevent="applyFilters">
+          <div class="filter-group">
+            <label>Status</label>
+            <select v-model="filterDraft.status">
+              <option value="">All</option>
+              <option v-for="status in statusOptions" :key="status" :value="status">
+                {{ status }}
+              </option>
+            </select>
+          </div>
+          <div class="filter-group">
+            <label>Exploit</label>
+            <div class="lookup-input">
+              <input v-model.trim="filterDraft.exploitId" type="text" placeholder="Exploit ID or name" />
+              <button
+                type="button"
+                class="ghost small"
+                :disabled="suggestionLoading.exploit"
+                @click="lookupOptions('exploitId')"
+              >
+                {{ suggestionLoading.exploit ? "..." : "Lookup" }}
+              </button>
+            </div>
+            <p v-if="suggestionError.exploit" class="error-text">{{ suggestionError.exploit }}</p>
+            <ul v-if="exploitSuggestions.length" class="suggestion-list">
+              <li v-for="option in exploitSuggestions" :key="option.id">
+                <button type="button" @click="applySuggestion('exploitId', option)">
+                  <strong>{{ option.label }}</strong>
+                  <small>{{ option.id }}</small>
+                </button>
+              </li>
+            </ul>
+          </div>
+          <div class="filter-group">
+            <label>Target</label>
+            <div class="lookup-input">
+              <input v-model.trim="filterDraft.targetId" type="text" placeholder="Target ID or team" />
+              <button
+                type="button"
+                class="ghost small"
+                :disabled="suggestionLoading.target"
+                @click="lookupOptions('targetId')"
+              >
+                {{ suggestionLoading.target ? "..." : "Lookup" }}
+              </button>
+            </div>
+            <p v-if="suggestionError.target" class="error-text">{{ suggestionError.target }}</p>
+            <ul v-if="targetSuggestions.length" class="suggestion-list">
+              <li v-for="option in targetSuggestions" :key="option.id">
+                <button type="button" @click="applySuggestion('targetId', option)">
+                  <strong>{{ option.label }}</strong>
+                  <small>{{ option.id }}</small>
+                </button>
+              </li>
+            </ul>
+          </div>
+          <div class="filter-actions">
+            <button type="submit" class="ghost" :disabled="!filterDirty">Apply</button>
+            <button
+              type="button"
+              class="ghost secondary"
+              :disabled="!filterDirty && !hasActiveFilters"
+              @click="resetFilters"
+            >
+              Reset
+            </button>
+          </div>
+        </form>
+        <div class="bulk-actions">
+          <button
+            type="button"
+            class="ghost danger"
+            :disabled="!canBulkCancel"
+            @click="cancelSelectedRuns"
+          >
+            {{ bulkCanceling ? "Canceling..." : `Cancel Selected (${selectedRunsCount})` }}
+          </button>
+          <p v-if="bulkError" class="error-text">{{ bulkError }}</p>
+        </div>
+      </div>
       <div class="table-wrapper">
         <table>
           <thead>
             <tr>
+              <th class="select-col">
+                <input
+                  type="checkbox"
+                  :checked="allVisibleSelected"
+                  :disabled="!runStore.runs.length"
+                  @change="toggleSelectAll(($event.target as HTMLInputElement).checked)"
+                />
+              </th>
               <th>ID</th>
               <th>Exploit</th>
               <th>Target</th>
@@ -26,6 +115,14 @@
               :class="{ active: runStore.selectedRun?.id === run.id }"
               @click="select(run.id)"
             >
+              <td class="select-col">
+                <input
+                  type="checkbox"
+                  :checked="isSelected(run.id)"
+                  @click.stop
+                  @change.stop="toggleRowSelection(run.id, ($event.target as HTMLInputElement).checked)"
+                />
+              </td>
               <td>
                 <span class="mono truncate" :title="run.id">{{ run.id }}</span>
               </td>
@@ -162,17 +259,31 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
-import { useRunStore } from "@/stores/runs";
-import type { FlagRecord } from "@/types";
+import { useRunStore, type RunFilters } from "@/stores/runs";
+import type { FlagRecord, RunFilterOption } from "@/types";
 import { fetchFlagDetail, retryFlag as apiRetryFlag } from "@/api/flags";
+import { fetchRunFilterOptions } from "@/api/runs";
 
 const runStore = useRunStore();
 const canceling = ref(false);
+const bulkCanceling = ref(false);
+const bulkError = ref<string | null>(null);
+const selectedRuns = ref<Set<string>>(new Set());
+const statusOptions = ["pending", "running", "succeeded", "failed", "timeout", "canceled"];
+const filterDraft = ref<RunFilters>(cloneFilters(runStore.filters as RunFilters));
+
 const flagPanelOpen = ref(false);
 const flagDetail = ref<FlagRecord | null>(null);
 const flagLoading = ref(false);
 const flagError = ref<string | null>(null);
 const flagRetrying = ref(false);
+const exploitSuggestions = ref<RunFilterOption[]>([]);
+const targetSuggestions = ref<RunFilterOption[]>([]);
+const suggestionLoading = ref<Record<"exploit" | "target", boolean>>({ exploit: false, target: false });
+const suggestionError = ref<Record<"exploit" | "target", string | null>>({
+  exploit: null,
+  target: null
+});
 
 const cancelActionLabel = computed(() => {
   const status = runStore.selectedRun?.status;
@@ -209,6 +320,21 @@ const flagSourceLabel = computed(() => {
 const flagStatusText = computed(() => flagDetail.value?.status ?? "unknown");
 const flagAttempts = computed(() => flagDetail.value?.attempts ?? []);
 
+const hasActiveFilters = computed(() => {
+  const value = runStore.filters as RunFilters;
+  return Boolean(value.status || value.exploitId || value.targetId);
+});
+
+const filterDirty = computed(
+  () => !filtersEqual(filterDraft.value, runStore.filters as RunFilters)
+);
+
+const selectedRunsCount = computed(() => selectedRuns.value.size);
+const allVisibleSelected = computed(
+  () => runStore.runs.length > 0 && runStore.runs.every((run) => selectedRuns.value.has(run.id))
+);
+const canBulkCancel = computed(() => selectedRunsCount.value > 0 && !bulkCanceling.value);
+
 watch(
   () => runStore.selectedRun?.id,
   () => {
@@ -216,6 +342,42 @@ watch(
     flagDetail.value = null;
     flagError.value = null;
     flagRetrying.value = false;
+  }
+);
+
+watch(
+  () => runStore.runs.map((run) => run.id),
+  (ids) => {
+    const allowed = new Set(ids);
+    selectedRuns.value = new Set([...selectedRuns.value].filter((id) => allowed.has(id)));
+  }
+);
+
+watch(
+  () => ({ ...(runStore.filters as RunFilters) }),
+  (value) => {
+    filterDraft.value = cloneFilters(value);
+    clearSuggestions("exploitId");
+    clearSuggestions("targetId");
+  },
+  { deep: true }
+);
+
+watch(
+  () => filterDraft.value.exploitId,
+  (value) => {
+    if (!value) {
+      clearSuggestions("exploitId");
+    }
+  }
+);
+
+watch(
+  () => filterDraft.value.targetId,
+  (value) => {
+    if (!value) {
+      clearSuggestions("targetId");
+    }
   }
 );
 
@@ -233,6 +395,94 @@ async function cancelSelectedRun() {
   } finally {
     canceling.value = false;
   }
+}
+
+async function cancelSelectedRuns() {
+  if (!selectedRunsCount.value || bulkCanceling.value) {
+    return;
+  }
+  bulkCanceling.value = true;
+  bulkError.value = null;
+  try {
+    const { errors } = await runStore.cancelRunsBulk(Array.from(selectedRuns.value));
+    if (errors.length) {
+      bulkError.value = errors.join("; ");
+    } else {
+      selectedRuns.value = new Set();
+    }
+  } finally {
+    bulkCanceling.value = false;
+  }
+}
+
+async function applyFilters() {
+  await runStore.setFilters(normalizeFilter(filterDraft.value));
+  selectedRuns.value = new Set();
+}
+
+async function resetFilters() {
+  filterDraft.value = { status: "", exploitId: "", targetId: "" };
+  await runStore.setFilters({});
+  selectedRuns.value = new Set();
+}
+
+async function lookupOptions(field: "exploitId" | "targetId") {
+  const query = filterDraft.value[field]?.trim();
+  if (!query) {
+    clearSuggestions(field);
+    return;
+  }
+  const key = field === "exploitId" ? "exploit" : "target";
+  suggestionLoading.value[key] = true;
+  suggestionError.value[key] = null;
+  try {
+    const options = await fetchRunFilterOptions(key, query);
+    if (field === "exploitId") {
+      exploitSuggestions.value = options;
+    } else {
+      targetSuggestions.value = options;
+    }
+  } catch (err) {
+    console.error("lookup options failed", err);
+    suggestionError.value[key] = "Lookup failed";
+  } finally {
+    suggestionLoading.value[key] = false;
+  }
+}
+
+function clearSuggestions(field: "exploitId" | "targetId") {
+  if (field === "exploitId") {
+    exploitSuggestions.value = [];
+    suggestionError.value.exploit = null;
+  } else {
+    targetSuggestions.value = [];
+    suggestionError.value.target = null;
+  }
+}
+
+function applySuggestion(field: "exploitId" | "targetId", option: RunFilterOption) {
+  filterDraft.value[field] = option.id;
+  clearSuggestions(field);
+}
+
+function toggleRowSelection(id: string, checked: boolean) {
+  if (checked) {
+    selectedRuns.value = new Set([...selectedRuns.value, id]);
+  } else {
+    selectedRuns.value = new Set([...selectedRuns.value].filter((value) => value !== id));
+  }
+}
+
+function toggleSelectAll(checked: boolean) {
+  if (checked) {
+    selectedRuns.value = new Set(runStore.runs.map((run) => run.id));
+  } else {
+    selectedRuns.value = new Set();
+  }
+}
+
+function isSelected(id: string) {
+  return selectedRuns.value.has(id);
 }
 
 async function ensureFlagDetailLoaded() {
@@ -289,6 +539,38 @@ function formatTimestamp(value?: string) {
   return date.toLocaleString();
 }
 
+function cloneFilters(source?: RunFilters): RunFilters {
+  return {
+    status: source?.status ?? "",
+    exploitId: source?.exploitId ?? "",
+    targetId: source?.targetId ?? ""
+  };
+}
+
+function normalizeFilter(source: RunFilters): RunFilters {
+  const target: RunFilters = {};
+  if (source.status?.trim()) {
+    target.status = source.status.trim();
+  }
+  if (source.exploitId?.trim()) {
+    target.exploitId = source.exploitId.trim();
+  }
+  if (source.targetId?.trim()) {
+    target.targetId = source.targetId.trim();
+  }
+  return target;
+}
+
+function filtersEqual(a: RunFilters, b: RunFilters) {
+  const left = normalizeFilter(a);
+  const right = normalizeFilter(b);
+  return (
+    (left.status ?? "") === (right.status ?? "") &&
+    (left.exploitId ?? "") === (right.exploitId ?? "") &&
+    (left.targetId ?? "") === (right.targetId ?? "")
+  );
+}
+
 onMounted(() => {
   runStore.refresh();
 });
@@ -309,6 +591,120 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 1rem;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  justify-content: space-between;
+  align-items: flex-start;
+}
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: flex-end;
+}
+
+.filter-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.filter-group label {
+  font-size: 0.75rem;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.filter-group input,
+.filter-group select {
+  background: rgba(15, 23, 42, 0.9);
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  border-radius: 8px;
+  padding: 0.4rem 0.6rem;
+  color: #e2e8f0;
+  min-width: 140px;
+}
+
+.filter-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.filters .ghost {
+  padding: 0.35rem 0.9rem;
+}
+
+.ghost.small {
+  padding: 0.25rem 0.6rem;
+  font-size: 0.8rem;
+}
+
+.filters .secondary {
+  border-color: rgba(148, 163, 184, 0.5);
+  color: #e2e8f0;
+}
+
+.lookup-input {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.lookup-input input {
+  flex: 1;
+}
+
+.suggestion-list {
+  list-style: none;
+  padding: 0.35rem;
+  margin: 0.35rem 0 0;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.85);
+  max-height: 200px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.suggestion-list button {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 0.35rem 0.5rem;
+  color: #e2e8f0;
+  display: flex;
+  flex-direction: column;
+}
+
+.suggestion-list button:hover {
+  border-color: rgba(59, 130, 246, 0.6);
+  background: rgba(59, 130, 246, 0.15);
+}
+
+.suggestion-list small {
+  color: #94a3b8;
+  font-size: 0.75rem;
+}
+
+.bulk-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  min-width: 220px;
+}
+
+.error-text {
+  color: #fca5a5;
+  font-size: 0.85rem;
 }
 
 .table-wrapper {
@@ -386,6 +782,16 @@ tr.active {
 .mono {
   font-family: "JetBrains Mono", Menlo, monospace;
   font-size: 0.82rem;
+}
+
+.select-col {
+  width: 2.5rem;
+  text-align: center;
+}
+
+.select-col input {
+  width: 1rem;
+  height: 1rem;
 }
 
 .detail header {

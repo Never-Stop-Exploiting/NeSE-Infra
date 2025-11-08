@@ -60,7 +60,7 @@ type Repository interface {
 	GetFlagLogs(ctx context.Context, id string) ([]string, error)
 	ListFlagAttempts(ctx context.Context, flagID string) ([]domain.SubmissionAttempt, error)
 	AddFlagAttempt(ctx context.Context, flagID string, attempt domain.SubmissionAttempt) error
-	ListRuns(ctx context.Context, limit int, cursor string) ([]domain.Run, string, error)
+	ListRuns(ctx context.Context, filter domain.RunFilter, limit int, cursor string) ([]domain.Run, string, error)
 	GetRun(ctx context.Context, id string) (domain.Run, error)
 	ListLogs(ctx context.Context, filter domain.LogFilter) ([]domain.LogEntry, error)
 	AppendLog(ctx context.Context, entry domain.LogEntry) error
