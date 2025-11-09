@@ -35,6 +35,16 @@ func New(cfg config.Config, log *slog.Logger, repo storage.Repository, broker qu
 }
 
 // Run launches the scheduling loop until the provided context is cancelled.
+
+func normalizeStrategy(raw domain.SchedulerStrategy) domain.SchedulerStrategy {
+	switch raw {
+	case domain.SchedulerStrategyInterval, domain.SchedulerStrategyContinuous:
+		return raw
+	default:
+		return domain.SchedulerStrategyInterval
+	}
+}
+
 func (s *Scheduler) Run(ctx context.Context) error {
 	baseInterval := time.Second
 	if s.cfg.Scheduler.PollInterval > 0 && s.cfg.Scheduler.PollInterval < baseInterval {
@@ -57,7 +67,9 @@ func (s *Scheduler) Run(ctx context.Context) error {
 				settings.RoundInterval = s.cfg.Scheduler.PollInterval
 				settings.MaxDispatchBatch = s.cfg.Scheduler.MaxDispatchBatch
 				settings.Enabled = true
+				settings.Strategy = domain.SchedulerStrategyInterval
 			}
+			settings.Strategy = normalizeStrategy(settings.Strategy)
 			if !settings.Enabled {
 				s.log.Debug("scheduler paused")
 				continue
@@ -73,19 +85,26 @@ func (s *Scheduler) Run(ctx context.Context) error {
 			if maxBatch <= 0 {
 				maxBatch = s.cfg.Scheduler.MaxDispatchBatch
 			}
-			if lastRound.IsZero() || time.Since(lastRound) >= interval {
-				if err := s.tick(ctx, maxBatch); err != nil {
+			switch settings.Strategy {
+			case domain.SchedulerStrategyContinuous:
+				if err := s.tick(ctx, maxBatch, settings); err != nil {
 					s.log.Error("scheduler tick failed", slog.Any("err", err))
-				} else {
-					lastRound = time.Now()
+				}
+			default:
+				if lastRound.IsZero() || time.Since(lastRound) >= interval {
+					if err := s.tick(ctx, maxBatch, settings); err != nil {
+						s.log.Error("scheduler tick failed", slog.Any("err", err))
+					} else {
+						lastRound = time.Now()
+					}
 				}
 			}
 		}
 	}
 }
 
-func (s *Scheduler) tick(ctx context.Context, limit int) error {
-	workItems, err := s.repo.RunnableWork(ctx, limit)
+func (s *Scheduler) tick(ctx context.Context, limit int, settings domain.SchedulerSettings) error {
+	workItems, err := s.repo.RunnableWork(ctx, limit, settings)
 	if err != nil {
 		return err
 	}

@@ -9,7 +9,7 @@ AwD Infra 以 Go + Vue3 实现一套模块化的 AwD 平台：控制面负责题
 ## 当前能力
 
 - **Control Plane / REST API (`cmd/control-plane`)**：提供 `/api/v1` 端点，实现 Challenge/Target/Exploit CRUD、批量导入目标 (`/targets/import`)、artifact 文件/`run.sh` 管理、Run/Flag/日志查询、Run start/finish/cancel Hook、Flag 重试、Runner 注册与心跳、Scheduler 运行参数热更新以及 Target × Exploit 覆盖矩阵维护；捕获的 flag 会落库并写入 Flag 队列。
-- **Scheduler (`cmd/scheduler`)**：按 `SchedulerSettings` 设置的轮询间隔与批次大小读取 `RunnableWork`，结合 Target 并发限制、Exploit Runner Tags、Target-Exploit Override 计算可执行组合，打包 artifact（内联或 URI）后以 `jobs.JobPayload` 写入 Redis Streams（消费组 + 可见性超时），并在缺乏匹配 Runner Tags 时跳过任务。
+- **Scheduler (`cmd/scheduler`)**：按 `SchedulerSettings` 设置的策略（轮询批次或按 Target×Exploit 连续运行）生成 `RunnableWork`，结合 Target 并发限制、Exploit Runner Tags、Target-Exploit Override 计算可执行组合，打包 artifact（内联或 URI）后以 `jobs.JobPayload` 写入 Redis Streams（消费组 + 可见性超时），并在缺乏匹配 Runner Tags 时跳过任务。
 - **Runner (`cmd/runner`)**：注册到控制面并定期心跳，使用 `RUN_QUEUE_NAME` 对应的 Redis Streams 消费组阻塞拉取任务；自动下载/解压 ZIP artifact 到 `/env/tmp/<run-id>`，若缺少 `run.sh` 会用 payload 中的 `runScript/entrypoint` 补齐；通过 `chroot` + `./run.sh <ip> <port>` 执行，收集 stdout/stderr，优先从指定 flag 文件读取 flag，失败时回退到正则；Run 状态会在 start/finish/cancel、心跳、取消检测时同步到控制面，同时把 flag 推送到 flag 队列。
 - **Flag Submitter (`cmd/flag-submitter`)**：消费 `FLAG_QUEUE_NAME`，解析 `submitter.QueueMessage`，调用内置 HTTP 插件（可插拔接口在 `docs/flag-submitters.md`）执行提交，结合状态码区分 `accepted/duplicated/failed/unknown` 并写回 `flags`、`submission_attempts`、结构化日志，失败场景按配置的 backoff 进行 `Nack`+重排队。
 - **持久化 (`internal/storage/postgres`)**：初始化完整 Postgres schema（Challenges/Targets/Exploits/Runs/Flags/Runners/Logs/Overrides 等），以本地文件夹存放 Exploit artifacts 与 `run.sh`，支持列出/上传/删除/打包，并保证 ZIP 不可逃逸工作目录。

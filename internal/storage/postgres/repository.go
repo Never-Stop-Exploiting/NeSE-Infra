@@ -235,11 +235,15 @@ func ensureSchema(ctx context.Context, db *sql.DB) error {
 			round_interval_seconds INTEGER NOT NULL,
 			max_dispatch_batch INTEGER NOT NULL,
 			updated_at TIMESTAMPTZ NOT NULL,
-			enabled BOOLEAN NOT NULL DEFAULT false
+			enabled BOOLEAN NOT NULL DEFAULT false,
+			strategy TEXT NOT NULL DEFAULT 'interval',
+			continuous_delay_seconds INTEGER NOT NULL DEFAULT 0
 		);`,
 		`ALTER TABLE scheduler_settings ADD COLUMN IF NOT EXISTS enabled BOOLEAN NOT NULL DEFAULT false;`,
-		`INSERT INTO scheduler_settings (id, round_interval_seconds, max_dispatch_batch, updated_at, enabled)
-			VALUES ('default', 300, 50, NOW(), false)
+		`ALTER TABLE scheduler_settings ADD COLUMN IF NOT EXISTS strategy TEXT NOT NULL DEFAULT 'interval';`,
+		`ALTER TABLE scheduler_settings ADD COLUMN IF NOT EXISTS continuous_delay_seconds INTEGER NOT NULL DEFAULT 0;`,
+		`INSERT INTO scheduler_settings (id, round_interval_seconds, max_dispatch_batch, updated_at, enabled, strategy, continuous_delay_seconds)
+			VALUES ('default', 300, 50, NOW(), false, 'interval', 0)
 			ON CONFLICT (id) DO NOTHING;`,
 		`CREATE TABLE IF NOT EXISTS target_exploit_overrides (
 			target_id TEXT REFERENCES targets(id) ON DELETE CASCADE,
@@ -524,9 +528,13 @@ func (r *Repository) UpdateRun(ctx context.Context, run *domain.Run) error {
 	return nil
 }
 
-func (r *Repository) RunnableWork(ctx context.Context, limit int) ([]domain.RunWorkItem, error) {
+func (r *Repository) RunnableWork(ctx context.Context, limit int, settings domain.SchedulerSettings) ([]domain.RunWorkItem, error) {
 	if limit <= 0 {
 		limit = 1
+	}
+	strategy := settings.Strategy
+	if strategy == "" {
+		strategy = domain.SchedulerStrategyInterval
 	}
 
 	targets, err := r.ListTargets(ctx)
@@ -583,6 +591,68 @@ func (r *Repository) RunnableWork(ctx context.Context, limit int) ([]domain.RunW
 		}
 	}
 
+	var pairActive map[string]int
+	var lastFinished map[string]time.Time
+	continuousDelay := settings.ContinuousDelay
+	if continuousDelay < 0 {
+		continuousDelay = 0
+	}
+	if strategy == domain.SchedulerStrategyContinuous {
+		pairActive = make(map[string]int)
+		pairRows, err := r.db.QueryContext(ctx, `
+			SELECT target_id, exploit_id, COUNT(1)
+			FROM runs
+			WHERE status IN ('pending', 'running')
+			GROUP BY target_id, exploit_id`)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+		if pairRows != nil {
+			defer pairRows.Close()
+			for pairRows.Next() {
+				var targetID, exploitID sql.NullString
+				var count int
+				if scanErr := pairRows.Scan(&targetID, &exploitID, &count); scanErr != nil {
+					return nil, scanErr
+				}
+				if targetID.Valid && exploitID.Valid {
+					pairActive[schedulerPairKey(targetID.String, exploitID.String)] = count
+				}
+			}
+			if err := pairRows.Err(); err != nil {
+				return nil, err
+			}
+		}
+
+		lastFinished = make(map[string]time.Time)
+		lastRows, err := r.db.QueryContext(ctx, `
+			SELECT target_id, exploit_id, MAX(COALESCE(finished_at, started_at, queued_at)) AS last_ts
+			FROM runs
+			WHERE status NOT IN ('pending', 'running')
+				AND target_id IS NOT NULL
+				AND exploit_id IS NOT NULL
+			GROUP BY target_id, exploit_id`)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+		if lastRows != nil {
+			defer lastRows.Close()
+			for lastRows.Next() {
+				var targetID, exploitID sql.NullString
+				var ts sql.NullTime
+				if scanErr := lastRows.Scan(&targetID, &exploitID, &ts); scanErr != nil {
+					return nil, scanErr
+				}
+				if targetID.Valid && exploitID.Valid && ts.Valid {
+					lastFinished[schedulerPairKey(targetID.String, exploitID.String)] = ts.Time
+				}
+			}
+			if err := lastRows.Err(); err != nil {
+				return nil, err
+			}
+		}
+	}
+
 	exploitsByChallenge := make(map[string][]domain.Exploit)
 	for _, exploit := range exploits {
 		exploitsByChallenge[exploit.ChallengeID] = append(exploitsByChallenge[exploit.ChallengeID], exploit)
@@ -627,6 +697,18 @@ func (r *Repository) RunnableWork(ctx context.Context, limit int) ([]domain.RunW
 				continue
 			}
 
+			var pairKey string
+			if strategy == domain.SchedulerStrategyContinuous {
+				pairKey = schedulerPairKey(target.ID, exploit.ID)
+				if pairActive[pairKey] > 0 {
+					continue
+				}
+				last := lastFinished[pairKey]
+				if !last.IsZero() && now.Sub(last) < continuousDelay {
+					continue
+				}
+			}
+
 			artifact, err := r.LatestExploitArtifact(ctx, exploit.ID)
 			if err != nil || len(artifact) == 0 {
 				continue
@@ -655,6 +737,9 @@ func (r *Repository) RunnableWork(ctx context.Context, limit int) ([]domain.RunW
 			}
 			work = append(work, item)
 			activeCounts[target.ID]++
+			if strategy == domain.SchedulerStrategyContinuous && pairKey != "" {
+				pairActive[pairKey]++
+			}
 
 			if _, err := r.db.ExecContext(ctx, `
 				UPDATE exploits
@@ -675,19 +760,27 @@ func (r *Repository) RunnableWork(ctx context.Context, limit int) ([]domain.RunW
 	return work, nil
 }
 
+func schedulerPairKey(targetID, exploitID string) string {
+	return targetID + "|" + exploitID
+}
+
 func (r *Repository) GetSchedulerSettings(ctx context.Context) (domain.SchedulerSettings, error) {
 	var roundSeconds int64
 	var maxBatch int
 	var updatedAt time.Time
 	var enabled bool
+	var strategy sql.NullString
+	var continuousDelay sql.NullInt64
 	err := r.db.QueryRowContext(ctx, `
-		SELECT round_interval_seconds, max_dispatch_batch, updated_at, enabled
+		SELECT round_interval_seconds, max_dispatch_batch, updated_at, enabled, strategy, continuous_delay_seconds
 		FROM scheduler_settings
-		WHERE id = 'default'`).Scan(&roundSeconds, &maxBatch, &updatedAt, &enabled)
+		WHERE id = 'default'`).Scan(&roundSeconds, &maxBatch, &updatedAt, &enabled, &strategy, &continuousDelay)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.SchedulerSettings{
+			Strategy:         domain.SchedulerStrategyInterval,
 			RoundInterval:    time.Minute * 5,
 			MaxDispatchBatch: 50,
+			ContinuousDelay:  0,
 			Enabled:          false,
 		}, nil
 	}
@@ -695,16 +788,24 @@ func (r *Repository) GetSchedulerSettings(ctx context.Context) (domain.Scheduler
 		return domain.SchedulerSettings{}, err
 	}
 	settings := domain.SchedulerSettings{
+		Strategy:         domain.SchedulerStrategy(strategy.String),
 		RoundInterval:    time.Duration(roundSeconds) * time.Second,
 		MaxDispatchBatch: maxBatch,
+		ContinuousDelay:  time.Duration(continuousDelay.Int64) * time.Second,
 		UpdatedAt:        updatedAt,
 		Enabled:          enabled,
+	}
+	if settings.Strategy == "" {
+		settings.Strategy = domain.SchedulerStrategyInterval
 	}
 	if settings.RoundInterval <= 0 {
 		settings.RoundInterval = time.Minute * 5
 	}
 	if settings.MaxDispatchBatch <= 0 {
 		settings.MaxDispatchBatch = 50
+	}
+	if settings.ContinuousDelay < 0 {
+		settings.ContinuousDelay = 0
 	}
 	return settings, nil
 }
@@ -716,23 +817,40 @@ func (r *Repository) SaveSchedulerSettings(ctx context.Context, settings domain.
 	if settings.MaxDispatchBatch <= 0 {
 		return domain.SchedulerSettings{}, errors.New("max dispatch batch must be positive")
 	}
+	strategy := settings.Strategy
+	if strategy == "" {
+		strategy = domain.SchedulerStrategyInterval
+	}
+	switch strategy {
+	case domain.SchedulerStrategyInterval, domain.SchedulerStrategyContinuous:
+	default:
+		return domain.SchedulerSettings{}, errors.New("invalid scheduler strategy")
+	}
+	if settings.ContinuousDelay < 0 {
+		return domain.SchedulerSettings{}, errors.New("continuous delay must be non-negative")
+	}
 	now := time.Now().UTC()
 	_, err := r.db.ExecContext(ctx, `
-		INSERT INTO scheduler_settings (id, round_interval_seconds, max_dispatch_batch, updated_at, enabled)
-		VALUES ('default', $1, $2, $3, $4)
+		INSERT INTO scheduler_settings (id, round_interval_seconds, max_dispatch_batch, updated_at, enabled, strategy, continuous_delay_seconds)
+		VALUES ('default', $1, $2, $3, $4, $5, $6)
 		ON CONFLICT (id) DO UPDATE
 		SET round_interval_seconds = EXCLUDED.round_interval_seconds,
 			max_dispatch_batch = EXCLUDED.max_dispatch_batch,
 			updated_at = EXCLUDED.updated_at,
-			enabled = EXCLUDED.enabled`,
+			enabled = EXCLUDED.enabled,
+			strategy = EXCLUDED.strategy,
+			continuous_delay_seconds = EXCLUDED.continuous_delay_seconds`,
 		int64(settings.RoundInterval/time.Second),
 		settings.MaxDispatchBatch,
 		now,
 		settings.Enabled,
+		string(strategy),
+		int64(settings.ContinuousDelay / time.Second),
 	)
 	if err != nil {
 		return domain.SchedulerSettings{}, err
 	}
+	settings.Strategy = strategy
 	settings.UpdatedAt = now
 	return settings, nil
 }

@@ -170,6 +170,8 @@ class SchedulerSettingsPayload(TypedDict):
     roundIntervalSeconds: int
     roundIntervalMinutes: int
     maxDispatchBatch: int
+    continuousDelaySeconds: int
+    strategy: str
     updatedAt: str
     enabled: bool
 
@@ -812,12 +814,16 @@ class ControlPlaneAPI:
         round_interval_minutes: int | None = None,
         max_dispatch_batch: int | None = None,
         enabled: bool | None = None,
+        strategy: str | None = None,
+        continuous_delay_seconds: int | None = None,
     ) -> SchedulerSettingsPayload:
         body = {
             "roundIntervalSeconds": round_interval_seconds,
             "roundIntervalMinutes": round_interval_minutes,
             "maxDispatchBatch": max_dispatch_batch,
             "enabled": enabled,
+            "strategy": strategy,
+            "continuousDelaySeconds": continuous_delay_seconds,
         }
         payload = self.post("scheduler/settings", json_body=body)
         return payload.get("settings", {})

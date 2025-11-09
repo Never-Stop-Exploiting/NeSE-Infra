@@ -52,6 +52,8 @@ export const useSchedulerStore = defineStore("scheduler", () => {
     roundIntervalSeconds?: number;
     maxDispatchBatch?: number;
     enabled?: boolean;
+    strategy?: SchedulerSettings["strategy"];
+    continuousDelaySeconds?: number;
   }) {
     if (savingSettings.value) return;
     savingSettings.value = true;

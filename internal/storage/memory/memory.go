@@ -60,8 +60,10 @@ func New() *Repository {
 		exploitFiles: make(map[string]map[string]memoryFile),
 		runners:      make(map[string]domain.Runner),
 		scheduler: domain.SchedulerSettings{
+			Strategy:         domain.SchedulerStrategyInterval,
 			RoundInterval:    time.Minute * 5,
 			MaxDispatchBatch: 50,
+			ContinuousDelay:  0,
 			UpdatedAt:        time.Now().UTC(),
 			Enabled:          false,
 		},
@@ -175,9 +177,13 @@ func (r *Repository) UpdateRun(ctx context.Context, run *domain.Run) error {
 	return ctx.Err()
 }
 
-func (r *Repository) RunnableWork(ctx context.Context, limit int) ([]domain.RunWorkItem, error) {
+func (r *Repository) RunnableWork(ctx context.Context, limit int, settings domain.SchedulerSettings) ([]domain.RunWorkItem, error) {
 	if limit <= 0 {
 		limit = 1
+	}
+	strategy := settings.Strategy
+	if strategy == "" {
+		strategy = domain.SchedulerStrategyInterval
 	}
 
 	r.mu.RLock()
@@ -204,9 +210,37 @@ func (r *Repository) RunnableWork(ctx context.Context, limit int) ([]domain.RunW
 	r.mu.RUnlock()
 
 	activeCounts := make(map[string]int)
+	var pairActive map[string]int
+	var lastFinished map[string]time.Time
+	continuousDelay := settings.ContinuousDelay
+	if continuousDelay < 0 {
+		continuousDelay = 0
+	}
+	if strategy == domain.SchedulerStrategyContinuous {
+		pairActive = make(map[string]int)
+		lastFinished = make(map[string]time.Time)
+	}
 	for _, run := range runCopies {
 		if run.TargetID == "" {
 			continue
+		}
+		if strategy == domain.SchedulerStrategyContinuous && run.ExploitID != "" {
+			key := schedulerPairKey(run.TargetID, run.ExploitID)
+			switch run.Status {
+			case domain.RunStatusPending, domain.RunStatusRunning:
+				pairActive[key]++
+			default:
+				finish := run.FinishedAt
+				if finish.IsZero() {
+					finish = run.StartedAt
+				}
+				if finish.IsZero() {
+					finish = run.QueuedAt
+				}
+				if !finish.IsZero() && finish.After(lastFinished[key]) {
+					lastFinished[key] = finish
+				}
+			}
 		}
 		if run.Status == domain.RunStatusPending || run.Status == domain.RunStatusRunning {
 			activeCounts[run.TargetID]++
@@ -256,6 +290,18 @@ func (r *Repository) RunnableWork(ctx context.Context, limit int) ([]domain.RunW
 				continue
 			}
 
+			var pairKey string
+			if strategy == domain.SchedulerStrategyContinuous {
+				pairKey = schedulerPairKey(target.ID, exploit.ID)
+				if pairActive[pairKey] > 0 {
+					continue
+				}
+				last := lastFinished[pairKey]
+				if !last.IsZero() && now.Sub(last) < continuousDelay {
+					continue
+				}
+			}
+
 			artifact, err := r.LatestExploitArtifact(ctx, exploit.ID)
 			if err != nil || len(artifact) == 0 {
 				continue
@@ -283,6 +329,9 @@ func (r *Repository) RunnableWork(ctx context.Context, limit int) ([]domain.RunW
 				Timeout:   timeout,
 			})
 			activeCounts[target.ID]++
+			if strategy == domain.SchedulerStrategyContinuous && pairKey != "" {
+				pairActive[pairKey]++
+			}
 			if activeCounts[target.ID] >= concurrency {
 				break
 			}
@@ -295,15 +344,25 @@ func (r *Repository) RunnableWork(ctx context.Context, limit int) ([]domain.RunW
 	return work, nil
 }
 
+func schedulerPairKey(targetID, exploitID string) string {
+	return targetID + "|" + exploitID
+}
+
 func (r *Repository) GetSchedulerSettings(ctx context.Context) (domain.SchedulerSettings, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	settings := r.scheduler
+	if settings.Strategy == "" {
+		settings.Strategy = domain.SchedulerStrategyInterval
+	}
 	if settings.RoundInterval <= 0 {
 		settings.RoundInterval = time.Minute * 5
 	}
 	if settings.MaxDispatchBatch <= 0 {
 		settings.MaxDispatchBatch = 50
+	}
+	if settings.ContinuousDelay < 0 {
+		settings.ContinuousDelay = 0
 	}
 	return settings, ctx.Err()
 }
@@ -315,9 +374,22 @@ func (r *Repository) SaveSchedulerSettings(ctx context.Context, settings domain.
 	if settings.MaxDispatchBatch <= 0 {
 		return domain.SchedulerSettings{}, errors.New("max dispatch batch must be positive")
 	}
+	strategy := settings.Strategy
+	if strategy == "" {
+		strategy = domain.SchedulerStrategyInterval
+	}
+	switch strategy {
+	case domain.SchedulerStrategyInterval, domain.SchedulerStrategyContinuous:
+	default:
+		return domain.SchedulerSettings{}, errors.New("invalid scheduler strategy")
+	}
+	if settings.ContinuousDelay < 0 {
+		return domain.SchedulerSettings{}, errors.New("continuous delay must be non-negative")
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	settings.UpdatedAt = time.Now().UTC()
+	settings.Strategy = strategy
 	r.scheduler = settings
 	return settings, ctx.Err()
 }

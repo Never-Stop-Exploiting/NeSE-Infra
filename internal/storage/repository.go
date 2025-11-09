@@ -27,7 +27,7 @@ type Repository interface {
 	DeleteChallenge(ctx context.Context, id string) error
 	CreateRun(ctx context.Context, run *domain.Run) error
 	UpdateRun(ctx context.Context, run *domain.Run) error
-	RunnableWork(ctx context.Context, limit int) ([]domain.RunWorkItem, error)
+	RunnableWork(ctx context.Context, limit int, settings domain.SchedulerSettings) ([]domain.RunWorkItem, error)
 	GetSchedulerSettings(ctx context.Context) (domain.SchedulerSettings, error)
 	SaveSchedulerSettings(ctx context.Context, settings domain.SchedulerSettings) (domain.SchedulerSettings, error)
 	UpdateFlag(ctx context.Context, flag *domain.Flag) error

@@ -21,6 +21,16 @@
           Scheduler {{ isEnabled ? "Active" : "Paused" }}
         </p>
         <label>
+          Strategy
+          <select v-model="settingsForm.strategy" :disabled="savingSettings">
+            <option value="interval">Round interval</option>
+            <option value="continuous">Continuous per exploit</option>
+          </select>
+          <small class="hint">
+            Interval batches all targets; continuous reruns each exploit for every target as soon as it finishes.
+          </small>
+        </label>
+        <label v-if="isIntervalStrategy">
           Round Interval (seconds)
           <input
             v-model.number="settingsForm.roundIntervalSeconds"
@@ -30,6 +40,17 @@
             :disabled="savingSettings"
           />
           <small class="hint">≈ {{ roundIntervalPreview }}</small>
+        </label>
+        <label v-else>
+          Continuous Delay (seconds)
+          <input
+            v-model.number="settingsForm.continuousDelaySeconds"
+            type="number"
+            min="0"
+            required
+            :disabled="savingSettings"
+          />
+          <small class="hint">{{ continuousDelayPreview }}</small>
         </label>
         <label>
           Max Dispatch Batch
@@ -138,29 +159,42 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
-import type { TargetExploitStatus, TargetSchedule } from "@/types";
+import type { SchedulerSettings, TargetExploitStatus, TargetSchedule } from "@/types";
 import { useSchedulerStore } from "@/stores/scheduler";
 
 const schedulerStore = useSchedulerStore();
 const { settings, groupedTargets, loading, savingSettings, updatingTargets, error } =
   storeToRefs(schedulerStore);
 
-const settingsForm = reactive({
+type SchedulerForm = {
+  strategy: SchedulerSettings["strategy"];
+  roundIntervalSeconds: number;
+  continuousDelaySeconds: number;
+  maxDispatchBatch: number;
+};
+
+const settingsForm = reactive<SchedulerForm>({
+  strategy: "interval",
   roundIntervalSeconds: 300,
+  continuousDelaySeconds: 0,
   maxDispatchBatch: 50
 });
 
 const isEnabled = computed(() => settings.value?.enabled ?? false);
+const isIntervalStrategy = computed(() => settingsForm.strategy === "interval");
+const isContinuousStrategy = computed(() => settingsForm.strategy === "continuous");
 
 watch(
   settings,
   (value) => {
     if (value) {
+      settingsForm.strategy = (value.strategy as SchedulerSettings["strategy"]) || "interval";
       if (value.roundIntervalSeconds && value.roundIntervalSeconds > 0) {
         settingsForm.roundIntervalSeconds = value.roundIntervalSeconds;
       } else {
         settingsForm.roundIntervalSeconds = Math.max(value.roundIntervalMinutes || 0, 1) * 60;
       }
+      settingsForm.continuousDelaySeconds = Math.max(value.continuousDelaySeconds || 0, 0);
       settingsForm.maxDispatchBatch = value.maxDispatchBatch;
     }
   },
@@ -206,17 +240,41 @@ const roundIntervalPreview = computed(() => {
   return `${formatted} minute${minutes === 1 ? "" : "s"}`;
 });
 
+const continuousDelayPreview = computed(() => {
+  const seconds = Math.max(0, Number(settingsForm.continuousDelaySeconds) || 0);
+  if (seconds === 0) {
+    return "back-to-back runs";
+  }
+  if (seconds < 60) {
+    return `${seconds} second${seconds === 1 ? "" : "s"}`;
+  }
+  const minutes = seconds / 60;
+  const formatted = minutes >= 10 ? minutes.toFixed(1) : minutes.toFixed(2);
+  return `${formatted} minute${minutes === 1 ? "" : "s"}`;
+});
+
 async function handleSaveSettings() {
   try {
-    const intervalSeconds = Math.max(
-      1,
-      Math.round(Number(settingsForm.roundIntervalSeconds) || 0)
-    );
-    settingsForm.roundIntervalSeconds = intervalSeconds;
-    await schedulerStore.saveSettings({
-      roundIntervalSeconds: intervalSeconds,
-      maxDispatchBatch: settingsForm.maxDispatchBatch
-    });
+    const payload: Parameters<typeof schedulerStore.saveSettings>[0] = {
+      maxDispatchBatch: settingsForm.maxDispatchBatch,
+      strategy: settingsForm.strategy
+    };
+    if (isIntervalStrategy.value) {
+      const intervalSeconds = Math.max(
+        1,
+        Math.round(Number(settingsForm.roundIntervalSeconds) || 0)
+      );
+      settingsForm.roundIntervalSeconds = intervalSeconds;
+      payload.roundIntervalSeconds = intervalSeconds;
+    } else {
+      const delaySeconds = Math.max(
+        0,
+        Math.round(Number(settingsForm.continuousDelaySeconds) || 0)
+      );
+      settingsForm.continuousDelaySeconds = delaySeconds;
+      payload.continuousDelaySeconds = delaySeconds;
+    }
+    await schedulerStore.saveSettings(payload);
   } catch (err) {
     // errors are captured and exposed via store
     console.error(err);
@@ -347,12 +405,23 @@ label {
   font-size: 0.8rem;
 }
 
-input[type="number"] {
+input[type="number"],
+select {
   padding: 0.6rem 0.75rem;
   border-radius: 8px;
   border: 1px solid rgba(148, 163, 184, 0.2);
   background: rgba(15, 23, 42, 0.85);
   color: #f8fafc;
+}
+
+select {
+  appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, rgba(148, 163, 184, 0.5) 50%),
+    linear-gradient(135deg, rgba(148, 163, 184, 0.5) 50%, transparent 50%);
+  background-position: calc(100% - 18px) calc(50% - 3px), calc(100% - 12px) calc(50% - 3px);
+  background-size: 6px 6px, 6px 6px;
+  background-repeat: no-repeat;
+  padding-right: 2rem;
 }
 
 button {

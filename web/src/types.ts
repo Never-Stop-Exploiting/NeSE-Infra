@@ -161,6 +161,9 @@ export interface SchedulerSettings {
   roundIntervalSeconds: number;
   roundIntervalMinutes: number;
   maxDispatchBatch: number;
+  continuousDelaySeconds: number;
+  strategy: "interval" | "continuous" | string;
+  enabled: boolean;
   updatedAt?: string;
 }
 

@@ -223,12 +223,22 @@ type LogEntry struct {
 	Fields    map[string]any
 }
 
+// SchedulerStrategy enumerates supported scheduling policies.
+type SchedulerStrategy string
+
+const (
+	SchedulerStrategyInterval  SchedulerStrategy = "interval"
+	SchedulerStrategyContinuous SchedulerStrategy = "continuous"
+)
+
 // SchedulerSettings capture runtime tunables for the exploit scheduler.
 type SchedulerSettings struct {
-	RoundInterval    time.Duration
-	MaxDispatchBatch int
-	UpdatedAt        time.Time
-	Enabled          bool
+	Strategy          SchedulerStrategy
+	RoundInterval     time.Duration
+	MaxDispatchBatch  int
+	ContinuousDelay   time.Duration
+	UpdatedAt         time.Time
+	Enabled           bool
 }
 
 // TargetExploitOverride records per-target enablement for specific exploits.

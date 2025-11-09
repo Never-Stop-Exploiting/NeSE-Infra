@@ -5,9 +5,10 @@ import random
 
 HOST = sys.argv[1]
 PORT = sys.argv[2]
+timeinterval = int(sys.argv[3]) if len(sys.argv) > 3 else 0
 
 print(f"Start testing challenge upload to {HOST}:{PORT}", flush=True)
-time.sleep(0.5)
+time.sleep(0.5 + timeinterval)
 print("Sending request...", flush=True)
 
 flags = [

@@ -13,6 +13,8 @@ export async function updateSchedulerSettings(payload: {
   roundIntervalSeconds?: number;
   maxDispatchBatch?: number;
   enabled?: boolean;
+  strategy?: string;
+  continuousDelaySeconds?: number;
 }): Promise<SchedulerSettings> {
   const res = await api.patch<{ settings: SchedulerSettings }>(`${base}/settings`, payload);
   return res.data.settings;

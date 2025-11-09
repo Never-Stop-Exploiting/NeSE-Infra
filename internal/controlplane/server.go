@@ -1968,10 +1968,12 @@ func (s *Server) handleSchedulerSettings(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusOK, map[string]any{"settings": marshalSchedulerSettings(settings)})
 	case http.MethodPost, http.MethodPatch:
 		var req struct {
-			RoundIntervalMinutes *int  `json:"roundIntervalMinutes"`
-			RoundIntervalSeconds *int  `json:"roundIntervalSeconds"`
-			MaxDispatchBatch     *int  `json:"maxDispatchBatch"`
-			Enabled              *bool `json:"enabled"`
+			RoundIntervalMinutes   *int    `json:"roundIntervalMinutes"`
+			RoundIntervalSeconds   *int    `json:"roundIntervalSeconds"`
+			MaxDispatchBatch       *int    `json:"maxDispatchBatch"`
+			Enabled                *bool   `json:"enabled"`
+			Strategy               *string `json:"strategy"`
+			ContinuousDelaySeconds *int    `json:"continuousDelaySeconds"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid payload")
@@ -2005,6 +2007,23 @@ func (s *Server) handleSchedulerSettings(w http.ResponseWriter, r *http.Request)
 		}
 		if req.Enabled != nil {
 			settings.Enabled = *req.Enabled
+		}
+		if req.Strategy != nil {
+			strategy := strings.ToLower(strings.TrimSpace(*req.Strategy))
+			switch domain.SchedulerStrategy(strategy) {
+			case domain.SchedulerStrategyInterval, domain.SchedulerStrategyContinuous:
+				settings.Strategy = domain.SchedulerStrategy(strategy)
+			default:
+				writeError(w, http.StatusBadRequest, "invalid scheduler strategy")
+				return
+			}
+		}
+		if req.ContinuousDelaySeconds != nil {
+			if *req.ContinuousDelaySeconds < 0 {
+				writeError(w, http.StatusBadRequest, "continuousDelaySeconds must be >= 0")
+				return
+			}
+			settings.ContinuousDelay = time.Duration(*req.ContinuousDelaySeconds) * time.Second
 		}
 		updated, err := s.repository.SaveSchedulerSettings(r.Context(), settings)
 		if err != nil {
@@ -2225,12 +2244,18 @@ func marshalSchedulerSettings(settings domain.SchedulerSettings) map[string]any 
 	if minutes == 0 && seconds > 0 {
 		minutes = 1
 	}
+	continuous := int(settings.ContinuousDelay / time.Second)
+	if continuous < 0 {
+		continuous = 0
+	}
 	return map[string]any{
-		"roundIntervalSeconds": seconds,
-		"roundIntervalMinutes": minutes,
-		"maxDispatchBatch":     settings.MaxDispatchBatch,
-		"updatedAt":            settings.UpdatedAt,
-		"enabled":              settings.Enabled,
+		"roundIntervalSeconds":   seconds,
+		"roundIntervalMinutes":   minutes,
+		"maxDispatchBatch":       settings.MaxDispatchBatch,
+		"continuousDelaySeconds": continuous,
+		"strategy":               string(settings.Strategy),
+		"updatedAt":              settings.UpdatedAt,
+		"enabled":                settings.Enabled,
 	}
 }
 
