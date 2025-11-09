@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"awdinfra/internal/config"
@@ -22,6 +23,9 @@ func main() {
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
+	}
+	if strings.TrimSpace(cfg.ControlPlane.AdminToken) == "" {
+		log.Fatalf("CONTROL_PLANE_TOKEN cannot be empty")
 	}
 
 	logger := logging.NewLogger(cfg.LogLevel)

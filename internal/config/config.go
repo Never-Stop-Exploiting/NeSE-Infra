@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -52,18 +53,21 @@ type SchedulerConfig struct {
 }
 
 type RunnerConfig struct {
-	ID                string
-	Type              string
-	ControlPlaneURL   string
-	MaxParallelJobs   int
-	LogFlushInterval  time.Duration
-	HeartbeatInterval time.Duration
-	ChrootPath        string
-	WorkspaceRoot     string
-	FlagFileName      string
-	DefaultFlagRegex  string
-	DefaultTimeout    time.Duration
-	Tags              []string
+	ID                    string
+	Type                  string
+	ControlPlaneURL       string
+	MaxParallelJobs       int
+	LogFlushInterval      time.Duration
+	HeartbeatInterval     time.Duration
+	ChrootPath            string
+	WorkspaceRoot         string
+	FlagFileName          string
+	DefaultFlagRegex      string
+	DefaultTimeout        time.Duration
+	Tags                  []string
+	ArtifactCacheTTL      time.Duration
+	ArtifactCacheDir      string
+	ArtifactCacheMaxBytes int64
 }
 
 type FlagSubmitterConfig struct {
@@ -101,9 +105,6 @@ func Load() (Config, error) {
 
 	if cfg.RunnerSecret == "" {
 		return cfg, fmt.Errorf("RUNNER_SECRET cannot be empty")
-	}
-	if strings.TrimSpace(cfg.ControlPlane.AdminToken) == "" {
-		return cfg, fmt.Errorf("CONTROL_PLANE_TOKEN cannot be empty")
 	}
 
 	return cfg, nil
@@ -145,19 +146,27 @@ func loadScheduler() SchedulerConfig {
 }
 
 func loadRunner() RunnerConfig {
+	workspaceRoot := getenv("RUNNER_WORKSPACE_ROOT", "/env/tmp")
+	cacheDir := getenv("RUNNER_ARTIFACT_CACHE_DIR", "")
+	if strings.TrimSpace(cacheDir) == "" {
+		cacheDir = filepath.Join(workspaceRoot, "cache")
+	}
 	return RunnerConfig{
-		ID:                getenv("RUNNER_ID", ""),
-		Type:              getenv("RUNNER_TYPE", "default"),
-		ControlPlaneURL:   getenv("CONTROL_PLANE_URL", ""),
-		MaxParallelJobs:   getenvInt("RUNNER_MAX_PARALLEL", 2),
-		LogFlushInterval:  getenvDuration("RUNNER_LOG_FLUSH_INTERVAL", time.Second*2),
-		HeartbeatInterval: getenvDuration("RUNNER_HEARTBEAT_INTERVAL", time.Second*10),
-		ChrootPath:        getenv("RUNNER_CHROOT_PATH", "/env"),
-		WorkspaceRoot:     getenv("RUNNER_WORKSPACE_ROOT", "/env/tmp"),
-		FlagFileName:      getenv("RUNNER_FLAG_FILE", "flag"),
-		DefaultFlagRegex:  getenv("RUNNER_FLAG_REGEX", `flag\{[a-zA-Z0-9_\-]+\}`),
-		DefaultTimeout:    getenvDuration("RUNNER_DEFAULT_TIMEOUT", time.Second*120),
-		Tags:              splitAndTrim(getenv("RUNNER_TAGS", "")),
+		ID:                    getenv("RUNNER_ID", ""),
+		Type:                  getenv("RUNNER_TYPE", "default"),
+		ControlPlaneURL:       getenv("CONTROL_PLANE_URL", ""),
+		MaxParallelJobs:       getenvInt("RUNNER_MAX_PARALLEL", 2),
+		LogFlushInterval:      getenvDuration("RUNNER_LOG_FLUSH_INTERVAL", time.Second*2),
+		HeartbeatInterval:     getenvDuration("RUNNER_HEARTBEAT_INTERVAL", time.Second*10),
+		ChrootPath:            getenv("RUNNER_CHROOT_PATH", "/env"),
+		WorkspaceRoot:         workspaceRoot,
+		FlagFileName:          getenv("RUNNER_FLAG_FILE", "flag"),
+		DefaultFlagRegex:      getenv("RUNNER_FLAG_REGEX", `flag\{[a-zA-Z0-9_\-]+\}`),
+		DefaultTimeout:        getenvDuration("RUNNER_DEFAULT_TIMEOUT", time.Second*120),
+		Tags:                  splitAndTrim(getenv("RUNNER_TAGS", "")),
+		ArtifactCacheTTL:      getenvDuration("RUNNER_ARTIFACT_CACHE_TTL", time.Minute*30),
+		ArtifactCacheDir:      cacheDir,
+		ArtifactCacheMaxBytes: getenvInt64("RUNNER_ARTIFACT_CACHE_MAX_BYTES", 2*1024*1024*1024),
 	}
 }
 
@@ -221,4 +230,14 @@ func splitAndTrim(raw string) []string {
 		}
 	}
 	return result
+}
+
+func getenvInt64(key string, fallback int64) int64 {
+	if val, ok := os.LookupEnv(key); ok {
+		num, err := strconv.ParseInt(val, 10, 64)
+		if err == nil {
+			return num
+		}
+	}
+	return fallback
 }

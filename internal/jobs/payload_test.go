@@ -54,11 +54,18 @@ func TestMarshalAndDecodeJobPayload(t *testing.T) {
 }
 
 func TestMarshalJobPayloadValidation(t *testing.T) {
-	_, err := MarshalJobPayload(JobPayload{
-		RunID: "missing-artifact",
-	})
+	_, err := MarshalJobPayload(JobPayload{RunID: "missing-artifact"})
 	if err == nil {
 		t.Fatalf("expected error due to missing fields")
+	}
+
+	_, err = MarshalJobPayload(JobPayload{
+		RunID:       "missing-md5",
+		TargetIP:    "10.0.0.1",
+		ArtifactURI: "/api/v1/exploits/1/artifact",
+	})
+	if err == nil {
+		t.Fatalf("expected error due to missing artifact md5")
 	}
 }
 
@@ -77,5 +84,29 @@ func TestTimeoutAndFlagDefaults(t *testing.T) {
 	flagFile := payload.FlagFileName("flag.txt")
 	if flagFile != "flag.txt" {
 		t.Fatalf("expected default flag file, got %q", flagFile)
+	}
+}
+
+func TestMarshalWithArtifactURI(t *testing.T) {
+	payload := JobPayload{
+		RunID:       "run-3",
+		TargetIP:    "10.0.0.3",
+		ArtifactURI: "/api/v1/exploits/exp-1/artifact",
+		ArtifactMD5: "abc123",
+	}
+	data, err := MarshalJobPayload(payload)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+
+	decoded, err := DecodeJobPayload(data)
+	if err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	if decoded.ArtifactURI != payload.ArtifactURI {
+		t.Fatalf("artifact uri mismatch")
+	}
+	if decoded.ArtifactMD5 != payload.ArtifactMD5 {
+		t.Fatalf("artifact md5 mismatch")
 	}
 }

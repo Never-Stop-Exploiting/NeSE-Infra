@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -39,6 +40,7 @@ type Agent struct {
 	brokerStatus  string
 	baseLabels    map[string]string
 	runnerTagsSet map[string]struct{}
+	artifactCache *artifactCache
 }
 
 var errJobDiscard = errors.New("runner job discarded")
@@ -52,6 +54,11 @@ func New(cfg config.Config, log *slog.Logger, broker queue.Broker, control *Cont
 			tagSet[value] = struct{}{}
 		}
 	}
+	cache, err := newArtifactCache(cfg.Runner.ArtifactCacheDir, cfg.Runner.ArtifactCacheTTL, cfg.Runner.ArtifactCacheMaxBytes, log)
+	if err != nil {
+		log.Warn("artifact cache disabled", slog.Any("err", err))
+		cache = nil
+	}
 	return &Agent{
 		cfg:           cfg,
 		log:           log,
@@ -60,6 +67,7 @@ func New(cfg config.Config, log *slog.Logger, broker queue.Broker, control *Cont
 		brokerStatus:  brokerStatus,
 		baseLabels:    map[string]string{"broker": brokerStatus},
 		runnerTagsSet: tagSet,
+		artifactCache: cache,
 	}
 }
 
@@ -211,10 +219,6 @@ func (a *Agent) handleMessage(ctx context.Context, msg queue.Message) error {
 	}
 
 	workspace, relPath, err := a.prepareWorkspace(payload.RunID, artifact)
-	a.log.Info("workspace prepared",
-		slog.String("run_id", runID),
-		slog.String("workspace", workspace),
-		slog.String("relative_path", relPath))
 	if err != nil {
 		a.log.Error("prepare workspace failed",
 			slog.String("run_id", runID),
@@ -229,6 +233,10 @@ func (a *Agent) handleMessage(ctx context.Context, msg queue.Message) error {
 		}
 		return nil
 	}
+	a.log.Info("workspace prepared",
+		slog.String("run_id", runID),
+		slog.String("workspace", workspace),
+		slog.String("relative_path", relPath))
 	defer func() {
 		if err := os.RemoveAll(workspace); err != nil {
 			a.log.Warn("failed to cleanup workspace", slog.Any("err", err), slog.String("workspace", workspace))
@@ -415,22 +423,52 @@ func (a *Agent) registerSelf(ctx context.Context) error {
 	return nil
 }
 
-func (a *Agent) resolveArtifact(ctx context.Context, payload jobs.JobPayload) ([]byte, error) {
+func (a *Agent) resolveArtifact(ctx context.Context, payload jobs.JobPayload) (artifactPayload, error) {
 	if data, err := payload.ArtifactBytes(); err == nil {
-		return data, nil
+		return artifactPayload{inline: data}, nil
 	} else if payload.ArtifactURI == "" {
-		return nil, err
+		return artifactPayload{}, err
+	}
+	if payload.ArtifactMD5 != "" && a.artifactCache != nil {
+		if cached, ok := a.artifactCache.get(payload.ArtifactMD5); ok {
+			file, err := os.Open(cached.path)
+			if err == nil {
+				return artifactPayload{file: file, size: cached.size}, nil
+			}
+			a.log.Warn("artifact cache file open failed",
+				slog.String("run_id", payload.RunID),
+				slog.String("artifact_md5", payload.ArtifactMD5),
+				slog.Any("err", err))
+			a.artifactCache.remove(payload.ArtifactMD5)
+		}
 	}
 	if a.controlClient == nil {
-		return nil, fmt.Errorf("artifact uri provided but control plane client is not configured")
+		return artifactPayload{}, fmt.Errorf("artifact uri provided but control plane client is not configured")
 	}
 	downloadCtx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
 	data, err := a.controlClient.DownloadArtifact(downloadCtx, payload.ArtifactURI)
 	if err != nil {
-		return nil, fmt.Errorf("download artifact: %w", err)
+		return artifactPayload{}, fmt.Errorf("download artifact: %w", err)
 	}
-	return data, nil
+	if payload.ArtifactMD5 != "" && a.artifactCache != nil {
+		if cached, cacheErr := a.artifactCache.store(payload.ArtifactMD5, data); cacheErr == nil {
+			file, err := os.Open(cached.path)
+			if err == nil {
+				return artifactPayload{file: file, size: cached.size, inline: data}, nil
+			}
+			a.log.Warn("artifact cache file open failed after store",
+				slog.String("run_id", payload.RunID),
+				slog.String("artifact_md5", payload.ArtifactMD5),
+				slog.Any("err", err))
+			a.artifactCache.remove(payload.ArtifactMD5)
+		} else {
+			a.log.Warn("artifact cache store failed",
+				slog.String("run_id", payload.RunID),
+				slog.Any("err", cacheErr))
+		}
+	}
+	return artifactPayload{inline: data}, nil
 }
 
 func runnerID(value string) string {
@@ -597,7 +635,189 @@ func cloneLabels(src map[string]string) map[string]string {
 	return dst
 }
 
-func (a *Agent) prepareWorkspace(runID string, artifact []byte) (string, string, error) {
+type artifactPayload struct {
+	inline []byte
+	file   *os.File
+	size   int64
+}
+
+func (a artifactPayload) open() (io.ReaderAt, int64, func(), error) {
+	if len(a.inline) > 0 {
+		reader := bytes.NewReader(a.inline)
+		return reader, int64(len(a.inline)), func() {}, nil
+	}
+	if a.file != nil {
+		if _, err := a.file.Seek(0, io.SeekStart); err != nil {
+			return nil, 0, func() {}, err
+		}
+		return a.file, a.size, func() { a.file.Close() }, nil
+	}
+	return nil, 0, func() {}, fmt.Errorf("empty artifact payload")
+}
+
+type cachedArtifact struct {
+	path string
+	size int64
+}
+
+type artifactCache struct {
+	ttl       time.Duration
+	maxBytes  int64
+	baseDir   string
+	log       *slog.Logger
+	mu        sync.Mutex
+	items     map[string]artifactCacheEntry
+	totalSize int64
+}
+
+type artifactCacheEntry struct {
+	path       string
+	size       int64
+	expires    time.Time
+	lastAccess time.Time
+}
+
+func newArtifactCache(dir string, ttl time.Duration, maxBytes int64, log *slog.Logger) (*artifactCache, error) {
+	dir = strings.TrimSpace(dir)
+	if ttl <= 0 || maxBytes <= 0 || dir == "" {
+		return nil, nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("create artifact cache dir: %w", err)
+	}
+	return &artifactCache{
+		ttl:      ttl,
+		maxBytes: maxBytes,
+		baseDir:  dir,
+		log:      log,
+		items:    make(map[string]artifactCacheEntry),
+	}, nil
+}
+
+func (c *artifactCache) get(key string) (cachedArtifact, bool) {
+	if c == nil || key == "" {
+		return cachedArtifact{}, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.evictExpiredLocked()
+
+	entry, ok := c.items[key]
+	if !ok {
+		return cachedArtifact{}, false
+	}
+	if _, err := os.Stat(entry.path); err != nil {
+		delete(c.items, key)
+		c.totalSize -= entry.size
+		return cachedArtifact{}, false
+	}
+	entry.lastAccess = time.Now()
+	c.items[key] = entry
+	return cachedArtifact{path: entry.path, size: entry.size}, true
+}
+
+func (c *artifactCache) store(key string, data []byte) (cachedArtifact, error) {
+	if c == nil || key == "" || len(data) == 0 {
+		return cachedArtifact{}, fmt.Errorf("invalid cache store request")
+	}
+	if int64(len(data)) > c.maxBytes {
+		return cachedArtifact{}, fmt.Errorf("artifact exceeds cache capacity")
+	}
+	if err := os.MkdirAll(c.baseDir, 0o755); err != nil {
+		return cachedArtifact{}, fmt.Errorf("ensure cache dir: %w", err)
+	}
+	path := filepath.Join(c.baseDir, fmt.Sprintf("%s.zip", key))
+	tmp := fmt.Sprintf("%s.tmp-%d", path, time.Now().UnixNano())
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return cachedArtifact{}, fmt.Errorf("write cache temp file: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return cachedArtifact{}, fmt.Errorf("rename cache file: %w", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return cachedArtifact{}, fmt.Errorf("stat cache file: %w", err)
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if entry, ok := c.items[key]; ok {
+		c.totalSize -= entry.size
+		if entry.path != path {
+			os.Remove(entry.path)
+		}
+	}
+
+	now := time.Now()
+	entry := artifactCacheEntry{
+		path:       path,
+		size:       info.Size(),
+		expires:    now.Add(c.ttl),
+		lastAccess: now,
+	}
+	c.items[key] = entry
+	c.totalSize += entry.size
+	c.trimLocked()
+
+	if entry, ok := c.items[key]; ok {
+		return cachedArtifact{path: entry.path, size: entry.size}, nil
+	}
+	return cachedArtifact{}, fmt.Errorf("cache entry evicted")
+}
+
+func (c *artifactCache) remove(key string) {
+	if c == nil || key == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if entry, ok := c.items[key]; ok {
+		delete(c.items, key)
+		c.totalSize -= entry.size
+		os.Remove(entry.path)
+	}
+}
+
+func (c *artifactCache) trimLocked() {
+	if c.maxBytes <= 0 {
+		return
+	}
+	for c.totalSize > c.maxBytes {
+		var oldestKey string
+		var oldestEntry artifactCacheEntry
+		for key, entry := range c.items {
+			if oldestKey == "" || entry.lastAccess.Before(oldestEntry.lastAccess) {
+				oldestKey = key
+				oldestEntry = entry
+			}
+		}
+		if oldestKey == "" {
+			break
+		}
+		delete(c.items, oldestKey)
+		c.totalSize -= oldestEntry.size
+		os.Remove(oldestEntry.path)
+	}
+}
+
+func (c *artifactCache) evictExpiredLocked() {
+	if c.ttl <= 0 {
+		return
+	}
+	now := time.Now()
+	for key, entry := range c.items {
+		if now.After(entry.expires) {
+			delete(c.items, key)
+			c.totalSize -= entry.size
+			os.Remove(entry.path)
+		}
+	}
+}
+
+func (a *Agent) prepareWorkspace(runID string, artifact artifactPayload) (string, string, error) {
 	base := a.cfg.Runner.WorkspaceRoot
 	if err := os.MkdirAll(base, 0o755); err != nil {
 		return "", "", fmt.Errorf("create workspace root: %w", err)
@@ -608,7 +828,12 @@ func (a *Agent) prepareWorkspace(runID string, artifact []byte) (string, string,
 		return "", "", fmt.Errorf("create temp dir: %w", err)
 	}
 
-	if err := unzipInto(dir, artifact); err != nil {
+	reader, size, closeFn, err := artifact.open()
+	if err != nil {
+		return "", "", fmt.Errorf("open artifact: %w", err)
+	}
+	defer closeFn()
+	if err := unzipFromReader(dir, reader, size); err != nil {
 		return "", "", err
 	}
 
@@ -672,13 +897,13 @@ func (a *Agent) extractFlag(workspace string, stdout []byte, payload jobs.JobPay
 	return string(match), "stdout", nil
 }
 
-func unzipInto(dir string, artifact []byte) error {
-	reader, err := zip.NewReader(bytes.NewReader(artifact), int64(len(artifact)))
+func unzipFromReader(dir string, reader io.ReaderAt, size int64) error {
+	zr, err := zip.NewReader(reader, size)
 	if err != nil {
 		return fmt.Errorf("open zip: %w", err)
 	}
 
-	for _, file := range reader.File {
+	for _, file := range zr.File {
 		if err := writeZipEntry(dir, file); err != nil {
 			return err
 		}

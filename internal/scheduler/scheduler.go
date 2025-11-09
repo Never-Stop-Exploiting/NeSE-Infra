@@ -2,7 +2,8 @@ package scheduler
 
 import (
 	"context"
-	"encoding/base64"
+	"crypto/md5"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -156,7 +157,8 @@ func (s *Scheduler) enqueueRun(ctx context.Context, item domain.RunWorkItem) err
 	if len(item.Exploit.RunnerTags) > 0 {
 		payload.RunnerTags = item.Exploit.RunnerTags
 	}
-	payload.ArtifactBase64 = base64.StdEncoding.EncodeToString(item.Artifact)
+	sum := md5.Sum(item.Artifact)
+	payload.ArtifactMD5 = hex.EncodeToString(sum[:])
 	payload.ArtifactURI = fmt.Sprintf("/api/v1/exploits/%s/artifact", item.Exploit.ID)
 
 	body, err := jobs.MarshalJobPayload(payload)
