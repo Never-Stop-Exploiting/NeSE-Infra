@@ -155,8 +155,14 @@
         </div>
         <div><strong>Status:</strong> <span class="status" :data-status="runStore.selectedRun.status">{{ runStore.selectedRun.status }}</span></div>
         <div><strong>Runner:</strong> <span>{{ runStore.selectedRun.runnerId ?? "not assigned" }}</span></div>
-        <div><strong>Started:</strong> <span>{{ runStore.selectedRun.startedAt ?? "-" }}</span></div>
-        <div><strong>Finished:</strong> <span>{{ runStore.selectedRun.finishedAt ?? "-" }}</span></div>
+        <div>
+          <strong>Started:</strong>
+          <span>{{ formatUtcTimestamp(runStore.selectedRun.startedAt) }}</span>
+        </div>
+        <div>
+          <strong>Finished:</strong>
+          <span>{{ formatUtcTimestamp(runStore.selectedRun.finishedAt) }}</span>
+        </div>
         <div v-if="runStore.selectedRun.errorMessage"><strong>Error:</strong> <span>{{ runStore.selectedRun.errorMessage }}</span></div>
         <div v-if="showFlagDetail" class="flag-detail">
           <strong>Flag:</strong>
@@ -224,6 +230,7 @@ import { computed, onMounted, ref, watch } from "vue";
 import { useRunStore, type RunFilters } from "@/stores/runs";
 import type { FlagRecord } from "@/types";
 import { fetchFlagDetail, retryFlag as apiRetryFlag } from "@/api/flags";
+import { formatUtcTimestamp } from "@/utils/time";
 
 const runStore = useRunStore();
 const canceling = ref(false);
