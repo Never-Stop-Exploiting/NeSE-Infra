@@ -32,3 +32,7 @@ func (b *Broker) Ack(ctx context.Context, stream string, group string, messageID
 func (b *Broker) Nack(ctx context.Context, stream string, group string, messageID string, delay time.Duration) error {
 	return ctx.Err()
 }
+
+func (b *Broker) Reclaim(ctx context.Context, stream string, group string, consumer string, minIdle time.Duration, count int) ([]queue.Message, error) {
+	return nil, ctx.Err()
+}

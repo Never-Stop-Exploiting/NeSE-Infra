@@ -66,9 +66,11 @@ type Runner struct {
 	ID            string
 	Type          string
 	Hostname      string
+	LastIP        string
 	Tags          []string
 	ActiveJobs    int
 	Labels        map[string]string
+	Config        map[string]string
 	MaxParallel   int
 	LastHeartbeat time.Time
 	Status        string
@@ -227,18 +229,18 @@ type LogEntry struct {
 type SchedulerStrategy string
 
 const (
-	SchedulerStrategyInterval  SchedulerStrategy = "interval"
+	SchedulerStrategyInterval   SchedulerStrategy = "interval"
 	SchedulerStrategyContinuous SchedulerStrategy = "continuous"
 )
 
 // SchedulerSettings capture runtime tunables for the exploit scheduler.
 type SchedulerSettings struct {
-	Strategy          SchedulerStrategy
-	RoundInterval     time.Duration
-	MaxDispatchBatch  int
-	ContinuousDelay   time.Duration
-	UpdatedAt         time.Time
-	Enabled           bool
+	Strategy         SchedulerStrategy
+	RoundInterval    time.Duration
+	MaxDispatchBatch int
+	ContinuousDelay  time.Duration
+	UpdatedAt        time.Time
+	Enabled          bool
 }
 
 // TargetExploitOverride records per-target enablement for specific exploits.

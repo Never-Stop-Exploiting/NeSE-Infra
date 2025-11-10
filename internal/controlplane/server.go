@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"path/filepath"
 	"sort"
@@ -18,9 +19,12 @@ import (
 
 	"awdinfra/internal/config"
 	"awdinfra/internal/domain"
+	"awdinfra/internal/jobs"
 	"awdinfra/internal/queue"
+	"awdinfra/internal/scheduler"
 	"awdinfra/internal/storage"
 	"awdinfra/internal/submitter"
+	"golang.org/x/sync/errgroup"
 )
 
 // Server exposes REST endpoints and orchestrates runner coordination.
@@ -56,24 +60,66 @@ func New(cfg config.Config, logger *slog.Logger, repository storage.Repository, 
 
 // Run starts the HTTP server and listens until context cancellation.
 func (s *Server) Run(ctx context.Context) error {
-	errCh := make(chan error, 1)
+	g, ctx := errgroup.WithContext(ctx)
 
-	go func() {
+	g.Go(func() error {
 		s.logger.Info("control plane listening", slog.String("addr", s.httpServer.Addr))
-		if err := s.httpServer.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
+		if err := s.httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
 		}
-		close(errCh)
-	}()
+		return nil
+	})
 
-	select {
-	case <-ctx.Done():
+	g.Go(func() error {
+		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second*10)
 		defer cancel()
 		s.logger.Info("shutting down control plane http server")
-		return s.httpServer.Shutdown(shutdownCtx)
-	case err := <-errCh:
-		return err
+		if err := s.httpServer.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return nil
+	})
+
+	g.Go(func() error {
+		return s.maintenanceLoop(ctx)
+	})
+
+	return g.Wait()
+}
+
+func (s *Server) maintenanceLoop(ctx context.Context) error {
+	sweepInterval := s.cfg.Runner.HeartbeatInterval
+	if sweepInterval <= 0 {
+		sweepInterval = 10 * time.Second
+	}
+	visibility := s.cfg.RunQueue.Visibility
+	if visibility <= 0 {
+		visibility = 30 * time.Second
+	}
+	reclaimInterval := visibility / 2
+	if reclaimInterval <= 0 {
+		reclaimInterval = 5 * time.Second
+	}
+
+	sweepTicker := time.NewTicker(sweepInterval)
+	defer sweepTicker.Stop()
+	reclaimTicker := time.NewTicker(reclaimInterval)
+	defer reclaimTicker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-sweepTicker.C:
+			if err := s.sweepStaleRunners(ctx); err != nil && ctx.Err() == nil {
+				s.logger.Warn("runner sweep failed", slog.Any("err", err))
+			}
+		case <-reclaimTicker.C:
+			if err := s.reclaimStalledRuns(ctx); err != nil && ctx.Err() == nil {
+				s.logger.Warn("reclaim stalled runs failed", slog.Any("err", err))
+			}
+		}
 	}
 }
 
@@ -1674,11 +1720,13 @@ func (s *Server) handleRunners(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "runner id required")
 			return
 		}
+		runner, _ := s.repository.GetRunner(r.Context(), id)
 		if err := s.repository.DeleteRunner(r.Context(), id); err != nil {
 			writeError(w, http.StatusNotFound, "runner not found")
 			return
 		}
 		s.logger.Info("runner removed", slog.String("runner_id", id))
+		s.handleRunnerOutage(r.Context(), runner, fmt.Sprintf("runner %s deleted", id))
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -1699,6 +1747,7 @@ func (s *Server) handleRunnerRegister(w http.ResponseWriter, r *http.Request) {
 		Labels      map[string]string `json:"labels"`
 		MaxParallel int               `json:"maxParallel"`
 		Status      string            `json:"status"`
+		Config      map[string]string `json:"config"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid payload")
@@ -1727,10 +1776,12 @@ func (s *Server) handleRunnerRegister(w http.ResponseWriter, r *http.Request) {
 		Hostname:      strings.TrimSpace(req.Hostname),
 		Tags:          tags,
 		Labels:        req.Labels,
+		Config:        req.Config,
 		MaxParallel:   req.MaxParallel,
 		Status:        status,
 		LastHeartbeat: now,
 		RegisteredAt:  now,
+		LastIP:        clientIP(r),
 	}
 	if runner.Labels == nil {
 		runner.Labels = map[string]string{}
@@ -1883,6 +1934,7 @@ func (s *Server) handleRunnerHeartbeat(w http.ResponseWriter, r *http.Request) {
 		Labels      map[string]string `json:"labels"`
 		MaxParallel int               `json:"maxParallel"`
 		ActiveJobs  int               `json:"activeJobs"`
+		Config      map[string]string `json:"config"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid payload")
@@ -1935,6 +1987,9 @@ func (s *Server) handleRunnerHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if req.ActiveJobs >= 0 {
 		runner.ActiveJobs = req.ActiveJobs
 	}
+	if req.Config != nil {
+		runner.Config = req.Config
+	}
 	if req.Status != "" {
 		runner.Status = req.Status
 	} else if runner.Status == "" {
@@ -1944,6 +1999,7 @@ func (s *Server) handleRunnerHeartbeat(w http.ResponseWriter, r *http.Request) {
 		runner.RegisteredAt = now
 	}
 	runner.LastHeartbeat = now
+	runner.LastIP = clientIP(r)
 
 	if err := s.repository.UpsertRunner(r.Context(), runner); err != nil {
 		s.logger.Error("runner heartbeat failed", slog.Any("err", err), slog.String("runner_id", req.ID))
@@ -2507,14 +2563,32 @@ func marshalRunner(runner domain.Runner) map[string]any {
 		"id":            runner.ID,
 		"type":          runner.Type,
 		"hostname":      runner.Hostname,
+		"lastIp":        runner.LastIP,
 		"tags":          runner.Tags,
 		"activeJobs":    runner.ActiveJobs,
 		"labels":        runner.Labels,
+		"config":        runner.Config,
 		"maxParallel":   runner.MaxParallel,
 		"lastHeartbeat": runner.LastHeartbeat,
 		"status":        runner.Status,
 		"registeredAt":  runner.RegisteredAt,
 	}
+}
+
+func clientIP(r *http.Request) string {
+	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
+		for _, part := range strings.Split(forwarded, ",") {
+			ip := strings.TrimSpace(part)
+			if ip != "" {
+				return ip
+			}
+		}
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err != nil {
+		return strings.TrimSpace(r.RemoteAddr)
+	}
+	return host
 }
 
 type targetAddress struct {
@@ -2611,6 +2685,7 @@ func (s *Server) sweepStaleRunners(ctx context.Context) error {
 				continue
 			}
 			s.logger.Info("purged stale runner", slog.String("runner_id", runner.ID))
+			s.handleRunnerOutage(ctx, runner, fmt.Sprintf("runner %s purged after missing heartbeats", runner.ID))
 			continue
 		}
 		if offlineThreshold > 0 && since >= offlineThreshold && runner.Status != "offline" {
@@ -2619,10 +2694,194 @@ func (s *Server) sweepStaleRunners(ctx context.Context) error {
 				s.logger.Warn("mark runner offline failed", slog.Any("err", err), slog.String("runner_id", runner.ID))
 			} else {
 				s.logger.Info("runner marked offline due to missed heartbeats", slog.String("runner_id", runner.ID))
+				s.handleRunnerOutage(ctx, runner, fmt.Sprintf("runner %s offline after heartbeat timeout", runner.ID))
 			}
 		}
 	}
 	return nil
+}
+
+func (s *Server) handleRunnerOutage(ctx context.Context, runner domain.Runner, reason string) {
+	runnerID := strings.TrimSpace(runner.ID)
+	if runnerID == "" {
+		return
+	}
+	if strings.TrimSpace(reason) == "" {
+		reason = "runner unavailable"
+	}
+	runs, err := s.repository.ListRunnerActiveRuns(ctx, runnerID)
+	if err != nil {
+		s.logger.Warn("list active runs for runner failed",
+			slog.Any("err", err),
+			slog.String("runner_id", runnerID))
+		return
+	}
+	if len(runs) == 0 {
+		return
+	}
+	for _, run := range runs {
+		if err := s.cancelRunAndReschedule(ctx, run, reason); err != nil {
+			s.logger.Warn("failed to recycle run for offline runner",
+				slog.Any("err", err),
+				slog.String("runner_id", runnerID),
+				slog.String("run_id", run.ID))
+		}
+	}
+}
+
+func (s *Server) cancelRunAndReschedule(ctx context.Context, run domain.Run, reason string) error {
+	updated, err := s.cancelRunInternal(ctx, run, reason)
+	if err != nil {
+		return err
+	}
+	if err := s.rescheduleRun(ctx, updated); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Server) rescheduleRun(ctx context.Context, previous domain.Run) error {
+	exploitID := strings.TrimSpace(previous.ExploitID)
+	targetID := strings.TrimSpace(previous.TargetID)
+	if exploitID == "" || targetID == "" {
+		return fmt.Errorf("run %s missing exploit/target for reschedule", previous.ID)
+	}
+	exploit, err := s.repository.GetExploit(ctx, exploitID)
+	if err != nil {
+		return fmt.Errorf("load exploit %s: %w", exploitID, err)
+	}
+	target, err := s.repository.GetTarget(ctx, targetID)
+	if err != nil {
+		return fmt.Errorf("load target %s: %w", targetID, err)
+	}
+	artifact, err := s.repository.LatestExploitArtifact(ctx, exploit.ID)
+	if err != nil {
+		return fmt.Errorf("package exploit %s: %w", exploit.ID, err)
+	}
+	flagRegex, flagFile, timeout := jobs.HintsFromMetadata(exploit.Metadata)
+	newRun := domain.Run{
+		ExploitID: exploit.ID,
+		TargetID:  target.ID,
+		Status:    domain.RunStatusPending,
+		QueuedAt:  time.Now().UTC(),
+	}
+	if err := s.repository.CreateRun(ctx, &newRun); err != nil {
+		return fmt.Errorf("create replacement run: %w", err)
+	}
+	item := domain.RunWorkItem{
+		RunID:     newRun.ID,
+		Exploit:   exploit,
+		Target:    target,
+		Artifact:  artifact,
+		FlagRegex: flagRegex,
+		FlagFile:  flagFile,
+		Timeout:   timeout,
+	}
+	return scheduler.EnqueueRun(ctx, s.cfg, s.broker, item)
+}
+
+func (s *Server) reclaimStalledRuns(ctx context.Context) error {
+	visibility := s.cfg.RunQueue.Visibility
+	if visibility <= 0 {
+		return nil
+	}
+	groups := s.runnerGroups(ctx)
+	if len(groups) == 0 {
+		return nil
+	}
+	for _, group := range groups {
+		messages, err := s.broker.Reclaim(ctx, s.cfg.RunQueue.Name, group, reclaimerConsumerName(group), visibility, 64)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			s.logger.Warn("reclaim stalled jobs failed",
+				slog.Any("err", err),
+				slog.String("group", group))
+			continue
+		}
+		for _, message := range messages {
+			if err := s.handleStaleQueueMessage(ctx, group, visibility, message); err != nil && ctx.Err() == nil {
+				s.logger.Warn("handle stale job failed",
+					slog.Any("err", err),
+					slog.String("group", group),
+					slog.String("message_id", message.ID))
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Server) handleStaleQueueMessage(ctx context.Context, group string, visibility time.Duration, message queue.Message) error {
+	payload, err := jobs.DecodeJobPayload(message.Body)
+	if err != nil {
+		if ackErr := s.broker.Ack(ctx, s.cfg.RunQueue.Name, group, message.ID); ackErr != nil {
+			return fmt.Errorf("ack malformed job: %w", ackErr)
+		}
+		return nil
+	}
+	run, err := s.repository.GetRun(ctx, payload.RunID)
+	if err != nil {
+		if ackErr := s.broker.Ack(ctx, s.cfg.RunQueue.Name, group, message.ID); ackErr != nil {
+			return ackErr
+		}
+		return nil
+	}
+	switch run.Status {
+	case domain.RunStatusPending, domain.RunStatusRunning:
+		reason := fmt.Sprintf("visibility timeout after %s", visibility)
+		updated, cancelErr := s.cancelRunInternal(ctx, run, reason)
+		if cancelErr != nil {
+			return cancelErr
+		}
+		if err := s.rescheduleRun(ctx, updated); err != nil {
+			s.logger.Warn("failed to enqueue replacement run",
+				slog.Any("err", err),
+				slog.String("run_id", run.ID))
+		}
+	default:
+		// no-op
+	}
+	if err := s.broker.Ack(ctx, s.cfg.RunQueue.Name, group, message.ID); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Server) runnerGroups(ctx context.Context) []string {
+	runners, err := s.repository.ListRunners(ctx)
+	if err != nil {
+		s.logger.Warn("list runners for reclaim failed", slog.Any("err", err))
+		return []string{runnerGroupName("")}
+	}
+	unique := make(map[string]struct{})
+	for _, runner := range runners {
+		unique[runnerGroupName(runner.Type)] = struct{}{}
+	}
+	if len(unique) == 0 {
+		unique[runnerGroupName("")] = struct{}{}
+	}
+	result := make([]string, 0, len(unique))
+	for group := range unique {
+		result = append(result, group)
+	}
+	return result
+}
+
+func runnerGroupName(runnerType string) string {
+	value := strings.TrimSpace(runnerType)
+	if value == "" {
+		return "runner"
+	}
+	return fmt.Sprintf("runner-%s", value)
+}
+
+func reclaimerConsumerName(group string) string {
+	group = strings.TrimSpace(group)
+	if group == "" {
+		return "reclaimer"
+	}
+	return fmt.Sprintf("%s-reclaimer", group)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

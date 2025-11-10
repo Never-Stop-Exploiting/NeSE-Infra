@@ -76,6 +76,7 @@ type registerRunnerRequest struct {
 	Labels      map[string]string `json:"labels,omitempty"`
 	MaxParallel int               `json:"maxParallel"`
 	Status      string            `json:"status"`
+	Config      map[string]string `json:"config,omitempty"`
 }
 
 type heartbeatRequest struct {
@@ -88,6 +89,7 @@ type heartbeatRequest struct {
 	Labels      map[string]string `json:"labels,omitempty"`
 	MaxParallel int               `json:"maxParallel,omitempty"`
 	ActiveJobs  int               `json:"activeJobs"`
+	Config      map[string]string `json:"config,omitempty"`
 }
 
 type runStartRequest struct {

@@ -164,6 +164,69 @@ func (b *Broker) Nack(ctx context.Context, stream, group, messageID string, dela
 	return nil
 }
 
+// Reclaim transfers idle pending messages to the specified consumer for reprocessing.
+func (b *Broker) Reclaim(ctx context.Context, stream, group, consumer string, minIdle time.Duration, count int) ([]queue.Message, error) {
+	if stream == "" || group == "" || consumer == "" {
+		return nil, errors.New("stream, group, and consumer are required")
+	}
+	if count <= 0 {
+		count = 10
+	}
+	if minIdle <= 0 {
+		minIdle = time.Second
+	}
+	if err := b.ensureGroup(ctx, stream, group); err != nil {
+		return nil, err
+	}
+
+	var result []queue.Message
+	start := "0-0"
+	remaining := count
+
+	for remaining > 0 {
+		xmsgs, nextID, err := b.client.XAutoClaim(ctx, &redis.XAutoClaimArgs{
+			Stream:   stream,
+			Group:    group,
+			Consumer: consumer,
+			MinIdle:  minIdle,
+			Start:    start,
+			Count:    int64(remaining),
+		}).Result()
+		if err != nil {
+			if errors.Is(err, redis.Nil) {
+				break
+			}
+			return nil, err
+		}
+		for _, msg := range xmsgs {
+			raw, ok := msg.Values[payloadField]
+			if !ok {
+				continue
+			}
+			var body []byte
+			switch v := raw.(type) {
+			case string:
+				body = []byte(v)
+			case []byte:
+				body = v
+			default:
+				body = []byte(fmt.Sprint(v))
+			}
+			result = append(result, queue.Message{
+				ID:     msg.ID,
+				Stream: stream,
+				Body:   body,
+			})
+		}
+		if nextID == "0-0" || len(xmsgs) == 0 {
+			break
+		}
+		start = nextID
+		remaining = count - len(result)
+	}
+	return result, nil
+}
+
 func (b *Broker) ensureGroup(ctx context.Context, stream, group string) error {
 	err := b.client.XGroupCreateMkStream(ctx, stream, group, "$").Err()
 	if err != nil && !errors.Is(err, redis.Nil) && !strings.Contains(err.Error(), "BUSYGROUP") {

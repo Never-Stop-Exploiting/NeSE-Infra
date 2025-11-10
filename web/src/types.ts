@@ -138,12 +138,14 @@ export interface RunnerInfo {
   id: string;
   type: string;
   hostname?: string;
+  lastIp?: string;
   tags?: string[];
   maxParallel: number;
   activeJobs: number;
   status: "online" | "offline" | "degraded";
   lastHeartbeat?: string;
   labels?: Record<string, string>;
+  config?: Record<string, string>;
 }
 
 export interface LogEntry {

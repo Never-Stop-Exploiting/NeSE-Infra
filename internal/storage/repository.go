@@ -40,6 +40,7 @@ type Repository interface {
 	DeleteTarget(ctx context.Context, id string) error
 	BulkInsertTargets(ctx context.Context, targets []domain.Target) error
 	ListExploits(ctx context.Context) ([]domain.Exploit, error)
+	GetExploit(ctx context.Context, id string) (domain.Exploit, error)
 	CreateExploit(ctx context.Context, exploit domain.Exploit) (domain.Exploit, error)
 	SetExploitEnabled(ctx context.Context, exploitID string, enabled bool) error
 	SetExploitTimeout(ctx context.Context, exploitID string, timeout time.Duration) error
@@ -62,6 +63,7 @@ type Repository interface {
 	AddFlagAttempt(ctx context.Context, flagID string, attempt domain.SubmissionAttempt) error
 	ListRuns(ctx context.Context, filter domain.RunFilter, limit int, cursor string) ([]domain.Run, string, error)
 	GetRun(ctx context.Context, id string) (domain.Run, error)
+	ListRunnerActiveRuns(ctx context.Context, runnerID string) ([]domain.Run, error)
 	ListLogs(ctx context.Context, filter domain.LogFilter) ([]domain.LogEntry, error)
 	AppendLog(ctx context.Context, entry domain.LogEntry) error
 	DashboardStats(ctx context.Context) (domain.DashboardStats, error)

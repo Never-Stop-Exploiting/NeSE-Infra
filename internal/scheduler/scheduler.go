@@ -2,16 +2,12 @@ package scheduler
 
 import (
 	"context"
-	"crypto/md5"
-	"encoding/hex"
-	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
 	"awdinfra/internal/config"
 	"awdinfra/internal/domain"
-	"awdinfra/internal/jobs"
 	"awdinfra/internal/queue"
 	"awdinfra/internal/storage"
 )
@@ -130,7 +126,7 @@ func (s *Scheduler) tick(ctx context.Context, limit int, settings domain.Schedul
 			}
 			continue
 		}
-		if err := s.enqueueRun(ctx, item); err != nil {
+		if err := EnqueueRun(ctx, s.cfg, s.broker, item); err != nil {
 			s.log.Warn("failed to enqueue run",
 				slog.String("run_id", item.RunID),
 				slog.String("exploit_id", item.Exploit.ID),
@@ -145,48 +141,6 @@ func (s *Scheduler) tick(ctx context.Context, limit int, settings domain.Schedul
 		s.log.Info("scheduled runs", slog.Int("count", dispatched), slog.Int("limit", limit))
 	}
 	return nil
-}
-
-func (s *Scheduler) enqueueRun(ctx context.Context, item domain.RunWorkItem) error {
-	if len(item.Artifact) == 0 {
-		return fmt.Errorf("empty artifact for run %s", item.RunID)
-	}
-
-	payload := jobs.JobPayload{
-		RunID:       item.RunID,
-		ExploitID:   item.Exploit.ID,
-		ExploitName: item.Exploit.Name,
-		TargetID:    item.Target.ID,
-		TargetIP:    item.Target.IP,
-		TargetPort:  item.Target.Port,
-		FlagRegex:   item.FlagRegex,
-		FlagFile:    item.FlagFile,
-	}
-	if item.Exploit.Metadata != nil {
-		if script, ok := item.Exploit.Metadata["run_script"].(string); ok {
-			payload.RunScript = script
-		}
-		if entry, ok := item.Exploit.Metadata["entrypoint"].(string); ok {
-			payload.Entrypoint = entry
-		}
-	}
-	if item.Timeout > 0 {
-		payload.TimeoutSeconds = int(item.Timeout.Seconds())
-	}
-	if len(item.Exploit.RunnerTags) > 0 {
-		payload.RunnerTags = item.Exploit.RunnerTags
-	}
-	sum := md5.Sum(item.Artifact)
-	payload.ArtifactMD5 = hex.EncodeToString(sum[:])
-	payload.ArtifactURI = fmt.Sprintf("/api/v1/exploits/%s/artifact", item.Exploit.ID)
-
-	body, err := jobs.MarshalJobPayload(payload)
-	if err != nil {
-		return err
-	}
-
-	_, err = s.broker.Publish(ctx, s.cfg.RunQueue.Name, body)
-	return err
 }
 
 func supportsRunnerTags(runners []domain.Runner, required []string) bool {

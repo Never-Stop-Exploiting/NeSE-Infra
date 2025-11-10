@@ -18,6 +18,7 @@
           <span>Hostname: {{ runner.hostname ?? "-" }}</span>
           <span>Active Jobs: {{ runner.activeJobs }}/{{ runner.maxParallel }}</span>
           <span>Last heartbeat: {{ runner.lastHeartbeat ?? "-" }}</span>
+          <span>Source IP: {{ runner.lastIp ?? "-" }}</span>
           <span>
             Broker:
             <span class="broker-badge" :class="brokerBadgeClass(runner.labels?.broker)">
@@ -27,6 +28,9 @@
         </div>
         <div v-if="runner.tags?.length" class="tags">
           <span v-for="tag in runner.tags" :key="tag">{{ tag }}</span>
+        </div>
+        <div v-if="runner.config && Object.keys(runner.config).length" class="config">
+          <span v-for="(value, key) in runner.config" :key="key">{{ key }}={{ value }}</span>
         </div>
         <div v-if="runner.labels && Object.keys(runner.labels).length" class="labels">
           <span v-for="(value, key) in runner.labels" :key="key">{{ key }}={{ value }}</span>
@@ -164,6 +168,12 @@ header {
   gap: 0.35rem;
 }
 
+.config {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
 .tags {
   display: flex;
   flex-wrap: wrap;
@@ -184,6 +194,14 @@ header {
   padding: 0.2rem 0.6rem;
   font-size: 0.75rem;
   color: #38bdf8;
+}
+
+.config span {
+  background: rgba(234, 179, 8, 0.15);
+  border-radius: 999px;
+  padding: 0.2rem 0.6rem;
+  font-size: 0.75rem;
+  color: #facc15;
 }
 
 .broker-badge {

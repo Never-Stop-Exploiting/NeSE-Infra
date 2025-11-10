@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"awdinfra/internal/domain"
+	"awdinfra/internal/jobs"
 	"awdinfra/internal/storage"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -267,6 +268,8 @@ func ensureSchema(ctx context.Context, db *sql.DB) error {
 		);`,
 		`ALTER TABLE runners ADD COLUMN IF NOT EXISTS tags JSONB;`,
 		`ALTER TABLE runners ADD COLUMN IF NOT EXISTS active_jobs INTEGER;`,
+		`ALTER TABLE runners ADD COLUMN IF NOT EXISTS config JSONB;`,
+		`ALTER TABLE runners ADD COLUMN IF NOT EXISTS last_ip TEXT;`,
 	}
 
 	for _, stmt := range statements {
@@ -724,7 +727,7 @@ func (r *Repository) RunnableWork(ctx context.Context, limit int, settings domai
 				return nil, err
 			}
 
-			flagRegex, flagFile, timeout := jobHintsFromMetadata(exploit.Metadata)
+			flagRegex, flagFile, timeout := jobs.HintsFromMetadata(exploit.Metadata)
 
 			item := domain.RunWorkItem{
 				RunID:     run.ID,
@@ -845,7 +848,7 @@ func (r *Repository) SaveSchedulerSettings(ctx context.Context, settings domain.
 		now,
 		settings.Enabled,
 		string(strategy),
-		int64(settings.ContinuousDelay / time.Second),
+		int64(settings.ContinuousDelay/time.Second),
 	)
 	if err != nil {
 		return domain.SchedulerSettings{}, err
@@ -1336,6 +1339,66 @@ func (r *Repository) ListExploits(ctx context.Context) ([]domain.Exploit, error)
 		return nil, err
 	}
 	return exploits, nil
+}
+
+func (r *Repository) GetExploit(ctx context.Context, id string) (domain.Exploit, error) {
+	var exploit domain.Exploit
+	var runnerTags, metadata []byte
+	var lastRun sql.NullTime
+	var challengeID, description sql.NullString
+	var cooldownSeconds int64
+	err := r.db.QueryRowContext(ctx, `
+		SELECT id, challenge_id, name, description, enabled, runner_tags, schedule_weight, cooldown_seconds, last_run_at, metadata, created_at, updated_at
+		FROM exploits
+		WHERE id = $1`,
+		id,
+	).Scan(
+		&exploit.ID,
+		&challengeID,
+		&exploit.Name,
+		&description,
+		&exploit.Enabled,
+		&runnerTags,
+		&exploit.ScheduleWeight,
+		&cooldownSeconds,
+		&lastRun,
+		&metadata,
+		&exploit.CreatedAt,
+		&exploit.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.Exploit{}, storage.ErrExploitNotFound
+	}
+	if err != nil {
+		return domain.Exploit{}, err
+	}
+	if challengeID.Valid {
+		exploit.ChallengeID = challengeID.String
+	}
+	if description.Valid {
+		exploit.Description = description.String
+	}
+	if lastRun.Valid {
+		exploit.LastRunAt = lastRun.Time
+	}
+	if len(runnerTags) > 0 {
+		tags, err := unmarshalStringSlice(runnerTags)
+		if err != nil {
+			return domain.Exploit{}, err
+		}
+		exploit.RunnerTags = tags
+	}
+	if len(metadata) > 0 {
+		meta, err := unmarshalMap(metadata)
+		if err != nil {
+			return domain.Exploit{}, err
+		}
+		exploit.Metadata = meta
+	}
+	if cooldownSeconds > 0 {
+		exploit.Cooldown = time.Duration(cooldownSeconds) * time.Second
+	}
+	return exploit, nil
 }
 
 func (r *Repository) CreateExploit(ctx context.Context, exploit domain.Exploit) (domain.Exploit, error) {
@@ -2303,6 +2366,79 @@ func (r *Repository) GetRun(ctx context.Context, id string) (domain.Run, error) 
 	return run, nil
 }
 
+func (r *Repository) ListRunnerActiveRuns(ctx context.Context, runnerID string) ([]domain.Run, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, exploit_id, exploit_revision, target_id, runner_id, status, queued_at, started_at, finished_at, log_uri, flag_id, error_message
+		FROM runs
+		WHERE runner_id = $1 AND status = 'running'`,
+		runnerID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var runs []domain.Run
+	for rows.Next() {
+		var run domain.Run
+		var exploitID, exploitRevision, targetID, runner, logURI, flagID, errorMessage sql.NullString
+		var queued, started, finished sql.NullTime
+		var status string
+		if scanErr := rows.Scan(
+			&run.ID,
+			&exploitID,
+			&exploitRevision,
+			&targetID,
+			&runner,
+			&status,
+			&queued,
+			&started,
+			&finished,
+			&logURI,
+			&flagID,
+			&errorMessage,
+		); scanErr != nil {
+			return nil, scanErr
+		}
+		if exploitID.Valid {
+			run.ExploitID = exploitID.String
+		}
+		if exploitRevision.Valid {
+			run.ExploitRevision = exploitRevision.String
+		}
+		if targetID.Valid {
+			run.TargetID = targetID.String
+		}
+		if runner.Valid {
+			run.RunnerID = runner.String
+		}
+		if logURI.Valid {
+			run.LogURI = logURI.String
+		}
+		if flagID.Valid {
+			run.FlagID = flagID.String
+		}
+		if errorMessage.Valid {
+			run.ErrorMessage = errorMessage.String
+		}
+		if queued.Valid {
+			run.QueuedAt = queued.Time
+		}
+		if started.Valid {
+			run.StartedAt = started.Time
+		}
+		if finished.Valid {
+			run.FinishedAt = finished.Time
+		}
+		run.Status = domain.RunStatus(status)
+		runs = append(runs, run)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return runs, nil
+}
+
 func (r *Repository) ListLogs(ctx context.Context, filter domain.LogFilter) ([]domain.LogEntry, error) {
 	conditions := make([]string, 0, 4)
 	args := make([]any, 0, 5)
@@ -2416,7 +2552,7 @@ func (r *Repository) AppendLog(ctx context.Context, entry domain.LogEntry) error
 
 func (r *Repository) ListRunners(ctx context.Context) ([]domain.Runner, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT id, type, hostname, labels, tags, max_parallel, active_jobs, last_heartbeat, status, registered_at
+		SELECT id, type, hostname, labels, tags, max_parallel, active_jobs, last_heartbeat, status, registered_at, config, last_ip
 		FROM runners
 		ORDER BY hostname ASC`)
 	if err != nil {
@@ -2427,10 +2563,10 @@ func (r *Repository) ListRunners(ctx context.Context) ([]domain.Runner, error) {
 	var runners []domain.Runner
 	for rows.Next() {
 		var runner domain.Runner
-		var labels, tags []byte
+		var labels, tags, configData []byte
 		var activeJobs sql.NullInt64
 		var lastHeartbeat sql.NullTime
-		var typ, hostname, status sql.NullString
+		var typ, hostname, status, lastIP sql.NullString
 		if err := rows.Scan(
 			&runner.ID,
 			&typ,
@@ -2442,6 +2578,8 @@ func (r *Repository) ListRunners(ctx context.Context) ([]domain.Runner, error) {
 			&lastHeartbeat,
 			&status,
 			&runner.RegisteredAt,
+			&configData,
+			&lastIP,
 		); err != nil {
 			return nil, err
 		}
@@ -2471,8 +2609,18 @@ func (r *Repository) ListRunners(ctx context.Context) ([]domain.Runner, error) {
 			}
 			runner.Tags = list
 		}
+		if len(configData) > 0 {
+			cfg, err := unmarshalStringMap(configData)
+			if err != nil {
+				return nil, err
+			}
+			runner.Config = cfg
+		}
 		if activeJobs.Valid {
 			runner.ActiveJobs = int(activeJobs.Int64)
+		}
+		if lastIP.Valid {
+			runner.LastIP = lastIP.String
 		}
 		runners = append(runners, runner)
 	}
@@ -2484,12 +2632,12 @@ func (r *Repository) ListRunners(ctx context.Context) ([]domain.Runner, error) {
 
 func (r *Repository) GetRunner(ctx context.Context, id string) (domain.Runner, error) {
 	var runner domain.Runner
-	var labels, tags []byte
-	var typ, hostname, status sql.NullString
+	var labels, tags, configData []byte
+	var typ, hostname, status, lastIP sql.NullString
 	var lastHeartbeat sql.NullTime
 	var activeJobs sql.NullInt64
 	err := r.db.QueryRowContext(ctx, `
-		SELECT id, type, hostname, labels, tags, max_parallel, active_jobs, last_heartbeat, status, registered_at
+		SELECT id, type, hostname, labels, tags, max_parallel, active_jobs, last_heartbeat, status, registered_at, config, last_ip
 		FROM runners
 		WHERE id = $1`, id,
 	).Scan(
@@ -2503,6 +2651,8 @@ func (r *Repository) GetRunner(ctx context.Context, id string) (domain.Runner, e
 		&lastHeartbeat,
 		&status,
 		&runner.RegisteredAt,
+		&configData,
+		&lastIP,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Runner{}, errors.New("runner not found")
@@ -2530,6 +2680,13 @@ func (r *Repository) GetRunner(ctx context.Context, id string) (domain.Runner, e
 		}
 		runner.Tags = list
 	}
+	if len(configData) > 0 {
+		cfg, err := unmarshalStringMap(configData)
+		if err != nil {
+			return domain.Runner{}, err
+		}
+		runner.Config = cfg
+	}
 	if activeJobs.Valid {
 		runner.ActiveJobs = int(activeJobs.Int64)
 	}
@@ -2538,6 +2695,9 @@ func (r *Repository) GetRunner(ctx context.Context, id string) (domain.Runner, e
 	}
 	if status.Valid {
 		runner.Status = status.String
+	}
+	if lastIP.Valid {
+		runner.LastIP = lastIP.String
 	}
 	return runner, nil
 }
@@ -2557,10 +2717,14 @@ func (r *Repository) UpsertRunner(ctx context.Context, runner domain.Runner) err
 	if err != nil {
 		return err
 	}
+	configData, err := marshalJSON(runner.Config)
+	if err != nil {
+		return err
+	}
 
 	_, err = r.db.ExecContext(ctx, `
-		INSERT INTO runners (id, type, hostname, labels, tags, max_parallel, active_jobs, last_heartbeat, status, registered_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		INSERT INTO runners (id, type, hostname, labels, tags, max_parallel, active_jobs, last_heartbeat, status, registered_at, config, last_ip)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		ON CONFLICT (id) DO UPDATE
 		SET type = EXCLUDED.type,
 		    hostname = EXCLUDED.hostname,
@@ -2570,7 +2734,9 @@ func (r *Repository) UpsertRunner(ctx context.Context, runner domain.Runner) err
 		    active_jobs = EXCLUDED.active_jobs,
 		    last_heartbeat = EXCLUDED.last_heartbeat,
 		    status = EXCLUDED.status,
-		    registered_at = EXCLUDED.registered_at`,
+		    registered_at = EXCLUDED.registered_at,
+		    config = EXCLUDED.config,
+		    last_ip = EXCLUDED.last_ip`,
 		runner.ID,
 		runner.Type,
 		runner.Hostname,
@@ -2581,6 +2747,8 @@ func (r *Repository) UpsertRunner(ctx context.Context, runner domain.Runner) err
 		nullTime(runner.LastHeartbeat),
 		runner.Status,
 		runner.RegisteredAt,
+		configData,
+		nullString(runner.LastIP),
 	)
 	return err
 }
@@ -2635,55 +2803,6 @@ func (r *Repository) fetchExploitMetadata(ctx context.Context, exploitID string)
 		return nil, err
 	}
 	return meta, nil
-}
-
-func jobHintsFromMetadata(meta map[string]any) (string, string, time.Duration) {
-	if meta == nil {
-		return "", "", 0
-	}
-
-	flagRegex := ""
-	flagFile := ""
-	timeout := time.Duration(0)
-
-	if value, ok := meta["flag_regex"].(string); ok {
-		flagRegex = value
-	} else if value, ok := meta["flagRegex"].(string); ok {
-		flagRegex = value
-	}
-
-	if value, ok := meta["flag_file"].(string); ok {
-		flagFile = value
-	} else if value, ok := meta["flagFile"].(string); ok {
-		flagFile = value
-	}
-
-	timeoutKeys := []string{"timeout_seconds", "timeoutSeconds"}
-	for _, key := range timeoutKeys {
-		if timeout > 0 {
-			break
-		}
-		switch value := meta[key].(type) {
-		case float64:
-			if value > 0 {
-				timeout = time.Duration(value) * time.Second
-			}
-		case int:
-			if value > 0 {
-				timeout = time.Duration(value) * time.Second
-			}
-		case int32:
-			if value > 0 {
-				timeout = time.Duration(value) * time.Second
-			}
-		case int64:
-			if value > 0 {
-				timeout = time.Duration(value) * time.Second
-			}
-		}
-	}
-
-	return flagRegex, flagFile, timeout
 }
 
 func runOrderingTime(run domain.Run) time.Time {

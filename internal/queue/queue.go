@@ -21,6 +21,7 @@ type Broker interface {
 	Claim(ctx context.Context, stream string, group string, consumer string, count int, block time.Duration) ([]Message, error)
 	Ack(ctx context.Context, stream string, group string, messageID string) error
 	Nack(ctx context.Context, stream string, group string, messageID string, delay time.Duration) error
+	Reclaim(ctx context.Context, stream string, group string, consumer string, minIdle time.Duration, count int) ([]Message, error)
 }
 
 // ErrNoMessages indicates that the queue has no messages available within the configured timeout.

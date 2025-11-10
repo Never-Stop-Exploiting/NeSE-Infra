@@ -376,6 +376,7 @@ func (a *Agent) sendHeartbeat(ctx context.Context) {
 		MaxParallel: a.cfg.Runner.MaxParallelJobs,
 		ActiveJobs:  int(a.activeJobs.Load()),
 		Labels:      a.runnerLabels(),
+		Config:      a.heartbeatConfig(),
 	}
 	if err := a.controlClient.Heartbeat(hbCtx, req); err != nil {
 		a.log.Warn("failed to send heartbeat", slog.Any("err", err))
@@ -412,6 +413,7 @@ func (a *Agent) registerSelf(ctx context.Context) error {
 		Tags:        a.cfg.Runner.Tags,
 		Labels:      labels,
 		MaxParallel: a.cfg.Runner.MaxParallelJobs,
+		Config:      a.heartbeatConfig(),
 	}
 	if err := a.controlClient.RegisterRunner(registerCtx, req); err != nil {
 		return fmt.Errorf("register runner with control plane: %w", err)
@@ -622,6 +624,45 @@ func (a *Agent) runnerLabels() map[string]string {
 		labels["hostname"] = a.hostname
 	}
 	return labels
+}
+
+func (a *Agent) heartbeatConfig() map[string]string {
+	cfg := make(map[string]string)
+	add := func(key, value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		cfg[key] = value
+	}
+	if ttl := a.cfg.Runner.ArtifactCacheTTL; ttl > 0 {
+		add("RUNNER_ARTIFACT_CACHE_TTL", ttl.String())
+	}
+	if dir := a.cfg.Runner.ArtifactCacheDir; dir != "" {
+		add("RUNNER_ARTIFACT_CACHE_DIR", dir)
+	}
+	if maxBytes := a.cfg.Runner.ArtifactCacheMaxBytes; maxBytes > 0 {
+		add("RUNNER_ARTIFACT_CACHE_MAX_BYTES", strconv.FormatInt(maxBytes, 10))
+	}
+	if root := a.cfg.Runner.WorkspaceRoot; root != "" {
+		add("RUNNER_WORKSPACE_ROOT", root)
+	}
+	if interval := a.cfg.Runner.HeartbeatInterval; interval > 0 {
+		add("RUNNER_HEARTBEAT_INTERVAL", interval.String())
+	}
+	if flush := a.cfg.Runner.LogFlushInterval; flush > 0 {
+		add("RUNNER_LOG_FLUSH_INTERVAL", flush.String())
+	}
+	if timeout := a.cfg.Runner.DefaultTimeout; timeout > 0 {
+		add("RUNNER_DEFAULT_TIMEOUT", timeout.String())
+	}
+	if chroot := a.cfg.Runner.ChrootPath; chroot != "" {
+		add("RUNNER_CHROOT_PATH", chroot)
+	}
+	if len(cfg) == 0 {
+		return nil
+	}
+	return cfg
 }
 
 func cloneLabels(src map[string]string) map[string]string {

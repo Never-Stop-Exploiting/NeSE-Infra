@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"awdinfra/internal/domain"
+	"awdinfra/internal/jobs"
 	"awdinfra/internal/storage"
 )
 
@@ -317,7 +318,7 @@ func (r *Repository) RunnableWork(ctx context.Context, limit int, settings domai
 				return nil, err
 			}
 
-			flagRegex, flagFile, timeout := jobHintsFromMetadata(exploit.Metadata)
+			flagRegex, flagFile, timeout := jobs.HintsFromMetadata(exploit.Metadata)
 
 			work = append(work, domain.RunWorkItem{
 				RunID:     run.ID,
@@ -536,6 +537,16 @@ func (r *Repository) ListExploits(ctx context.Context) ([]domain.Exploit, error)
 		items = append(items, exploit)
 	}
 	return items, ctx.Err()
+}
+
+func (r *Repository) GetExploit(ctx context.Context, id string) (domain.Exploit, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	exploit, ok := r.exploits[id]
+	if !ok {
+		return domain.Exploit{}, storage.ErrExploitNotFound
+	}
+	return exploit, ctx.Err()
 }
 
 func (r *Repository) CreateExploit(ctx context.Context, exploit domain.Exploit) (domain.Exploit, error) {
@@ -1125,6 +1136,18 @@ func (r *Repository) GetRun(ctx context.Context, id string) (domain.Run, error) 
 	return run, ctx.Err()
 }
 
+func (r *Repository) ListRunnerActiveRuns(ctx context.Context, runnerID string) ([]domain.Run, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var runs []domain.Run
+	for _, run := range r.runs {
+		if run.RunnerID == runnerID && run.Status == domain.RunStatusRunning {
+			runs = append(runs, run)
+		}
+	}
+	return runs, ctx.Err()
+}
+
 func (r *Repository) ListLogs(ctx context.Context, filter domain.LogFilter) ([]domain.LogEntry, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -1223,6 +1246,12 @@ func (r *Repository) UpsertRunner(ctx context.Context, runner domain.Runner) err
 	}
 	if runner.Labels == nil && _runner.Labels != nil {
 		runner.Labels = _runner.Labels
+	}
+	if runner.Config == nil && _runner.Config != nil {
+		runner.Config = _runner.Config
+	}
+	if runner.LastIP == "" {
+		runner.LastIP = _runner.LastIP
 	}
 	r.runners[runner.ID] = runner
 	return ctx.Err()
@@ -1452,53 +1481,6 @@ func repr(event string, ts time.Time, code int, msg string) string {
 }
 
 var idCounter uint64
-
-func jobHintsFromMetadata(meta map[string]any) (string, string, time.Duration) {
-	if meta == nil {
-		return "", "", 0
-	}
-	flagRegex := ""
-	flagFile := ""
-	timeout := time.Duration(0)
-
-	if value, ok := meta["flag_regex"].(string); ok {
-		flagRegex = value
-	} else if value, ok := meta["flagRegex"].(string); ok {
-		flagRegex = value
-	}
-
-	if value, ok := meta["flag_file"].(string); ok {
-		flagFile = value
-	} else if value, ok := meta["flagFile"].(string); ok {
-		flagFile = value
-	}
-
-	timeoutKeys := []string{"timeout_seconds", "timeoutSeconds"}
-	for _, key := range timeoutKeys {
-		if timeout > 0 {
-			break
-		}
-		switch value := meta[key].(type) {
-		case float64:
-			if value > 0 {
-				timeout = time.Duration(value) * time.Second
-			}
-		case int:
-			if value > 0 {
-				timeout = time.Duration(value) * time.Second
-			}
-		case int32:
-			if value > 0 {
-				timeout = time.Duration(value) * time.Second
-			}
-		case int64:
-			if value > 0 {
-				timeout = time.Duration(value) * time.Second
-			}
-		}
-	}
-	return flagRegex, flagFile, timeout
-}
 
 func matchesRunFilter(run domain.Run, filter domain.RunFilter, repo *Repository) bool {
 	if value := strings.TrimSpace(filter.Status); value != "" && !strings.EqualFold(value, string(run.Status)) {
