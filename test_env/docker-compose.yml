@@ -29,17 +29,18 @@ services:
       - .env.runner
     environment:
       RUNNER_ID: requests-exp
+      RUNNER_MAX_PARALLEL: 30
 
-  runner-exp2:
-    build:
-      context: ..
-      dockerfile: ./test_env/exp/Dockerfile
-    container_name: runner-exp2
-    env_file:
-      - .env.runner
-    environment:
-      RUNNER_ID: requests-exp2
-      RUNNER_ARTIFACT_CACHE_TTL: 3s
+  # runner-exp2:
+  #   build:
+  #     context: ..
+  #     dockerfile: ./test_env/exp/Dockerfile
+  #   container_name: runner-exp2
+  #   env_file:
+  #     - .env.runner
+  #   environment:
+  #     RUNNER_ID: requests-exp2
+  #     RUNNER_ARTIFACT_CACHE_TTL: 3s
   # runner-exp3:
   #   build:
   #     context: ..
