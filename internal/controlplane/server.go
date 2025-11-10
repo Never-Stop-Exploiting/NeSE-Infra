@@ -115,6 +115,9 @@ func (s *Server) maintenanceLoop(ctx context.Context) error {
 			if err := s.sweepStaleRunners(ctx); err != nil && ctx.Err() == nil {
 				s.logger.Warn("runner sweep failed", slog.Any("err", err))
 			}
+			if err := s.sweepStaleSubmitters(ctx); err != nil && ctx.Err() == nil {
+				s.logger.Warn("submitter sweep failed", slog.Any("err", err))
+			}
 		case <-reclaimTicker.C:
 			if err := s.reclaimStalledRuns(ctx); err != nil && ctx.Err() == nil {
 				s.logger.Warn("reclaim stalled runs failed", slog.Any("err", err))
@@ -136,6 +139,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/exploits/", s.handleExploitActions)
 	mux.HandleFunc("/api/v1/flags", s.handleFlags)
 	mux.HandleFunc("/api/v1/flags/cancel", s.handleFlagBulkCancel)
+	mux.HandleFunc("/api/v1/flags/retry", s.handleFlagBulkRetry)
 	mux.HandleFunc("/api/v1/flags/", s.handleFlagDetail)
 	mux.HandleFunc("/api/v1/runs", s.handleRuns)
 	mux.HandleFunc("/api/v1/runs/cancel", s.handleRunBulkCancel)
@@ -144,6 +148,10 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/runners/register", s.handleRunnerRegister)
 	mux.HandleFunc("/api/v1/runners/heartbeat", s.handleRunnerHeartbeat)
 	mux.HandleFunc("/api/v1/runners", s.handleRunners)
+	mux.HandleFunc("/api/v1/submitters/register", s.handleSubmitterRegister)
+	mux.HandleFunc("/api/v1/submitters/heartbeat", s.handleSubmitterHeartbeat)
+	mux.HandleFunc("/api/v1/submitters", s.handleSubmitters)
+	mux.HandleFunc("/api/v1/submitters/", s.handleSubmitterDetail)
 	mux.HandleFunc("/api/v1/scheduler/settings", s.handleSchedulerSettings)
 	mux.HandleFunc("/api/v1/scheduler/targets", s.handleSchedulerTargets)
 	mux.HandleFunc("/api/v1/scheduler/targets/", s.handleSchedulerTargetDetail)
@@ -1060,9 +1068,189 @@ func (s *Server) handleFlagDetail(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"flag_id": flag.ID, "status": flag.Status})
+	case "submit":
+		if len(parts) < 3 {
+			writeError(w, http.StatusBadRequest, "missing submit action")
+			return
+		}
+		switch strings.TrimSpace(parts[2]) {
+		case "start":
+			s.handleFlagSubmitStart(w, r, id)
+		case "finish":
+			s.handleFlagSubmitFinish(w, r, id)
+		default:
+			writeError(w, http.StatusNotFound, "unknown submit action")
+		}
 	default:
 		writeError(w, http.StatusNotFound, "unknown flag action")
 	}
+}
+
+func (s *Server) handleFlagSubmitStart(w http.ResponseWriter, r *http.Request, flagID string) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req struct {
+		Secret      string `json:"secret"`
+		SubmitterID string `json:"submitterId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid payload")
+		return
+	}
+	if strings.TrimSpace(req.Secret) == "" || req.Secret != s.cfg.SubmitterSecret {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if strings.TrimSpace(req.SubmitterID) == "" {
+		writeError(w, http.StatusBadRequest, "submitterId is required")
+		return
+	}
+	if _, err := s.repository.GetSubmitter(r.Context(), req.SubmitterID); err != nil {
+		writeError(w, http.StatusUnauthorized, "submitter not registered")
+		return
+	}
+	flag, err := s.repository.GetFlag(r.Context(), flagID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "flag not found")
+		return
+	}
+	switch flag.Status {
+	case domain.FlagStatusAccepted, domain.FlagStatusDuplicated, domain.FlagStatusFailed, domain.FlagStatusDropped:
+		writeError(w, http.StatusConflict, "flag already finalized")
+		return
+	}
+	if flag.Status != domain.FlagStatusSubmitting {
+		flag.Status = domain.FlagStatusSubmitting
+		if err := s.repository.UpdateFlag(r.Context(), &flag); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to update flag")
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"flag": map[string]any{
+			"id":          flag.ID,
+			"value":       flag.Value,
+			"challengeId": flag.ChallengeID,
+			"targetId":    flag.TargetID,
+			"runId":       flag.RunID,
+			"status":      flag.Status,
+		},
+	})
+}
+
+func (s *Server) handleFlagSubmitFinish(w http.ResponseWriter, r *http.Request, flagID string) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req struct {
+		Secret            string         `json:"secret"`
+		SubmitterID       string         `json:"submitterId"`
+		Status            string         `json:"status"`
+		StatusCode        int            `json:"statusCode"`
+		Message           string         `json:"message"`
+		LatencyMs         float64        `json:"latencyMs"`
+		RetryAfterSeconds int            `json:"retryAfterSeconds"`
+		Payload           map[string]any `json:"payload"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid payload")
+		return
+	}
+	if strings.TrimSpace(req.Secret) == "" || req.Secret != s.cfg.SubmitterSecret {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if strings.TrimSpace(req.SubmitterID) == "" {
+		writeError(w, http.StatusBadRequest, "submitterId is required")
+		return
+	}
+	if _, err := s.repository.GetSubmitter(r.Context(), req.SubmitterID); err != nil {
+		writeError(w, http.StatusUnauthorized, "submitter not registered")
+		return
+	}
+	flag, err := s.repository.GetFlag(r.Context(), flagID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "flag not found")
+		return
+	}
+	now := time.Now().UTC()
+	resultStatus := strings.ToLower(strings.TrimSpace(req.Status))
+	retry := false
+	var finalStatus domain.FlagStatus
+	switch resultStatus {
+	case string(submitter.SubmissionStatusAccepted):
+		finalStatus = domain.FlagStatusAccepted
+	case string(submitter.SubmissionStatusDuplicated):
+		finalStatus = domain.FlagStatusDuplicated
+	case string(submitter.SubmissionStatusFailed):
+		finalStatus = domain.FlagStatusFailed
+	default:
+		finalStatus = domain.FlagStatusRetry
+		retry = true
+	}
+
+	attempt := domain.SubmissionAttempt{
+		FlagID:      flagID,
+		SubmitterID: req.SubmitterID,
+		StatusCode:  req.StatusCode,
+		Error:       req.Message,
+		SubmittedAt: now,
+		Payload:     req.Payload,
+	}
+	if retry && req.RetryAfterSeconds > 0 {
+		attempt.NextRetryAt = now.Add(time.Duration(req.RetryAfterSeconds) * time.Second)
+	}
+	if err := s.repository.AddFlagAttempt(r.Context(), flagID, attempt); err != nil {
+		s.logger.Warn("store flag attempt failed", slog.Any("err", err), slog.String("flag_id", flagID))
+	}
+
+	flag.Status = finalStatus
+	flag.LastSubmittedAt = now
+	if err := s.repository.UpdateFlag(r.Context(), &flag); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update flag")
+		return
+	}
+
+	logFields := map[string]any{
+		"status":     finalStatus,
+		"submitter":  req.SubmitterID,
+		"statusCode": req.StatusCode,
+	}
+	if req.Message != "" {
+		logFields["message"] = req.Message
+	}
+	if req.LatencyMs > 0 {
+		logFields["latencyMs"] = req.LatencyMs
+	}
+	if req.RetryAfterSeconds > 0 {
+		logFields["retryAfterSeconds"] = req.RetryAfterSeconds
+	}
+	level := "info"
+	switch finalStatus {
+	case domain.FlagStatusFailed, domain.FlagStatusDuplicated:
+		level = "warn"
+	case domain.FlagStatusRetry:
+		level = "error"
+	}
+	_ = s.repository.AppendLog(r.Context(), domain.LogEntry{
+		Level:     level,
+		Source:    "flag-submitter",
+		Message:   fmt.Sprintf("flag %s submitted", flagID),
+		FlagID:    flagID,
+		Timestamp: now,
+		Fields:    logFields,
+	})
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"flag": map[string]any{
+			"id":     flag.ID,
+			"status": flag.Status,
+		},
+		"retry": retry,
+	})
 }
 
 func (s *Server) handleFlagBulkCancel(w http.ResponseWriter, r *http.Request) {
@@ -1597,7 +1785,7 @@ func (s *Server) cancelFlag(ctx context.Context, flagID string, reason string) (
 	case domain.FlagStatusAccepted, domain.FlagStatusDropped, domain.FlagStatusFailed, domain.FlagStatusDuplicated:
 		return domain.Flag{}, errFlagCancelNotAllowed
 	case domain.FlagStatusSubmitting:
-		return domain.Flag{}, errFlagCancelNotAllowed
+		// allow cancel but requeue if needed
 	}
 	flag.Status = domain.FlagStatusDropped
 	if err := s.repository.UpdateFlag(ctx, &flag); err != nil {
@@ -1733,6 +1921,193 @@ func (s *Server) handleRunners(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) handleSubmitters(w http.ResponseWriter, r *http.Request) {
+	if err := s.sweepStaleSubmitters(r.Context()); err != nil {
+		s.logger.Warn("submitter sweep failed", slog.Any("err", err))
+	}
+	switch r.Method {
+	case http.MethodGet:
+		submitters, err := s.repository.ListSubmitters(r.Context())
+		if err != nil {
+			s.logger.Error("list submitters failed", slog.Any("err", err))
+			writeError(w, http.StatusInternalServerError, "failed to list submitters")
+			return
+		}
+		items := make([]map[string]any, 0, len(submitters))
+		for _, sub := range submitters {
+			items = append(items, marshalSubmitter(sub))
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *Server) handleSubmitterDetail(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/submitters/")
+	path = strings.TrimSpace(path)
+	if path == "" {
+		writeError(w, http.StatusNotFound, "missing submitter id")
+		return
+	}
+	parts := strings.Split(path, "/")
+	id := strings.TrimSpace(parts[0])
+	if id == "" {
+		writeError(w, http.StatusNotFound, "missing submitter id")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		sub, err := s.repository.GetSubmitter(r.Context(), id)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "submitter not found")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"submitter": marshalSubmitter(sub)})
+	case http.MethodDelete:
+		if err := s.repository.DeleteSubmitter(r.Context(), id); err != nil {
+			writeError(w, http.StatusNotFound, "submitter not found")
+			return
+		}
+		s.logger.Info("submitter removed", slog.String("submitter_id", id))
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *Server) handleSubmitterRegister(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req struct {
+		ID          string            `json:"id"`
+		Type        string            `json:"type"`
+		Hostname    string            `json:"hostname"`
+		Secret      string            `json:"secret"`
+		Concurrency int               `json:"concurrency"`
+		Labels      map[string]string `json:"labels"`
+		Config      map[string]string `json:"config"`
+		Status      string            `json:"status"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid payload")
+		return
+	}
+	if strings.TrimSpace(req.Secret) == "" || req.Secret != s.cfg.SubmitterSecret {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if strings.TrimSpace(req.ID) == "" {
+		writeError(w, http.StatusBadRequest, "id is required")
+		return
+	}
+	if req.Concurrency <= 0 {
+		req.Concurrency = 1
+	}
+	status := req.Status
+	if strings.TrimSpace(status) == "" {
+		status = "online"
+	}
+	now := time.Now().UTC()
+	submitter := domain.Submitter{
+		ID:            strings.TrimSpace(req.ID),
+		Type:          strings.TrimSpace(req.Type),
+		Hostname:      strings.TrimSpace(req.Hostname),
+		Status:        status,
+		Concurrency:   req.Concurrency,
+		Labels:        req.Labels,
+		Config:        req.Config,
+		LastHeartbeat: now,
+		RegisteredAt:  now,
+	}
+	if err := s.repository.UpsertSubmitter(r.Context(), submitter); err != nil {
+		s.logger.Error("submitter register failed", slog.Any("err", err), slog.String("submitter_id", req.ID))
+		writeError(w, http.StatusInternalServerError, "failed to register submitter")
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"submitter": marshalSubmitter(submitter)})
+}
+
+func (s *Server) handleSubmitterHeartbeat(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req struct {
+		ID               string            `json:"id"`
+		Secret           string            `json:"secret"`
+		Status           string            `json:"status"`
+		Type             string            `json:"type"`
+		Hostname         string            `json:"hostname"`
+		Concurrency      int               `json:"concurrency"`
+		InFlight         int               `json:"inFlight"`
+		Pending          int               `json:"pending"`
+		RecentThroughput float64           `json:"recentThroughput"`
+		AvgLatencyMs     float64           `json:"avgLatencyMs"`
+		Pressure         float64           `json:"pressure"`
+		Labels           map[string]string `json:"labels"`
+		Config           map[string]string `json:"config"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid payload")
+		return
+	}
+	if strings.TrimSpace(req.Secret) == "" || req.Secret != s.cfg.SubmitterSecret {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if strings.TrimSpace(req.ID) == "" {
+		writeError(w, http.StatusBadRequest, "id is required")
+		return
+	}
+	if req.Concurrency <= 0 {
+		req.Concurrency = 1
+	}
+	now := time.Now().UTC()
+	existing, err := s.repository.GetSubmitter(r.Context(), req.ID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusInternalServerError, "failed to load submitter")
+		return
+	}
+	inFlight := req.InFlight
+	if inFlight < 0 {
+		inFlight = 0
+	}
+	pending := req.Pending
+	if pending < 0 {
+		pending = 0
+	}
+	submitter := domain.Submitter{
+		ID:               strings.TrimSpace(req.ID),
+		Type:             strings.TrimSpace(req.Type),
+		Hostname:         strings.TrimSpace(req.Hostname),
+		Status:           strings.TrimSpace(req.Status),
+		Concurrency:      req.Concurrency,
+		InFlight:         inFlight,
+		Pending:          pending,
+		RecentThroughput: req.RecentThroughput,
+		AverageLatencyMS: req.AvgLatencyMs,
+		Pressure:         req.Pressure,
+		Labels:           req.Labels,
+		Config:           req.Config,
+		LastHeartbeat:    now,
+		RegisteredAt:     existing.RegisteredAt,
+	}
+	if submitter.RegisteredAt.IsZero() {
+		submitter.RegisteredAt = now
+	}
+	if submitter.Status == "" {
+		submitter.Status = "online"
+	}
+	if err := s.repository.UpsertSubmitter(r.Context(), submitter); err != nil {
+		s.logger.Error("submitter heartbeat failed", slog.Any("err", err), slog.String("submitter_id", req.ID))
+		writeError(w, http.StatusInternalServerError, "failed to update submitter")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"submitter": marshalSubmitter(submitter)})
+}
 func (s *Server) handleRunnerRegister(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -2575,6 +2950,25 @@ func marshalRunner(runner domain.Runner) map[string]any {
 	}
 }
 
+func marshalSubmitter(sub domain.Submitter) map[string]any {
+	return map[string]any{
+		"id":               sub.ID,
+		"type":             sub.Type,
+		"hostname":         sub.Hostname,
+		"status":           sub.Status,
+		"concurrency":      sub.Concurrency,
+		"inFlight":         sub.InFlight,
+		"pending":          sub.Pending,
+		"recentThroughput": sub.RecentThroughput,
+		"avgLatencyMs":     sub.AverageLatencyMS,
+		"pressure":         sub.Pressure,
+		"labels":           sub.Labels,
+		"config":           sub.Config,
+		"lastHeartbeat":    sub.LastHeartbeat,
+		"registeredAt":     sub.RegisteredAt,
+	}
+}
+
 func clientIP(r *http.Request) string {
 	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
 		for _, part := range strings.Split(forwarded, ",") {
@@ -2695,6 +3089,48 @@ func (s *Server) sweepStaleRunners(ctx context.Context) error {
 			} else {
 				s.logger.Info("runner marked offline due to missed heartbeats", slog.String("runner_id", runner.ID))
 				s.handleRunnerOutage(ctx, runner, fmt.Sprintf("runner %s offline after heartbeat timeout", runner.ID))
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Server) sweepStaleSubmitters(ctx context.Context) error {
+	submitters, err := s.repository.ListSubmitters(ctx)
+	if err != nil {
+		return err
+	}
+	interval := s.cfg.FlagSubmitter.HeartbeatInterval
+	if interval <= 0 {
+		interval = 10 * time.Second
+	}
+	offlineThreshold := interval * 2
+	purgeThreshold := interval * 20
+	now := time.Now().UTC()
+
+	for _, submitter := range submitters {
+		last := submitter.LastHeartbeat
+		if last.IsZero() {
+			last = submitter.RegisteredAt
+		}
+		if last.IsZero() {
+			last = now
+		}
+		since := now.Sub(last)
+		if purgeThreshold > 0 && since >= purgeThreshold {
+			if err := s.repository.DeleteSubmitter(ctx, submitter.ID); err != nil {
+				s.logger.Warn("purge stale submitter failed", slog.Any("err", err), slog.String("submitter_id", submitter.ID))
+				continue
+			}
+			s.logger.Info("purged stale submitter", slog.String("submitter_id", submitter.ID))
+			continue
+		}
+		if offlineThreshold > 0 && since >= offlineThreshold && submitter.Status != "offline" {
+			submitter.Status = "offline"
+			if err := s.repository.UpsertSubmitter(ctx, submitter); err != nil {
+				s.logger.Warn("mark submitter offline failed", slog.Any("err", err), slog.String("submitter_id", submitter.ID))
+			} else {
+				s.logger.Info("submitter marked offline due to missed heartbeats", slog.String("submitter_id", submitter.ID))
 			}
 		}
 	}
@@ -2894,4 +3330,57 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]any{
 		"error": message,
 	})
+}
+func (s *Server) handleFlagBulkRetry(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req struct {
+		FlagIDs []string `json:"flagIds"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid payload")
+		return
+	}
+	if len(req.FlagIDs) == 0 {
+		writeError(w, http.StatusBadRequest, "flagIds is required")
+		return
+	}
+	ctx := r.Context()
+	results := make([]map[string]any, 0, len(req.FlagIDs))
+	seen := make(map[string]struct{})
+	for _, raw := range req.FlagIDs {
+		flagID := strings.TrimSpace(raw)
+		if flagID == "" {
+			continue
+		}
+		if _, exists := seen[flagID]; exists {
+			continue
+		}
+		seen[flagID] = struct{}{}
+
+		flag, err := s.repository.GetFlag(ctx, flagID)
+		if err != nil {
+			results = append(results, map[string]any{
+				"flagId": flagID,
+				"error":  "flag not found",
+			})
+			continue
+		}
+		flag.Status = domain.FlagStatusRetry
+		if err := s.repository.UpdateFlag(ctx, &flag); err != nil {
+			results = append(results, map[string]any{
+				"flagId": flagID,
+				"error":  "failed to update flag",
+			})
+			continue
+		}
+		s.enqueueFlag(ctx, flag)
+		results = append(results, map[string]any{
+			"flagId": flagID,
+			"status": flag.Status,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"results": results})
 }

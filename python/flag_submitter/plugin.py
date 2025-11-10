@@ -14,6 +14,7 @@ class SubmissionResult:
     status_code: int
     message: str = ""
     retry_after: float | None = None  # seconds
+    error: str | None = None
 
 
 class FlagPlugin(ABC):
@@ -22,6 +23,9 @@ class FlagPlugin(ABC):
     @abstractmethod
     def submit(self, flag_value: str) -> SubmissionResult:
         """Submit a flag and return a structured result."""
+
+    def id(self) -> str:
+        return self.__class__.__name__.lower()
 
 
 class HttpFlagPlugin(FlagPlugin):
@@ -40,7 +44,7 @@ class HttpFlagPlugin(FlagPlugin):
                 timeout=self.timeout,
             )
         except requests.RequestException as exc:  # type: ignore[attr-defined]
-            return SubmissionResult(status="unknown", status_code=0, message=str(exc))
+            return SubmissionResult(status="unknown", status_code=0, message=str(exc), error=str(exc))
 
         text = response.text.strip()
         code = response.status_code
@@ -50,4 +54,12 @@ class HttpFlagPlugin(FlagPlugin):
             return SubmissionResult(status="duplicated", status_code=code, message=text or response.reason)
         if 400 <= code < 500:
             return SubmissionResult(status="failed", status_code=code, message=text or response.reason)
-        return SubmissionResult(status="unknown", status_code=code, message=text or response.reason, retry_after=30.0)
+        return SubmissionResult(
+            status="unknown",
+            status_code=code,
+            message=text or response.reason,
+            retry_after=30.0,
+        )
+
+    def id(self) -> str:  # type: ignore[override]
+        return "http"

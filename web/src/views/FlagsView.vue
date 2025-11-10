@@ -20,6 +20,14 @@
           >
             {{ bulkCanceling ? "Canceling..." : `Cancel Selected (${selectedCount})` }}
           </button>
+          <button
+            class="ghost"
+            type="button"
+            :disabled="!canBulkRetry"
+            @click="retrySelectedFlags"
+          >
+            {{ bulkRetrying ? "Retrying..." : `Retry Selected (${selectedCount})` }}
+          </button>
           <button class="refresh" :disabled="flagStore.loading" @click="flagStore.refresh">
             {{ flagStore.loading ? "Refreshing..." : "Refresh" }}
           </button>
@@ -191,6 +199,7 @@ const retryingFlag = ref<string | null>(null);
 const selectedFlags = ref<Set<string>>(new Set());
 const cancelingFlag = ref<string | null>(null);
 const bulkCanceling = ref(false);
+const bulkRetrying = ref(false);
 const bulkError = ref<string | null>(null);
 
 const selectedFlag = computed(() =>
@@ -226,7 +235,8 @@ const allVisibleSelected = computed(() => {
   }
   return cancellable.every((flag) => selectedFlags.value.has(flag.id));
 });
-const canBulkCancel = computed(() => selectedCount.value > 0 && !bulkCanceling.value);
+const canBulkCancel = computed(() => selectedCount.value > 0 && !bulkCanceling.value && !bulkRetrying.value);
+const canBulkRetry = computed(() => selectedCount.value > 0 && !bulkRetrying.value && !bulkCanceling.value);
 
 watch(
   () => flagStore.statusFilter,
@@ -280,6 +290,9 @@ async function retry(id: string) {
   retryingFlag.value = id;
   try {
     await flagStore.retry(id);
+    const next = new Set(selectedFlags.value);
+    next.delete(id);
+    selectedFlags.value = next;
     if (selectedFlagId.value === id) {
       await loadFlagDetail(id);
     }
@@ -320,7 +333,7 @@ function toggleSelectAll(checked: boolean) {
 }
 
 function canCancelFlag(flag: FlagRecord) {
-  return !["accepted", "dropped", "submitting", "failed", "duplicated"].includes(flag.status);
+  return !["accepted", "dropped", "failed", "duplicated"].includes(flag.status);
 }
 
 async function changeFilter() {
@@ -358,17 +371,35 @@ async function cancelSelectedFlags() {
   bulkError.value = null;
   try {
     const response = await flagStore.cancelSelected(Array.from(selectedFlags.value));
-    const errors = (response.results ?? [])
-      .filter((result) => result.error)
-      .map((result) => `${result.flagId ?? "unknown"}: ${result.error}`);
-    if (errors.length) {
-      bulkError.value = errors.join("; ");
-    } else {
-      selectedFlags.value = new Set();
-    }
+    handleBulkResponse(response.results, "cancel");
   } finally {
     bulkCanceling.value = false;
   }
+}
+
+async function retrySelectedFlags() {
+  if (!selectedCount.value || bulkRetrying.value) {
+    return;
+  }
+  bulkRetrying.value = true;
+  bulkError.value = null;
+  try {
+    const response = await flagStore.retrySelected(Array.from(selectedFlags.value));
+    handleBulkResponse(response.results, "retry");
+  } finally {
+    bulkRetrying.value = false;
+  }
+}
+
+function handleBulkResponse(
+  results: Array<{ flagId?: string; error?: string }> | undefined,
+  action: string
+) {
+  const errors = (results ?? [])
+    .filter((result) => result.error)
+    .map((result) => `${result.flagId ?? "unknown"}: ${result.error}`);
+  bulkError.value = errors.length ? `Failed to ${action}: ${errors.join("; ")}` : null;
+  selectedFlags.value = new Set();
 }
 
 function formatTimestamp(value?: string) {

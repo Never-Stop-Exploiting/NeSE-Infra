@@ -71,8 +71,16 @@ func skipAuthForRequest(r *http.Request) bool {
 		return true
 	case r.URL.Path == "/api/v1/runners/heartbeat" && r.Method == http.MethodPost:
 		return true
+	case r.URL.Path == "/api/v1/submitters/register" && r.Method == http.MethodPost:
+		return true
+	case r.URL.Path == "/api/v1/submitters/heartbeat" && r.Method == http.MethodPost:
+		return true
 	case strings.HasPrefix(r.URL.Path, "/api/v1/runs/") && r.Method == http.MethodPost:
 		if strings.HasSuffix(r.URL.Path, "/start") || strings.HasSuffix(r.URL.Path, "/finish") {
+			return true
+		}
+	case strings.HasPrefix(r.URL.Path, "/api/v1/flags/") && r.Method == http.MethodPost:
+		if strings.HasSuffix(r.URL.Path, "/submit/start") || strings.HasSuffix(r.URL.Path, "/submit/finish") {
 			return true
 		}
 	}

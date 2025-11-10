@@ -14,7 +14,6 @@ import (
 	"awdinfra/internal/queue"
 	"awdinfra/internal/queue/noop"
 	redisbroker "awdinfra/internal/queue/redis"
-	"awdinfra/internal/storage/postgres"
 	"awdinfra/internal/submitter"
 )
 
@@ -25,20 +24,13 @@ func main() {
 	}
 
 	logger := logging.NewLogger(cfg.LogLevel)
-	repo, err := postgres.New(postgres.Config{
-		DSN:             cfg.Postgres.DSN,
-		MaxIdleConns:    cfg.Postgres.MaxIdleConns,
-		MaxOpenConns:    cfg.Postgres.MaxOpenConns,
-		ConnMaxLifetime: cfg.Postgres.ConnMaxLifetime,
-		ArtifactDir:     cfg.Postgres.ArtifactDir,
-	})
+	broker := createBroker(cfg, logger)
+	cpClient, err := submitter.NewControlPlaneClient(cfg, logger)
 	if err != nil {
-		logger.Error("failed to connect postgres", slog.Any("err", err))
+		logger.Error("failed to create control plane client", slog.Any("err", err))
 		os.Exit(1)
 	}
-	defer repo.Close()
-	broker := createBroker(cfg, logger)
-	service := submitter.New(cfg, logger, repo, broker)
+	service := submitter.New(cfg, logger, broker, cpClient, cfg.FlagSubmitter.ID)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

@@ -3,7 +3,7 @@ import type { FlagRecord } from "@/types";
 
 const base = "/api/v1/flags";
 
-export interface BulkFlagCancelResponse {
+export interface BulkFlagActionResponse {
   results: Array<{
     flagId?: string;
     status?: string;
@@ -49,13 +49,23 @@ export async function cancelFlag(flagId: string, reason?: string): Promise<void>
   await api.post(`${base}/${flagId}/cancel`, payload);
 }
 
-export async function cancelFlags(flagIds: string[], reason?: string): Promise<BulkFlagCancelResponse> {
+export async function cancelFlags(flagIds: string[], reason?: string): Promise<BulkFlagActionResponse> {
   const payload: { flagIds: string[]; reason?: string } = { flagIds };
   if (reason) {
     payload.reason = reason;
   }
   return fallback(
-    api.post<BulkFlagCancelResponse>(`${base}/cancel`, payload).then((res) => ({
+    api.post<BulkFlagActionResponse>(`${base}/cancel`, payload).then((res) => ({
+      results: res.data.results ?? []
+    })),
+    { results: [] }
+  );
+}
+
+export async function retryFlags(flagIds: string[]): Promise<BulkFlagActionResponse> {
+  const payload = { flagIds };
+  return fallback(
+    api.post<BulkFlagActionResponse>(`${base}/retry`, payload).then((res) => ({
       results: res.data.results ?? []
     })),
     { results: [] }

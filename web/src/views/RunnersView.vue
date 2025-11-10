@@ -46,6 +46,47 @@
       </article>
     </div>
   </section>
+
+  <section class="panel">
+    <header>
+      <div>
+        <h2>Flag Submitters</h2>
+        <p class="hint">Submitter instances reporting throughput and latency.</p>
+      </div>
+      <button class="refresh" @click="runnerStore.load">Refresh</button>
+    </header>
+    <div class="cards submitter-cards" v-if="runnerStore.submitters.length">
+      <article v-for="submitter in runnerStore.submitters" :key="submitter.id" class="card submitter-card">
+        <div class="header">
+          <h3>{{ submitter.id }}</h3>
+          <span class="status" :data-status="submitter.status">{{ submitter.status }}</span>
+        </div>
+        <div class="meta">
+          <span>Type: {{ submitter.type || "n/a" }}</span>
+          <span>Concurrency: {{ submitter.concurrency }}</span>
+          <span>In-flight: {{ submitter.inFlight }}</span>
+          <span>Throughput: {{ formatThroughput(submitter.recentThroughput) }}</span>
+          <span>Latency: {{ formatLatency(submitter.avgLatencyMs) }}</span>
+          <span>
+            Pressure:
+            <span class="pressure-chip" :data-level="pressureLevel(submitter.pressure)">
+              {{ formatPressure(submitter.pressure) }}
+            </span>
+          </span>
+          <span>Last heartbeat: {{ submitter.lastHeartbeat || "-" }}</span>
+        </div>
+        <button
+          v-if="submitter.status === 'offline'"
+          class="danger"
+          type="button"
+          @click="handleSubmitterDelete(submitter.id)"
+        >
+          Delete
+        </button>
+      </article>
+    </div>
+    <p v-else class="empty-state">No submitters registered.</p>
+  </section>
 </template>
 
 <script setup lang="ts">
@@ -70,6 +111,36 @@ function brokerBadgeClass(status?: string) {
 async function handleDelete(id: string) {
   if (!confirm("Remove this offline runner?")) return;
   await runnerStore.remove(id);
+}
+
+async function handleSubmitterDelete(id: string) {
+  if (!confirm("Remove this offline submitter?")) return;
+  await runnerStore.removeSubmitter(id);
+}
+
+function formatThroughput(value?: number) {
+  if (!value || value <= 0) return "0 /s";
+  return `${value.toFixed(2)} /s`;
+}
+
+function formatLatency(ms?: number) {
+  if (!ms || ms <= 0) return "-";
+  if (ms >= 1000) {
+    return `${(ms / 1000).toFixed(2)} s`;
+  }
+  return `${ms.toFixed(0)} ms`;
+}
+
+function formatPressure(value?: number) {
+  if (value === undefined || Number.isNaN(value)) return "0.00";
+  return value.toFixed(2);
+}
+
+function pressureLevel(value?: number) {
+  if (value === undefined) return "low";
+  if (value >= 1.0) return "high";
+  if (value >= 0.8) return "medium";
+  return "low";
 }
 
 onMounted(() => {
@@ -122,6 +193,11 @@ header {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
+}
+
+.empty-state {
+  color: #94a3b8;
+  margin: 0;
 }
 
 .header {
@@ -202,6 +278,33 @@ header {
   padding: 0.2rem 0.6rem;
   font-size: 0.75rem;
   color: #facc15;
+}
+
+.submitter-card .meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+
+.pressure-chip {
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  font-weight: 600;
+  color: #e2e8f0;
+}
+
+.pressure-chip[data-level="low"] {
+  background: rgba(16, 185, 129, 0.2);
+  color: #34d399;
+}
+
+.pressure-chip[data-level="medium"] {
+  background: rgba(245, 158, 11, 0.2);
+  color: #fbbf24;
+}
+
+.pressure-chip[data-level="high"] {
+  background: rgba(248, 113, 113, 0.2);
+  color: #f87171;
 }
 
 .broker-badge {

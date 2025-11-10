@@ -148,6 +148,23 @@ export interface RunnerInfo {
   config?: Record<string, string>;
 }
 
+export interface SubmitterInfo {
+  id: string;
+  type?: string;
+  hostname?: string;
+  status: "online" | "offline" | "degraded" | string;
+  concurrency: number;
+  inFlight: number;
+  pending: number;
+  recentThroughput: number;
+  avgLatencyMs: number;
+  pressure: number;
+  lastHeartbeat?: string;
+  registeredAt?: string;
+  labels?: Record<string, string>;
+  config?: Record<string, string>;
+}
+
 export interface LogEntry {
   id: string;
   timestamp: string;

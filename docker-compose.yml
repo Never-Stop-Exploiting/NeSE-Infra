@@ -61,6 +61,20 @@ services:
     env_file:
       - .env.example
     environment:
+      SUBMITTER_ID: local-python
+      FLAG_SUBMITTER_GROUP: python
+      FLAG_SUBMITTER_CONSUMER: python
+    depends_on:
+      - redis
+
+  flag-submitter-python2:
+    build:
+      context: .
+      dockerfile: docker/flag-submitter-python.Dockerfile
+    env_file:
+      - .env.example
+    environment:
+      SUBMITTER_ID: local-python2
       FLAG_SUBMITTER_GROUP: python
       FLAG_SUBMITTER_CONSUMER: python
     depends_on:
