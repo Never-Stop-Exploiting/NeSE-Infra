@@ -22,6 +22,7 @@ type Config struct {
 	RunQueue          QueueConfig
 	FlagQueue         QueueConfig
 	RunnerSecret      string
+	SubmitterSecret   string
 	AllowedRunnerTags []string
 }
 
@@ -78,6 +79,9 @@ type FlagSubmitterConfig struct {
 	Endpoint          string
 	RequestTimeout    time.Duration
 	Concurrency       int
+	ID                string
+	ControlPlaneURL   string
+	HeartbeatInterval time.Duration
 }
 
 type QueueConfig struct {
@@ -100,11 +104,15 @@ func Load() (Config, error) {
 		RunQueue:          loadQueue("RUN", "exp:pending", 30*time.Second, 5*time.Second),
 		FlagQueue:         loadQueue("FLAG", "flag:pending", 30*time.Second, 10*time.Second),
 		RunnerSecret:      getenv("RUNNER_SECRET", "dev-runner-secret"),
+		SubmitterSecret:   getenv("SUBMITTER_SECRET", "dev-submitter-secret"),
 		AllowedRunnerTags: splitAndTrim(getenv("ALLOWED_RUNNER_TAGS", "")),
 	}
 
 	if cfg.RunnerSecret == "" {
 		return cfg, fmt.Errorf("RUNNER_SECRET cannot be empty")
+	}
+	if cfg.SubmitterSecret == "" {
+		return cfg, fmt.Errorf("SUBMITTER_SECRET cannot be empty")
 	}
 
 	return cfg, nil
@@ -179,6 +187,9 @@ func loadFlagSubmitter() FlagSubmitterConfig {
 		Endpoint:          getenv("FLAG_SUBMIT_URL", "http://flagserver:5000/upload_flag"),
 		RequestTimeout:    getenvDuration("FLAG_SUBMIT_TIMEOUT", time.Second*5),
 		Concurrency:       getenvInt("FLAG_SUBMIT_CONCURRENCY", 1),
+		ID:                getenv("SUBMITTER_ID", ""),
+		ControlPlaneURL:   getenv("SUBMITTER_CONTROL_PLANE_URL", getenv("CONTROL_PLANE_URL", "")),
+		HeartbeatInterval: getenvDuration("SUBMITTER_HEARTBEAT_INTERVAL", time.Second*10),
 	}
 }
 

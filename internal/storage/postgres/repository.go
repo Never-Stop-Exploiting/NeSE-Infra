@@ -270,6 +270,23 @@ func ensureSchema(ctx context.Context, db *sql.DB) error {
 		`ALTER TABLE runners ADD COLUMN IF NOT EXISTS active_jobs INTEGER;`,
 		`ALTER TABLE runners ADD COLUMN IF NOT EXISTS config JSONB;`,
 		`ALTER TABLE runners ADD COLUMN IF NOT EXISTS last_ip TEXT;`,
+		`CREATE TABLE IF NOT EXISTS submitters (
+			id TEXT PRIMARY KEY,
+			type TEXT,
+			hostname TEXT,
+			status TEXT,
+			concurrency INTEGER NOT NULL DEFAULT 1,
+			in_flight INTEGER NOT NULL DEFAULT 0,
+			pending INTEGER NOT NULL DEFAULT 0,
+			recent_throughput DOUBLE PRECISION NOT NULL DEFAULT 0,
+			avg_latency_ms DOUBLE PRECISION NOT NULL DEFAULT 0,
+			pressure DOUBLE PRECISION NOT NULL DEFAULT 0,
+			labels JSONB,
+			config JSONB,
+			last_heartbeat TIMESTAMPTZ,
+			registered_at TIMESTAMPTZ
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_submitters_status ON submitters(status);`,
 	}
 
 	for _, stmt := range statements {
@@ -2760,6 +2777,198 @@ func (r *Repository) DeleteRunner(ctx context.Context, id string) error {
 	}
 	if rows, _ := res.RowsAffected(); rows == 0 {
 		return errors.New("runner not found")
+	}
+	return nil
+}
+
+func (r *Repository) ListSubmitters(ctx context.Context) ([]domain.Submitter, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, type, hostname, status, concurrency, in_flight, pending, recent_throughput,
+		       avg_latency_ms, pressure, labels, config, last_heartbeat, registered_at
+		FROM submitters
+		ORDER BY hostname ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var submitters []domain.Submitter
+	for rows.Next() {
+		var item domain.Submitter
+		var typ, hostname, status sql.NullString
+		var labelsData, configData []byte
+		var lastHeartbeat sql.NullTime
+		if err := rows.Scan(
+			&item.ID,
+			&typ,
+			&hostname,
+			&status,
+			&item.Concurrency,
+			&item.InFlight,
+			&item.Pending,
+			&item.RecentThroughput,
+			&item.AverageLatencyMS,
+			&item.Pressure,
+			&labelsData,
+			&configData,
+			&lastHeartbeat,
+			&item.RegisteredAt,
+		); err != nil {
+			return nil, err
+		}
+		if typ.Valid {
+			item.Type = typ.String
+		}
+		if hostname.Valid {
+			item.Hostname = hostname.String
+		}
+		if status.Valid {
+			item.Status = status.String
+		}
+		if lastHeartbeat.Valid {
+			item.LastHeartbeat = lastHeartbeat.Time
+		}
+		if len(labelsData) > 0 {
+			data, err := unmarshalStringMap(labelsData)
+			if err != nil {
+				return nil, err
+			}
+			item.Labels = data
+		}
+		if len(configData) > 0 {
+			data, err := unmarshalStringMap(configData)
+			if err != nil {
+				return nil, err
+			}
+			item.Config = data
+		}
+		submitters = append(submitters, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return submitters, nil
+}
+
+func (r *Repository) GetSubmitter(ctx context.Context, id string) (domain.Submitter, error) {
+	var item domain.Submitter
+	var typ, hostname, status sql.NullString
+	var labelsData, configData []byte
+	var lastHeartbeat sql.NullTime
+	err := r.db.QueryRowContext(ctx, `
+		SELECT id, type, hostname, status, concurrency, in_flight, pending, recent_throughput,
+		       avg_latency_ms, pressure, labels, config, last_heartbeat, registered_at
+		FROM submitters
+		WHERE id = $1`, id,
+	).Scan(
+		&item.ID,
+		&typ,
+		&hostname,
+		&status,
+		&item.Concurrency,
+		&item.InFlight,
+		&item.Pending,
+		&item.RecentThroughput,
+		&item.AverageLatencyMS,
+		&item.Pressure,
+		&labelsData,
+		&configData,
+		&lastHeartbeat,
+		&item.RegisteredAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.Submitter{}, errors.New("submitter not found")
+	}
+	if err != nil {
+		return domain.Submitter{}, err
+	}
+	if typ.Valid {
+		item.Type = typ.String
+	}
+	if hostname.Valid {
+		item.Hostname = hostname.String
+	}
+	if status.Valid {
+		item.Status = status.String
+	}
+	if lastHeartbeat.Valid {
+		item.LastHeartbeat = lastHeartbeat.Time
+	}
+	if len(labelsData) > 0 {
+		data, err := unmarshalStringMap(labelsData)
+		if err != nil {
+			return domain.Submitter{}, err
+		}
+		item.Labels = data
+	}
+	if len(configData) > 0 {
+		data, err := unmarshalStringMap(configData)
+		if err != nil {
+			return domain.Submitter{}, err
+		}
+		item.Config = data
+	}
+	return item, nil
+}
+
+func (r *Repository) UpsertSubmitter(ctx context.Context, submitter domain.Submitter) error {
+	if strings.TrimSpace(submitter.ID) == "" {
+		return errors.New("submitter id required")
+	}
+	labels, err := marshalJSON(submitter.Labels)
+	if err != nil {
+		return err
+	}
+	configData, err := marshalJSON(submitter.Config)
+	if err != nil {
+		return err
+	}
+	_, err = r.db.ExecContext(ctx, `
+		INSERT INTO submitters (id, type, hostname, status, concurrency, in_flight, pending, recent_throughput,
+		                        avg_latency_ms, pressure, labels, config, last_heartbeat, registered_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+		ON CONFLICT (id) DO UPDATE
+		SET type = EXCLUDED.type,
+		    hostname = EXCLUDED.hostname,
+		    status = EXCLUDED.status,
+		    concurrency = EXCLUDED.concurrency,
+		    in_flight = EXCLUDED.in_flight,
+		    pending = EXCLUDED.pending,
+		    recent_throughput = EXCLUDED.recent_throughput,
+		    avg_latency_ms = EXCLUDED.avg_latency_ms,
+		    pressure = EXCLUDED.pressure,
+		    labels = EXCLUDED.labels,
+		    config = EXCLUDED.config,
+		    last_heartbeat = EXCLUDED.last_heartbeat,
+		    registered_at = EXCLUDED.registered_at`,
+		submitter.ID,
+		nullString(submitter.Type),
+		nullString(submitter.Hostname),
+		nullString(submitter.Status),
+		submitter.Concurrency,
+		submitter.InFlight,
+		submitter.Pending,
+		submitter.RecentThroughput,
+		submitter.AverageLatencyMS,
+		submitter.Pressure,
+		labels,
+		configData,
+		nullTime(submitter.LastHeartbeat),
+		submitter.RegisteredAt,
+	)
+	return err
+}
+
+func (r *Repository) DeleteSubmitter(ctx context.Context, id string) error {
+	if strings.TrimSpace(id) == "" {
+		return errors.New("submitter id required")
+	}
+	res, err := r.db.ExecContext(ctx, `DELETE FROM submitters WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	if rows, _ := res.RowsAffected(); rows == 0 {
+		return errors.New("submitter not found")
 	}
 	return nil
 }

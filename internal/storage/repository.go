@@ -72,4 +72,8 @@ type Repository interface {
 	UpsertRunner(ctx context.Context, runner domain.Runner) error
 	GetRunner(ctx context.Context, id string) (domain.Runner, error)
 	DeleteRunner(ctx context.Context, id string) error
+	ListSubmitters(ctx context.Context) ([]domain.Submitter, error)
+	UpsertSubmitter(ctx context.Context, submitter domain.Submitter) error
+	GetSubmitter(ctx context.Context, id string) (domain.Submitter, error)
+	DeleteSubmitter(ctx context.Context, id string) error
 }

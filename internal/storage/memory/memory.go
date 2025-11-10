@@ -44,6 +44,7 @@ type Repository struct {
 	exploitFiles map[string]map[string]memoryFile
 	logs         []domain.LogEntry
 	runners      map[string]domain.Runner
+	submitters   map[string]domain.Submitter
 	scheduler    domain.SchedulerSettings
 	overrides    map[string]map[string]domain.TargetExploitOverride
 }
@@ -60,6 +61,7 @@ func New() *Repository {
 		flagAttempts: make(map[string][]domain.SubmissionAttempt),
 		exploitFiles: make(map[string]map[string]memoryFile),
 		runners:      make(map[string]domain.Runner),
+		submitters:   make(map[string]domain.Submitter),
 		scheduler: domain.SchedulerSettings{
 			Strategy:         domain.SchedulerStrategyInterval,
 			RoundInterval:    time.Minute * 5,
@@ -1264,6 +1266,72 @@ func (r *Repository) DeleteRunner(ctx context.Context, id string) error {
 		return errors.New("runner not found")
 	}
 	delete(r.runners, id)
+	return ctx.Err()
+}
+
+func (r *Repository) ListSubmitters(ctx context.Context) ([]domain.Submitter, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	items := make([]domain.Submitter, 0, len(r.submitters))
+	for _, submitter := range r.submitters {
+		items = append(items, submitter)
+	}
+	return items, ctx.Err()
+}
+
+func (r *Repository) GetSubmitter(ctx context.Context, id string) (domain.Submitter, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	submitter, ok := r.submitters[id]
+	if !ok {
+		return domain.Submitter{}, errors.New("submitter not found")
+	}
+	return submitter, ctx.Err()
+}
+
+func (r *Repository) UpsertSubmitter(ctx context.Context, submitter domain.Submitter) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if submitter.ID == "" {
+		submitter.ID = newID("submitter")
+	}
+	current := r.submitters[submitter.ID]
+	if submitter.RegisteredAt.IsZero() {
+		if !current.RegisteredAt.IsZero() {
+			submitter.RegisteredAt = current.RegisteredAt
+		} else {
+			submitter.RegisteredAt = time.Now().UTC()
+		}
+	}
+	if submitter.LastHeartbeat.IsZero() {
+		submitter.LastHeartbeat = current.LastHeartbeat
+	}
+	if submitter.Type == "" {
+		submitter.Type = current.Type
+	}
+	if submitter.Hostname == "" {
+		submitter.Hostname = current.Hostname
+	}
+	if submitter.Labels == nil && current.Labels != nil {
+		submitter.Labels = current.Labels
+	}
+	if submitter.Config == nil && current.Config != nil {
+		submitter.Config = current.Config
+	}
+	if submitter.Concurrency == 0 && current.Concurrency > 0 {
+		submitter.Concurrency = current.Concurrency
+	}
+	r.submitters[submitter.ID] = submitter
+	return ctx.Err()
+}
+
+func (r *Repository) DeleteSubmitter(ctx context.Context, id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.submitters[id]; !ok {
+		return errors.New("submitter not found")
+	}
+	delete(r.submitters, id)
 	return ctx.Err()
 }
 

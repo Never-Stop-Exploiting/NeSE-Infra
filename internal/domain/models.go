@@ -77,6 +77,24 @@ type Runner struct {
 	RegisteredAt  time.Time
 }
 
+// Submitter represents a flag submitter worker reporting to the control plane.
+type Submitter struct {
+	ID               string
+	Type             string
+	Hostname         string
+	Status           string
+	Concurrency      int
+	InFlight         int
+	Pending          int
+	RecentThroughput float64
+	AverageLatencyMS float64
+	Pressure         float64
+	Labels           map[string]string
+	Config           map[string]string
+	LastHeartbeat    time.Time
+	RegisteredAt     time.Time
+}
+
 // Run links an exploit revision to a target execution attempt.
 type Run struct {
 	ID              string
