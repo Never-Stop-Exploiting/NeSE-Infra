@@ -87,12 +87,18 @@
       v-else
       :key="group.challengeId"
       class="panel group"
+      :class="{ collapsed: !isGroupExpanded(group.challengeId) }"
     >
-      <header>
-        <h2>{{ group.challengeName }}</h2>
-        <p>{{ group.targets.length }} targets</p>
+      <header class="group-header">
+        <div>
+          <h2>{{ group.challengeName }}</h2>
+          <p>{{ group.targets.length }} targets</p>
+        </div>
+        <button class="ghost" type="button" @click="toggleGroup(group.challengeId)">
+          {{ isGroupExpanded(group.challengeId) ? "Collapse" : "Expand" }}
+        </button>
       </header>
-      <div class="target-list" v-if="group.targets.length">
+      <div class="target-list" v-if="group.targets.length && isGroupExpanded(group.challengeId)">
         <div
           v-for="item in group.targets"
           :key="item.target.id"
@@ -202,6 +208,7 @@ watch(
 );
 
 const expanded = ref<Record<string, boolean>>({});
+const expandedGroups = ref<Record<string, boolean>>({});
 
 function isExpanded(id: string) {
   return !!expanded.value[id];
@@ -209,6 +216,28 @@ function isExpanded(id: string) {
 
 function toggleExpanded(id: string) {
   expanded.value = { ...expanded.value, [id]: !expanded.value[id] };
+}
+
+watch(
+  groupedTargets,
+  (groups) => {
+    const next: Record<string, boolean> = { ...expandedGroups.value };
+    groups.forEach((group) => {
+      if (next[group.challengeId] === undefined) {
+        next[group.challengeId] = true;
+      }
+    });
+    expandedGroups.value = next;
+  },
+  { immediate: true }
+);
+
+function isGroupExpanded(id: string) {
+  return expandedGroups.value[id] ?? true;
+}
+
+function toggleGroup(id: string) {
+  expandedGroups.value = { ...expandedGroups.value, [id]: !isGroupExpanded(id) };
 }
 
 function statusPreview(indicators: string) {
@@ -445,6 +474,19 @@ button.secondary {
   color: #e2e8f0;
 }
 
+button.ghost {
+  background: transparent;
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  color: #94a3b8;
+  border-radius: 8px;
+  padding: 0.4rem 0.9rem;
+}
+
+button.ghost:hover:not(:disabled) {
+  color: #e2e8f0;
+  border-color: rgba(148, 163, 184, 0.7);
+}
+
 .meta {
   font-size: 0.8rem;
   color: rgba(226, 232, 240, 0.75);
@@ -464,6 +506,17 @@ button.secondary {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
+}
+
+.group-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+}
+
+.group-header h2 {
+  margin: 0;
 }
 
 .target-card {
