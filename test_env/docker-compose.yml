@@ -51,6 +51,7 @@ services:
     environment:
       RUNNER_ID: pwntools-exp
       RUNNER_MAX_PARALLEL: 30
+      RUNNER_TYPE: pwntools
       RUNNER_TAGS: pwntools
 
   flag-submitter-python:

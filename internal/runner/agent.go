@@ -491,7 +491,7 @@ func (a *Agent) ensureRunScript(workspace string, payload jobs.JobPayload) error
 	runPath := filepath.Join(workspace, "run.sh")
 	if _, err := os.Stat(runPath); err == nil {
 		return nil
-	} else if err != nil && !os.IsNotExist(err) {
+	} else if !os.IsNotExist(err) {
 		return err
 	}
 	scriptContent := payload.RunScript
