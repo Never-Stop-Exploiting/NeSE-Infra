@@ -17,30 +17,30 @@ import (
 	"awdinfra/internal/config"
 )
 
-// ControlPlaneClient handles submitter interactions with the control plane REST API.
-type ControlPlaneClient struct {
+// ControlPanelClient handles submitter interactions with the control panel REST API.
+type ControlPanelClient struct {
 	baseURL *url.URL
 	secret  string
 	client  *http.Client
 	log     *slog.Logger
 }
 
-// NewControlPlaneClient initializes a client using submitter configuration.
-func NewControlPlaneClient(cfg config.Config, log *slog.Logger) (*ControlPlaneClient, error) {
-	baseURL := cfg.FlagSubmitter.ControlPlaneURL
+// NewControlPanelClient initializes a client using submitter configuration.
+func NewControlPanelClient(cfg config.Config, log *slog.Logger) (*ControlPanelClient, error) {
+	baseURL := cfg.FlagSubmitter.ControlPanelURL
 	if strings.TrimSpace(baseURL) == "" {
-		return nil, fmt.Errorf("control plane url is empty")
+		return nil, fmt.Errorf("control panel url is empty")
 	}
 	parsed, err := url.Parse(baseURL)
 	if err != nil {
-		return nil, fmt.Errorf("invalid control plane url: %w", err)
+		return nil, fmt.Errorf("invalid control panel url: %w", err)
 	}
 	secret := cfg.SubmitterSecret
 	if strings.TrimSpace(secret) == "" {
 		return nil, fmt.Errorf("submitter secret is empty")
 	}
 	httpClient := &http.Client{Timeout: time.Second * 10}
-	return &ControlPlaneClient{
+	return &ControlPanelClient{
 		baseURL: parsed,
 		secret:  secret,
 		client:  httpClient,
@@ -115,7 +115,7 @@ type submitFinishResponse struct {
 	Retry bool `json:"retry"`
 }
 
-// APIError captures control plane HTTP errors.
+// APIError captures control panel HTTP errors.
 type APIError struct {
 	StatusCode int
 	Message    string
@@ -126,23 +126,23 @@ func (e *APIError) Error() string {
 		return ""
 	}
 	if strings.TrimSpace(e.Message) == "" {
-		return fmt.Sprintf("control plane error (%d)", e.StatusCode)
+		return fmt.Sprintf("control panel error (%d)", e.StatusCode)
 	}
-	return fmt.Sprintf("control plane error (%d): %s", e.StatusCode, e.Message)
+	return fmt.Sprintf("control panel error (%d): %s", e.StatusCode, e.Message)
 }
 
-func (c *ControlPlaneClient) Register(ctx context.Context, req registerSubmitterRequest) error {
+func (c *ControlPanelClient) Register(ctx context.Context, req registerSubmitterRequest) error {
 	req.Secret = c.secret
 	req.Status = "online"
 	return c.post(ctx, "/api/v1/submitters/register", req, nil)
 }
 
-func (c *ControlPlaneClient) Heartbeat(ctx context.Context, req heartbeatSubmitterRequest) error {
+func (c *ControlPanelClient) Heartbeat(ctx context.Context, req heartbeatSubmitterRequest) error {
 	req.Secret = c.secret
 	return c.post(ctx, "/api/v1/submitters/heartbeat", req, nil)
 }
 
-func (c *ControlPlaneClient) SubmitStart(ctx context.Context, flagID string, submitterID string) (submitFlagInfo, error) {
+func (c *ControlPanelClient) SubmitStart(ctx context.Context, flagID string, submitterID string) (submitFlagInfo, error) {
 	var resp submitStartResponse
 	req := submitStartRequest{
 		Secret:      c.secret,
@@ -152,16 +152,16 @@ func (c *ControlPlaneClient) SubmitStart(ctx context.Context, flagID string, sub
 	return resp.Flag, err
 }
 
-func (c *ControlPlaneClient) SubmitFinish(ctx context.Context, flagID string, payload submitFinishRequest) (submitFinishResponse, error) {
+func (c *ControlPanelClient) SubmitFinish(ctx context.Context, flagID string, payload submitFinishRequest) (submitFinishResponse, error) {
 	payload.Secret = c.secret
 	var resp submitFinishResponse
 	err := c.post(ctx, fmt.Sprintf("/api/v1/flags/%s/submit/finish", strings.TrimSpace(flagID)), payload, &resp)
 	return resp, err
 }
 
-func (c *ControlPlaneClient) post(ctx context.Context, endpoint string, payload any, dest any) error {
+func (c *ControlPanelClient) post(ctx context.Context, endpoint string, payload any, dest any) error {
 	if c.baseURL == nil {
-		return fmt.Errorf("control plane client not configured")
+		return fmt.Errorf("control panel client not configured")
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {

@@ -61,7 +61,7 @@ type ExploitRevision struct {
 	CreatedAt    time.Time
 }
 
-// Runner represents an execution worker registered to the control plane.
+// Runner represents an execution worker registered to the control panel.
 type Runner struct {
 	ID            string
 	Type          string
@@ -77,7 +77,7 @@ type Runner struct {
 	RegisteredAt  time.Time
 }
 
-// Submitter represents a flag submitter worker reporting to the control plane.
+// Submitter represents a flag submitter worker reporting to the control panel.
 type Submitter struct {
 	ID                string
 	Type              string

@@ -8,10 +8,10 @@ AwD Infra 以 Go + Vue3 实现一套模块化的 AwD 平台：控制面负责题
 
 ## 当前能力
 
-- **Control Plane / REST API (`cmd/control-plane`)**：提供 `/api/v1` 端点，实现 Challenge/Target/Exploit CRUD、批量导入目标 (`/targets/import`)、artifact 文件/`run.sh` 管理、Run/Flag/日志查询、Run start/finish/cancel Hook、Flag 重试、Runner 注册与心跳、Scheduler 运行参数热更新以及 Target × Exploit 覆盖矩阵维护；捕获的 flag 会落库并写入 Flag 队列。
+- **Control Panel / REST API (`cmd/control-panel`)**：提供 `/api/v1` 端点，实现 Challenge/Target/Exploit CRUD、批量导入目标 (`/targets/import`)、artifact 文件/`run.sh` 管理、Run/Flag/日志查询、Run start/finish/cancel Hook、Flag 重试、Runner 注册与心跳、Scheduler 运行参数热更新以及 Target × Exploit 覆盖矩阵维护；捕获的 flag 会落库并写入 Flag 队列。
 - **Scheduler (`cmd/scheduler`)**：按 `SchedulerSettings` 设置的策略（轮询批次或按 Target×Exploit 连续运行）生成 `RunnableWork`，结合 Target 并发限制、Exploit Runner Tags、Target-Exploit Override 计算可执行组合，打包 artifact（内联或 URI）后以 `jobs.JobPayload` 写入 Redis Streams（消费组 + 可见性超时），并在缺乏匹配 Runner Tags 时跳过任务。
 - **Runner (`cmd/runner`)**：注册到控制面并定期心跳，使用 `RUN_QUEUE_NAME` 对应的 Redis Streams 消费组阻塞拉取任务；自动下载/解压 ZIP artifact 到 `/env/tmp/<run-id>`，若缺少 `run.sh` 会用 payload 中的 `runScript/entrypoint` 补齐；通过 `chroot` + `./run.sh <ip> <port>` 执行，收集 stdout/stderr，优先从指定 flag 文件读取 flag，失败时回退到正则；Run 状态会在 start/finish/cancel、心跳、取消检测时同步到控制面，同时把 flag 推送到 flag 队列。
-- **Flag Submitter (`cmd/flag-submitter`)**：消费 `FLAG_QUEUE_NAME`，解析 `submitter.QueueMessage`，调用内置 HTTP 插件（可插拔接口在 `docs/flag-submitters.md`）执行提交；提交结果通过 Control Plane 的 `/flags/{id}/submit/start|finish` API 汇报，控制面统一记录 `flags`/`submission_attempts`/日志，失败场景按 backoff 指示 `Nack` 重排队，可多实例/多语言并行部署。
+- **Flag Submitter (`cmd/flag-submitter`)**：消费 `FLAG_QUEUE_NAME`，解析 `submitter.QueueMessage`，调用内置 HTTP 插件（可插拔接口在 `docs/flag-submitters.md`）执行提交；提交结果通过 Control Panel 的 `/flags/{id}/submit/start|finish` API 汇报，控制面统一记录 `flags`/`submission_attempts`/日志，失败场景按 backoff 指示 `Nack` 重排队，可多实例/多语言并行部署。
 - **持久化 (`internal/storage/postgres`)**：初始化完整 Postgres schema（Challenges/Targets/Exploits/Runs/Flags/Runners/Logs/Overrides 等），以本地文件夹存放 Exploit artifacts 与 `run.sh`，支持列出/上传/删除/打包，并保证 ZIP 不可逃逸工作目录。
 - **Web UI (`web/`)**：Vue3 + Vite + Pinia + Axios，路由覆盖 Dashboard、Targets、Exploits、Runs、Flags、Logs、Runners、Scheduler 视图；开发阶段通过 `pnpm --filter ./web dev`（5173）并代理 `/api` 到控制面，生产由 `docker/web.Dockerfile` + Nginx 托管。
 
@@ -24,7 +24,7 @@ AwD Infra 以 Go + Vue3 实现一套模块化的 AwD 平台：控制面负责题
                       └────────┬─────────┘
                                │ REST /api + future WS
                        ┌───────▼────────┐
-        Postgres ◄────►│  Control Plane │◄────► Redis (Queues / Cache)
+        Postgres ◄────►│  Control Panel │◄────► Redis (Queues / Cache)
                        │  (REST + Biz)  │
                        └───┬─────────┬──┘
                            │         │
@@ -62,7 +62,7 @@ AwD Infra 以 Go + Vue3 实现一套模块化的 AwD 平台：控制面负责题
 cmd/                    # 控制面、调度器、Runner、Flag Submitter 入口
 internal/
   config/               # 统一环境变量解析
-  controlplane/         # HTTP server + handler
+  controlpanel/         # HTTP server + handler
   scheduler/            # 调度主循环
   runner/               # Runner agent、控制面客户端
   submitter/            # flag submitter、插件、消息定义
@@ -103,10 +103,10 @@ docker/                 # 服务 Dockerfile + web Nginx
 
   ```bash
   go mod download
-  go run ./cmd/control-plane &
+  go run ./cmd/control-panel &
   go run ./cmd/scheduler &
   go run ./cmd/flag-submitter &
-  CONTROL_PLANE_URL=http://localhost:8080 go run ./cmd/runner &
+  CONTROL_PANEL_URL=http://localhost:8080 go run ./cmd/runner &
   ```
 
 - **运行 Web 控制台**：
@@ -133,22 +133,22 @@ docker/                 # 服务 Dockerfile + web Nginx
 | `RUN_QUEUE_NAME` / `FLAG_QUEUE_NAME` | 队列名称与可见性、重试间隔 | `exp:pending` / `flag:pending`（在 `internal/config` 中有默认值） |
 | `SCHEDULER_POLL_INTERVAL` / `SCHEDULER_MAX_BATCH` | 调度轮询间隔与单轮派发上限 | `5s` / `50` |
 | `RUNNER_SECRET` | Runner 调用 `/runs/*`、`/runners/*` 的共享密钥 | `dev-runner-secret` |
-| `CONTROL_PLANE_TOKEN` | 访问 `/api/v1/**` 运维接口时需要携带的 `Authorization: Bearer` Token | _无默认值，必须显式设置_ |
-| `CONTROL_PLANE_URL` | Runner 注册/下载 artifact 时访问的控制面地址 | `http://control-plane:8080` |
+| `CONTROL_PANEL_TOKEN` | 访问 `/api/v1/**` 运维接口时需要携带的 `Authorization: Bearer` Token | _无默认值，必须显式设置_ |
+| `CONTROL_PANEL_URL` | Runner 注册/下载 artifact 时访问的控制面地址 | `http://control-panel:8080` |
 | `RUNNER_CHROOT_PATH` / `RUNNER_WORKSPACE_ROOT` | Runner chroot 根目录与临时工作区 | `/env` / `/env/tmp` |
 | `RUNNER_FLAG_FILE` / `RUNNER_FLAG_REGEX` | Flag 文件名与匹配正则 | `flag` / `flag\{[a-zA-Z0-9_\-]+\}` |
 | `FLAG_SUBMIT_URL` / `FLAG_SUBMIT_TIMEOUT` | 默认 HTTP 提交端点与超时 | `http://flagserver:5000/upload_flag` / `10s` |
 | `SUBMITTER_SECRET` | Submitter 注册/心跳/flag 回报共用密钥 | `dev-submitter-secret` |
-| `SUBMITTER_CONTROL_PLANE_URL` | Submitter 专用 Control Plane 地址，默认为 `CONTROL_PLANE_URL` | `http://control-plane:8080` |
+| `SUBMITTER_CONTROL_PANEL_URL` | Submitter 专用 Control Panel 地址，默认为 `CONTROL_PANEL_URL` | `http://control-panel:8080` |
 
 更多变量可参考 `internal/config/config.go` 中的默认值解释。
 
 ## 调度与执行流程
 
-1. Operator 通过 Web UI 或直接调用 Control Plane API 维护 Challenge、Target、Exploit，并可批量导入目标或上传/下载 artifact。
+1. Operator 通过 Web UI 或直接调用 Control Panel API 维护 Challenge、Target、Exploit，并可批量导入目标或上传/下载 artifact。
 2. 调度器读取可运行的 RunWorkItem（结合 Target 状态、并发限制、Override、Runner Tags），遵循 `RoundInterval` 和 `MaxDispatchBatch` 将任务编码成 `jobs.JobPayload` 并推送到 Redis Streams。
-3. Runner 按心跳间隔抢占可用 slot，下载 artifact、在 chroot 工作区执行 `run.sh`，并把 stdout/stderr、Flag、错误信息上报到 Control Plane；若检测到 Run 被取消会中止执行。
-4. Runner 将解析出的 Flag 经结构化消息写入 Flag 队列，Control Plane 同步更新日志。
+3. Runner 按心跳间隔抢占可用 slot，下载 artifact、在 chroot 工作区执行 `run.sh`，并把 stdout/stderr、Flag、错误信息上报到 Control Panel；若检测到 Run 被取消会中止执行。
+4. Runner 将解析出的 Flag 经结构化消息写入 Flag 队列，Control Panel 同步更新日志。
 5. Flag Submitter 轮询队列，调用插件提交 flag，记录 `submission_attempts`、更新 Flag 状态并将结果写入日志；未知状态会重试并按 backoff 延迟。
 
 ## Web 控制台
@@ -159,7 +159,7 @@ docker/                 # 服务 Dockerfile + web Nginx
 - Flags 页面展示状态、Run 关联、提交历史，支持一键重试与查看日志。
 - Scheduler 视图列出每个 Target 能匹配的 Exploit 并可针对单个 Target 覆写启停。
 - Logs 与 Runners 视图分别提供结构化日志筛选、Runner 心跳状态监控。
-- 访问 Web UI 时需先在登录页输入 `CONTROL_PLANE_TOKEN`，浏览器会缓存该 Token 并自动为后续请求附加 `Authorization: Bearer` 头。
+- 访问 Web UI 时需先在登录页输入 `CONTROL_PANEL_TOKEN`，浏览器会缓存该 Token 并自动为后续请求附加 `Authorization: Bearer` 头。
 
 ## 测试与质量
 

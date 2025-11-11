@@ -5,7 +5,7 @@ AwD Infra 是 Attack-with-Defence 竞赛的自动化平台，帮助队伍协调�
 
 ```
 ┌──────────────┐     ┌─────────────┐     ┌────────────┐
-│ ControlPlane │◄───►│ Scheduler   │◄───►│ Queue/Broker│
+│ ControlPanel │◄───►│ Scheduler   │◄───►│ Queue/Broker│
 └─────▲────────┘     └────┬────────┘     └─────▲──────┘
       │                    │                      │
       │ REST/WebSocket     │ 任务投递             │Run/Flag/Log
@@ -17,7 +17,7 @@ AwD Infra 是 Attack-with-Defence 竞赛的自动化平台，帮助队伍协调�
 ```
 
 ### 关键组件
-- **Control Plane / API**：统一配置中心，管理挑战、目标、Exploit、Runner、Flag 等元数据；提供 REST API，未来扩展 WebSocket。
+- **Control Panel / API**：统一配置中心，管理挑战、目标、Exploit、Runner、Flag 等元数据；提供 REST API，未来扩展 WebSocket。
 - **Scheduler**：基于「目标 × Exploit」组合生成待执行任务，执行并发控制、排队策略、重试回退；将任务投递到消息队列。
 - **Runner**：在隔离环境（Docker+chroot `/env`）执行 exploit；下载并解压 artifact，调用 `./run.sh <ip> <port>`，收集 stdout/stderr 并解析 flag。
 - **Flag Submitter**：从 Redis 队列获取已捕获的 flag，执行去重、限速和重试策略；当前实现通过 HTTP（默认 `FLAG_SUBMIT_URL`，例如测试 flagserver）提交，记录提交历史和日志。
@@ -37,7 +37,7 @@ AwD Infra 是 Attack-with-Defence 竞赛的自动化平台，帮助队伍协调�
 - `RunWorkItem`：Scheduler 投递给 Runner 的调度任务（包含 Artifact、Flag 解析规则等）。
 
 ## 3. 运行流程
-1. **配置阶段**：Control Plane 维护挑战、目标、Exploit 等信息；可从 UI 导入/创建。
+1. **配置阶段**：Control Panel 维护挑战、目标、Exploit 等信息；可从 UI 导入/创建。
 2. **调度阶段**：Scheduler 定期从仓库查询可运行的目标与启用的 Exploit，依据策略生成 `RunWorkItem` 并投递到 Redis Streams 队列。
 3. **执行阶段**：Runner 作为 Redis Streams consumer group 成员阻塞等待任务，解压 Artifact 至 `/env/tmp/<run-id>`，执行 `./run.sh ip port`，捕获输出、解析 flag、上传执行结果。
 4. **Flag 管理**：捕获 flag 存入 `flag` 表，Flag Submitter 统一限速、去重、重试后输出最终状态。
@@ -47,7 +47,7 @@ AwD Infra 是 Attack-with-Defence 竞赛的自动化平台，帮助队伍协调�
 - 所有服务通过 `internal/config` 读取环境变量（`.env`），统一控制 Postgres/Redis 连接、Runner 参数、Flag 提交流程。
 - Runner 环境：所有 exploit 在 `/env` chroot 内运行，临时目录 `/env/tmp/<run-id>`；artifact 为 zip 压缩，解压后必须包含 `run.sh`。
 - Flag 提取策略：优先读取 `flag` 文件（可通过 payload/配置覆盖），否则使用正则（默认 `flag\{[a-zA-Z0-9_\-]+\}`）匹配 stdout。
-- API 前缀：统一使用 `/api/v1/**`；Nginx（生产）与 Vite（开发）均将该前缀代理到 Control Plane。
+- API 前缀：统一使用 `/api/v1/**`；Nginx（生产）与 Vite（开发）均将该前缀代理到 Control Panel。
 - 队列：默认使用 Redis Streams（`internal/queue/redis`），通过 `queue.Broker` 抽象可扩展到 NATS/Kafka 等实现。
 
 ## 5. Web UI
@@ -65,7 +65,7 @@ AwD Infra 是 Attack-with-Defence 竞赛的自动化平台，帮助队伍协调�
   - 生产：`pnpm --filter ./web build`，由 `docker/web.Dockerfile` 使用 Nginx 服务静态资源并反向代理 `/api/`。
 
 ## 6. 部署
-- **Docker Compose**：提供 Postgres、Redis、Control Plane、Scheduler、Runner、Flag Submitter、Web UI 等容器；Runner/ Scheduler 已使用 Redis 队列，存储层仍为内存实现，可逐步替换为数据库。
+- **Docker Compose**：提供 Postgres、Redis、Control Panel、Scheduler、Runner、Flag Submitter、Web UI 等容器；Runner/ Scheduler 已使用 Redis 队列，存储层仍为内存实现，可逐步替换为数据库。
 - **CI/CD 规划**：构建 Go 二进制、运行 `go test ./...`、构建前端、生成容器镜像；未来可接入 GitHub Actions/GitLab CI。
 - **Kubernetes 目标**（TODO）：以 Deployment/StatefulSet 形式部署各组件，利用 Service/Ingress/VPA/HPA 做扩缩容；使用 ConfigMap/Secret 管理配置与密钥。
 

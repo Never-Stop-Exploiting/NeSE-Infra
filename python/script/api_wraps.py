@@ -10,7 +10,7 @@ from typing import NotRequired
 import requests
 
 __all__ = [
-    "ControlPlaneAPI",
+    "ControlPanelAPI",
     "APIError",
     "APIConfig",
     "Challenge",
@@ -306,16 +306,16 @@ class APIConfig:
     @classmethod
     def from_env(cls) -> "APIConfig":
         return cls(
-            base_url=os.getenv("CONTROL_PLANE_URL"),
-            api_prefix=os.getenv("CONTROL_PLANE_API_PREFIX"),
-            timeout=_env_float("CONTROL_PLANE_TIMEOUT", 15.0),
+            base_url=os.getenv("CONTROL_PANEL_URL"),
+            api_prefix=os.getenv("CONTROL_PANEL_API_PREFIX"),
+            timeout=_env_float("CONTROL_PANEL_TIMEOUT", 15.0),
             runner_secret=os.getenv("RUNNER_SECRET"),
-            admin_token=os.getenv("CONTROL_PLANE_TOKEN"),
+            admin_token=os.getenv("CONTROL_PANEL_TOKEN"),
         )
 
 
 class APIError(RuntimeError):
-    """Raised when the Control Plane responds with an error."""
+    """Raised when the Control Panel responds with an error."""
 
     def __init__(self, status_code: int, message: str, payload: Any | None = None) -> None:
         super().__init__(f"API request failed ({status_code}): {message}")
@@ -324,8 +324,8 @@ class APIError(RuntimeError):
         self.payload = payload
 
 
-class ControlPlaneAPI:
-    """Lightweight wrapper around the Control Plane /api/v1 REST endpoints."""
+class ControlPanelAPI:
+    """Lightweight wrapper around the Control Panel /api/v1 REST endpoints."""
 
     def __init__(
         self,
@@ -343,7 +343,7 @@ class ControlPlaneAPI:
         prefix = api_prefix or cfg.api_prefix or "/api/v1"
         self.api_prefix = "/" + prefix.strip("/")
         self._root = f"{self.base_url}{self.api_prefix}"
-        self.timeout = timeout or cfg.timeout or _env_float("CONTROL_PLANE_TIMEOUT", 15.0)
+        self.timeout = timeout or cfg.timeout or _env_float("CONTROL_PANEL_TIMEOUT", 15.0)
         self.runner_secret = runner_secret or cfg.runner_secret
         self.session = session or requests.Session()
         headers: dict[str, str] = {"Accept": "application/json"}
@@ -872,7 +872,7 @@ class ControlPlaneAPI:
     def close(self) -> None:
         self.session.close()
 
-    def __enter__(self) -> "ControlPlaneAPI":
+    def __enter__(self) -> "ControlPanelAPI":
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:  # type: ignore[override]

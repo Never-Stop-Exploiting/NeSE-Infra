@@ -4,7 +4,7 @@
       <h2>控制面 Token</h2>
       <p>
         请输入运维下发的
-        <code>CONTROL_PLANE_TOKEN</code>
+        <code>CONTROL_PANEL_TOKEN</code>
         ，后端将用它进行单点鉴权。
       </p>
       <label for="token-input">Token</label>
@@ -12,7 +12,7 @@
         id="token-input"
         v-model="tokenInput"
         type="password"
-        placeholder="Paste CONTROL_PLANE_TOKEN"
+        placeholder="Paste CONTROL_PANEL_TOKEN"
         required
       />
       <button type="submit">保存并继续</button>

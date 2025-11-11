@@ -26,16 +26,16 @@ func main() {
 	logger := logging.NewLogger(cfg.LogLevel)
 	broker, brokerStatus := createBroker(cfg, logger)
 
-	var controlClient *runner.ControlPlaneClient
-	if cfg.Runner.ControlPlaneURL != "" {
-		client, err := runner.NewControlPlaneClient(cfg, logger)
+	var controlClient *runner.ControlPanelClient
+	if cfg.Runner.ControlPanelURL != "" {
+		client, err := runner.NewControlPanelClient(cfg, logger)
 		if err != nil {
-			logger.Warn("control plane client disabled", slog.Any("err", err))
+			logger.Warn("control panel client disabled", slog.Any("err", err))
 		} else {
 			controlClient = client
 		}
 	} else {
-		logger.Warn("CONTROL_PLANE_URL not configured; runner will operate in offline mode")
+		logger.Warn("CONTROL_PANEL_URL not configured; runner will operate in offline mode")
 	}
 
 	agent := runner.New(cfg, logger, broker, controlClient, brokerStatus)

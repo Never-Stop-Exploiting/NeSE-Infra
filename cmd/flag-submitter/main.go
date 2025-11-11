@@ -25,9 +25,9 @@ func main() {
 
 	logger := logging.NewLogger(cfg.LogLevel)
 	broker := createBroker(cfg, logger)
-	cpClient, err := submitter.NewControlPlaneClient(cfg, logger)
+	cpClient, err := submitter.NewControlPanelClient(cfg, logger)
 	if err != nil {
-		logger.Error("failed to create control plane client", slog.Any("err", err))
+		logger.Error("failed to create control panel client", slog.Any("err", err))
 		os.Exit(1)
 	}
 	service := submitter.New(cfg, logger, broker, cpClient, cfg.FlagSubmitter.ID)

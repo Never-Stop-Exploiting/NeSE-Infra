@@ -33,7 +33,7 @@ type Agent struct {
 	cfg           config.Config
 	log           *slog.Logger
 	broker        queue.Broker
-	controlClient *ControlPlaneClient
+	controlClient *ControlPanelClient
 	hostname      string
 	activeJobs    atomic.Int32
 	lastHeartbeat time.Time
@@ -46,7 +46,7 @@ type Agent struct {
 var errJobDiscard = errors.New("runner job discarded")
 
 // New constructs an Agent.
-func New(cfg config.Config, log *slog.Logger, broker queue.Broker, control *ControlPlaneClient, brokerStatus string) *Agent {
+func New(cfg config.Config, log *slog.Logger, broker queue.Broker, control *ControlPanelClient, brokerStatus string) *Agent {
 	tagSet := make(map[string]struct{}, len(cfg.Runner.Tags))
 	for _, tag := range cfg.Runner.Tags {
 		value := strings.ToLower(strings.TrimSpace(tag))
@@ -261,7 +261,7 @@ func (a *Agent) handleMessage(ctx context.Context, msg queue.Message) error {
 	stdout, stderr, execErr := a.execute(runCtx, relPath, payload.TargetIP, payload.TargetPort)
 	if execErr != nil {
 		if errors.Is(execErr, context.Canceled) && remoteCanceled.Load() {
-			a.log.Info("run canceled by control plane",
+			a.log.Info("run canceled by control panel",
 				slog.String("run_id", runID))
 		} else {
 			a.log.Warn("exploit execution failed",
@@ -400,7 +400,7 @@ func (a *Agent) registerSelf(ctx context.Context) error {
 	}
 	a.baseLabels = cloneLabels(labels)
 	if a.controlClient == nil {
-		a.log.Warn("control plane client disabled; skipping registration",
+		a.log.Warn("control panel client disabled; skipping registration",
 			slog.String("runner_id", runnerID(a.cfg.Runner.ID)))
 		return nil
 	}
@@ -416,11 +416,11 @@ func (a *Agent) registerSelf(ctx context.Context) error {
 		Config:      a.heartbeatConfig(),
 	}
 	if err := a.controlClient.RegisterRunner(registerCtx, req); err != nil {
-		return fmt.Errorf("register runner with control plane: %w", err)
+		return fmt.Errorf("register runner with control panel: %w", err)
 	}
-	a.log.Info("registered runner with control plane",
+	a.log.Info("registered runner with control panel",
 		slog.String("runner_id", req.ID),
-		slog.String("control_plane", a.controlClient.baseURL.String()))
+		slog.String("control_panel", a.controlClient.baseURL.String()))
 	a.sendHeartbeat(ctx)
 	return nil
 }
@@ -445,7 +445,7 @@ func (a *Agent) resolveArtifact(ctx context.Context, payload jobs.JobPayload) (a
 		}
 	}
 	if a.controlClient == nil {
-		return artifactPayload{}, fmt.Errorf("artifact uri provided but control plane client is not configured")
+		return artifactPayload{}, fmt.Errorf("artifact uri provided but control panel client is not configured")
 	}
 	downloadCtx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()

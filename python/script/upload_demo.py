@@ -1,9 +1,9 @@
-from api_wraps import ControlPlaneAPI
+from api_wraps import ControlPanelAPI
 import os
 
-os.environ["CONTROL_PLANE_TOKEN"] = "dev-admin-token"
+os.environ["CONTROL_PANEL_TOKEN"] = "dev-admin-token"
 
-cp = ControlPlaneAPI()
+cp = ControlPanelAPI()
 
 teams = [
     "来自东方的神秘力量",

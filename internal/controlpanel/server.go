@@ -1,4 +1,4 @@
-package controlplane
+package controlpanel
 
 import (
 	"context"
@@ -38,17 +38,17 @@ type Server struct {
 
 var errFlagCancelNotAllowed = errors.New("flag cannot be canceled")
 
-// New returns a configured control plane server.
+// New returns a configured control panel server.
 func New(cfg config.Config, logger *slog.Logger, repository storage.Repository, broker queue.Broker) *Server {
 	mux := http.NewServeMux()
-	protectedMux := authMiddleware(mux, cfg.ControlPlane.AdminToken, cfg.RunnerSecret)
+	protectedMux := authMiddleware(mux, cfg.ControlPanel.AdminToken, cfg.RunnerSecret)
 	server := &Server{
 		cfg:        cfg,
 		logger:     logger,
 		repository: repository,
 		broker:     broker,
 		httpServer: &http.Server{
-			Addr:              cfg.ControlPlane.BindAddr,
+			Addr:              cfg.ControlPanel.BindAddr,
 			ReadHeaderTimeout: 5 * time.Second,
 			Handler:           protectedMux,
 		},
@@ -63,7 +63,7 @@ func (s *Server) Run(ctx context.Context) error {
 	g, ctx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
-		s.logger.Info("control plane listening", slog.String("addr", s.httpServer.Addr))
+		s.logger.Info("control panel listening", slog.String("addr", s.httpServer.Addr))
 		if err := s.httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return err
 		}
@@ -74,7 +74,7 @@ func (s *Server) Run(ctx context.Context) error {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second*10)
 		defer cancel()
-		s.logger.Info("shutting down control plane http server")
+		s.logger.Info("shutting down control panel http server")
 		if err := s.httpServer.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return err
 		}
@@ -1057,7 +1057,7 @@ func (s *Server) handleFlagDetail(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = s.repository.AppendLog(r.Context(), domain.LogEntry{
 			Level:   "info",
-			Source:  "control-plane",
+			Source:  "control-panel",
 			Message: fmt.Sprintf("flag %s requeued", id),
 			FlagID:  id,
 		})
@@ -1815,7 +1815,7 @@ func (s *Server) cancelRunInternal(ctx context.Context, run domain.Run, reason s
 	}
 	if err := s.repository.AppendLog(ctx, domain.LogEntry{
 		Level:   "warn",
-		Source:  "control-plane",
+		Source:  "control-panel",
 		Message: fmt.Sprintf("run %s canceled", run.ID),
 		RunID:   run.ID,
 		Fields:  logFields,
@@ -1848,7 +1848,7 @@ func (s *Server) cancelFlag(ctx context.Context, flagID string, reason string) (
 	}
 	if err := s.repository.AppendLog(ctx, domain.LogEntry{
 		Level:   "warn",
-		Source:  "control-plane",
+		Source:  "control-panel",
 		Message: fmt.Sprintf("flag %s dropped", flag.ID),
 		FlagID:  flag.ID,
 		Fields:  logFields,
@@ -1885,7 +1885,7 @@ func (s *Server) enqueueFlag(ctx context.Context, flag domain.Flag) {
 	}
 	_ = s.repository.AppendLog(ctx, domain.LogEntry{
 		Level:   "info",
-		Source:  "control-plane",
+		Source:  "control-panel",
 		Message: fmt.Sprintf("%s %s", message, flag.ID),
 		FlagID:  flag.ID,
 		Fields: map[string]any{

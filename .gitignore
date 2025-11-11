@@ -35,3 +35,4 @@ web/dist/
 .DS_Store
 
 tmp/
+.gocache/

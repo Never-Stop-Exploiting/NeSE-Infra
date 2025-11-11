@@ -87,10 +87,10 @@ class FlagSubmitter:
             decode_responses=False,
         )
 
-        control_plane = env("SUBMITTER_CONTROL_PLANE_URL", env("CONTROL_PLANE_URL"))
-        if not control_plane:
-            raise RuntimeError("SUBMITTER_CONTROL_PLANE_URL or CONTROL_PLANE_URL required")
-        self.control_plane = control_plane.rstrip("/")
+        control_panel = env("SUBMITTER_CONTROL_PANEL_URL", env("CONTROL_PANEL_URL"))
+        if not control_panel:
+            raise RuntimeError("SUBMITTER_CONTROL_PANEL_URL or CONTROL_PANEL_URL required")
+        self.control_panel = control_panel.rstrip("/")
         self.secret = env("SUBMITTER_SECRET", "dev-submitter-secret")
         if not self.secret:
             raise RuntimeError("SUBMITTER_SECRET is required")
@@ -140,7 +140,7 @@ class FlagSubmitter:
             "status": "online",
         }
         resp = self.session.post(
-            f"{self.control_plane}/api/v1/submitters/register",
+            f"{self.control_panel}/api/v1/submitters/register",
             json=payload,
             timeout=5,
         )
@@ -170,7 +170,7 @@ class FlagSubmitter:
                     "processedCount": count,
                 }
                 self.session.post(
-                    f"{self.control_plane}/api/v1/submitters/heartbeat",
+                    f"{self.control_panel}/api/v1/submitters/heartbeat",
                     json=payload,
                     timeout=5,
                 )
@@ -293,7 +293,7 @@ class FlagSubmitter:
     def submit_start(self, flag_id: str) -> dict[str, Any] | None:
         payload = {"secret": self.secret, "submitterId": self.submitter_id}
         resp = self.session.post(
-            f"{self.control_plane}/api/v1/flags/{flag_id}/submit/start",
+            f"{self.control_panel}/api/v1/flags/{flag_id}/submit/start",
             json=payload,
             timeout=10,
         )
@@ -306,7 +306,7 @@ class FlagSubmitter:
 
     def submit_finish(self, flag_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         resp = self.session.post(
-            f"{self.control_plane}/api/v1/flags/{flag_id}/submit/finish",
+            f"{self.control_panel}/api/v1/flags/{flag_id}/submit/finish",
             json=payload,
             timeout=10,
         )

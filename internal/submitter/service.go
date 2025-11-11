@@ -23,12 +23,12 @@ const (
 	throughputWindow        = time.Minute
 )
 
-// Service processes flags from Redis and reports status back to the control plane.
+// Service processes flags from Redis and reports status back to the control panel.
 type Service struct {
 	cfg            config.Config
 	log            *slog.Logger
 	broker         queue.Broker
-	client         *ControlPlaneClient
+	client         *ControlPanelClient
 	plugin         Plugin
 	submitterID    string
 	groupName      string
@@ -44,7 +44,7 @@ type Service struct {
 }
 
 // New constructs a decoupled submitter service.
-func New(cfg config.Config, log *slog.Logger, broker queue.Broker, client *ControlPlaneClient, submitterID string) *Service {
+func New(cfg config.Config, log *slog.Logger, broker queue.Broker, client *ControlPanelClient, submitterID string) *Service {
 	plugin := NewHTTPPlugin(cfg.FlagSubmitter)
 	if submitterID == "" {
 		if host, err := os.Hostname(); err == nil && host != "" {
@@ -76,7 +76,7 @@ func New(cfg config.Config, log *slog.Logger, broker queue.Broker, client *Contr
 // Run launches worker and heartbeat loops until context cancellation.
 func (s *Service) Run(ctx context.Context) error {
 	if s.client == nil {
-		return errors.New("control plane client required")
+		return errors.New("control panel client required")
 	}
 	if err := s.register(ctx); err != nil {
 		return err

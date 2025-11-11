@@ -11,7 +11,7 @@ import (
 	"syscall"
 
 	"awdinfra/internal/config"
-	"awdinfra/internal/controlplane"
+	"awdinfra/internal/controlpanel"
 	"awdinfra/internal/logging"
 	"awdinfra/internal/queue"
 	"awdinfra/internal/queue/noop"
@@ -24,8 +24,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
 	}
-	if strings.TrimSpace(cfg.ControlPlane.AdminToken) == "" {
-		log.Fatalf("CONTROL_PLANE_TOKEN cannot be empty")
+	if strings.TrimSpace(cfg.ControlPanel.AdminToken) == "" {
+		log.Fatalf("CONTROL_PANEL_TOKEN cannot be empty")
 	}
 
 	logger := logging.NewLogger(cfg.LogLevel)
@@ -46,9 +46,9 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	server := controlplane.New(cfg, logger, repo, broker)
+	server := controlpanel.New(cfg, logger, repo, broker)
 	if err := server.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		logger.Error("control plane terminated", slog.Any("err", err))
+		logger.Error("control panel terminated", slog.Any("err", err))
 		os.Exit(1)
 	}
 }
@@ -56,7 +56,7 @@ func main() {
 func createBroker(cfg config.Config, logger *slog.Logger) queue.Broker {
 	broker, err := redisbroker.New(cfg.Redis)
 	if err != nil {
-		logger.Warn("redis broker unavailable for control-plane, falling back to noop", slog.Any("err", err))
+		logger.Warn("redis broker unavailable for control-panel, falling back to noop", slog.Any("err", err))
 		return noop.New()
 	}
 	logger.Info("redis broker enabled", slog.String("addr", cfg.Redis.Addr))

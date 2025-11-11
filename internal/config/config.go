@@ -15,7 +15,7 @@ type Config struct {
 	LogLevel          string
 	Postgres          PostgresConfig
 	Redis             RedisConfig
-	ControlPlane      ControlPlaneConfig
+	ControlPanel      ControlPanelConfig
 	Scheduler         SchedulerConfig
 	Runner            RunnerConfig
 	FlagSubmitter     FlagSubmitterConfig
@@ -41,7 +41,7 @@ type RedisConfig struct {
 	TLSEnabled bool
 }
 
-type ControlPlaneConfig struct {
+type ControlPanelConfig struct {
 	BindAddr        string
 	MetricsAddr     string
 	WebsocketOrigin string
@@ -56,8 +56,8 @@ type SchedulerConfig struct {
 type RunnerConfig struct {
 	ID                    string
 	Type                  string
-	ControlPlaneURL       string
-	ControlPlaneTimeout   time.Duration
+	ControlPanelURL       string
+	ControlPanelTimeout   time.Duration
 	MaxParallelJobs       int
 	LogFlushInterval      time.Duration
 	HeartbeatInterval     time.Duration
@@ -81,7 +81,7 @@ type FlagSubmitterConfig struct {
 	RequestTimeout    time.Duration
 	Concurrency       int
 	ID                string
-	ControlPlaneURL   string
+	ControlPanelURL   string
 	HeartbeatInterval time.Duration
 }
 
@@ -98,7 +98,7 @@ func Load() (Config, error) {
 		LogLevel:          getenv("LOG_LEVEL", "info"),
 		Postgres:          loadPostgres(),
 		Redis:             loadRedis(),
-		ControlPlane:      loadControlPlane(),
+		ControlPanel:      loadControlPanel(),
 		Scheduler:         loadScheduler(),
 		Runner:            loadRunner(),
 		FlagSubmitter:     loadFlagSubmitter(),
@@ -138,12 +138,12 @@ func loadRedis() RedisConfig {
 	}
 }
 
-func loadControlPlane() ControlPlaneConfig {
-	return ControlPlaneConfig{
-		BindAddr:        getenv("CONTROL_PLANE_BIND", ":8080"),
-		MetricsAddr:     getenv("CONTROL_PLANE_METRICS", ":9100"),
-		WebsocketOrigin: getenv("CONTROL_PLANE_WS_ORIGIN", "*"),
-		AdminToken:      getenv("CONTROL_PLANE_TOKEN", ""),
+func loadControlPanel() ControlPanelConfig {
+	return ControlPanelConfig{
+		BindAddr:        getenv("CONTROL_PANEL_BIND", ":8080"),
+		MetricsAddr:     getenv("CONTROL_PANEL_METRICS", ":9100"),
+		WebsocketOrigin: getenv("CONTROL_PANEL_WS_ORIGIN", "*"),
+		AdminToken:      getenv("CONTROL_PANEL_TOKEN", ""),
 	}
 }
 
@@ -163,8 +163,8 @@ func loadRunner() RunnerConfig {
 	return RunnerConfig{
 		ID:                    getenv("RUNNER_ID", ""),
 		Type:                  getenv("RUNNER_TYPE", "default"),
-		ControlPlaneURL:       getenv("CONTROL_PLANE_URL", ""),
-		ControlPlaneTimeout:   getenvDuration("RUNNER_CONTROL_PLANE_TIMEOUT", time.Minute),
+		ControlPanelURL:       getenv("CONTROL_PANEL_URL", ""),
+		ControlPanelTimeout:   getenvDuration("RUNNER_CONTROL_PANEL_TIMEOUT", time.Minute),
 		MaxParallelJobs:       getenvInt("RUNNER_MAX_PARALLEL", 2),
 		LogFlushInterval:      getenvDuration("RUNNER_LOG_FLUSH_INTERVAL", time.Second*2),
 		HeartbeatInterval:     getenvDuration("RUNNER_HEARTBEAT_INTERVAL", time.Second*10),
@@ -190,7 +190,7 @@ func loadFlagSubmitter() FlagSubmitterConfig {
 		RequestTimeout:    getenvDuration("FLAG_SUBMIT_TIMEOUT", time.Second*5),
 		Concurrency:       getenvInt("FLAG_SUBMIT_CONCURRENCY", 1),
 		ID:                getenv("SUBMITTER_ID", ""),
-		ControlPlaneURL:   getenv("SUBMITTER_CONTROL_PLANE_URL", getenv("CONTROL_PLANE_URL", "")),
+		ControlPanelURL:   getenv("SUBMITTER_CONTROL_PANEL_URL", getenv("CONTROL_PANEL_URL", "")),
 		HeartbeatInterval: getenvDuration("SUBMITTER_HEARTBEAT_INTERVAL", time.Second*10),
 	}
 }

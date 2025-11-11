@@ -17,8 +17,8 @@ import (
 	"awdinfra/internal/config"
 )
 
-// ControlPlaneClient performs authenticated requests against the control plane API.
-type ControlPlaneClient struct {
+// ControlPanelClient performs authenticated requests against the control panel API.
+type ControlPanelClient struct {
 	baseURL *url.URL
 	secret  string
 	client  *http.Client
@@ -27,7 +27,7 @@ type ControlPlaneClient struct {
 
 const runnerSecretHeader = "X-Runner-Secret"
 
-// APIError captures non-2xx responses from the control plane.
+// APIError captures non-2xx responses from the control panel.
 type APIError struct {
 	StatusCode int
 	Message    string
@@ -38,32 +38,32 @@ func (e *APIError) Error() string {
 		return ""
 	}
 	if strings.TrimSpace(e.Message) == "" {
-		return fmt.Sprintf("control plane error (%d)", e.StatusCode)
+		return fmt.Sprintf("control panel error (%d)", e.StatusCode)
 	}
-	return fmt.Sprintf("control plane error (%d): %s", e.StatusCode, e.Message)
+	return fmt.Sprintf("control panel error (%d): %s", e.StatusCode, e.Message)
 }
 
-// NewControlPlaneClient constructs a client from runner configuration.
-func NewControlPlaneClient(cfg config.Config, log *slog.Logger) (*ControlPlaneClient, error) {
-	if cfg.Runner.ControlPlaneURL == "" {
-		return nil, fmt.Errorf("control plane url is empty")
+// NewControlPanelClient constructs a client from runner configuration.
+func NewControlPanelClient(cfg config.Config, log *slog.Logger) (*ControlPanelClient, error) {
+	if cfg.Runner.ControlPanelURL == "" {
+		return nil, fmt.Errorf("control panel url is empty")
 	}
-	base, err := url.Parse(cfg.Runner.ControlPlaneURL)
+	base, err := url.Parse(cfg.Runner.ControlPanelURL)
 	if err != nil {
-		return nil, fmt.Errorf("invalid control plane url: %w", err)
+		return nil, fmt.Errorf("invalid control panel url: %w", err)
 	}
 	secret := cfg.RunnerSecret
 	if secret == "" {
 		return nil, fmt.Errorf("runner secret is empty")
 	}
-	timeout := cfg.Runner.ControlPlaneTimeout
+	timeout := cfg.Runner.ControlPanelTimeout
 	if timeout <= 0 {
 		timeout = time.Minute
 	}
 	client := &http.Client{
 		Timeout: timeout,
 	}
-	return &ControlPlaneClient{
+	return &ControlPanelClient{
 		baseURL: base,
 		secret:  secret,
 		client:  client,
@@ -122,20 +122,20 @@ type RunResult struct {
 	Stderr     string
 }
 
-func (c *ControlPlaneClient) RegisterRunner(ctx context.Context, req registerRunnerRequest) error {
+func (c *ControlPanelClient) RegisterRunner(ctx context.Context, req registerRunnerRequest) error {
 	req.Secret = c.secret
 	req.Status = "online"
 	return c.post(ctx, "/api/v1/runners/register", req)
 }
 
-func (c *ControlPlaneClient) Heartbeat(ctx context.Context, req heartbeatRequest) error {
+func (c *ControlPanelClient) Heartbeat(ctx context.Context, req heartbeatRequest) error {
 	req.Secret = c.secret
 	return c.post(ctx, "/api/v1/runners/heartbeat", req)
 }
 
-func (c *ControlPlaneClient) MarkRunStarted(ctx context.Context, runID string, runnerID string) error {
+func (c *ControlPanelClient) MarkRunStarted(ctx context.Context, runID string, runnerID string) error {
 	if c.baseURL == nil {
-		return fmt.Errorf("control plane client not configured")
+		return fmt.Errorf("control panel client not configured")
 	}
 	req := runStartRequest{
 		RunnerID: runnerID,
@@ -144,9 +144,9 @@ func (c *ControlPlaneClient) MarkRunStarted(ctx context.Context, runID string, r
 	return c.post(ctx, fmt.Sprintf("/api/v1/runs/%s/start", strings.TrimSpace(runID)), req)
 }
 
-func (c *ControlPlaneClient) CompleteRun(ctx context.Context, runID string, runnerID string, result RunResult) error {
+func (c *ControlPanelClient) CompleteRun(ctx context.Context, runID string, runnerID string, result RunResult) error {
 	if c.baseURL == nil {
-		return fmt.Errorf("control plane client not configured")
+		return fmt.Errorf("control panel client not configured")
 	}
 	req := runFinishRequest{
 		RunnerID:   runnerID,
@@ -161,16 +161,16 @@ func (c *ControlPlaneClient) CompleteRun(ctx context.Context, runID string, runn
 	return c.post(ctx, fmt.Sprintf("/api/v1/runs/%s/finish", strings.TrimSpace(runID)), req)
 }
 
-// RunInfo represents minimal run metadata fetched from the control plane.
+// RunInfo represents minimal run metadata fetched from the control panel.
 type RunInfo struct {
 	ID       string `json:"id"`
 	Status   string `json:"status"`
 	RunnerID string `json:"runnerId"`
 }
 
-func (c *ControlPlaneClient) GetRun(ctx context.Context, runID string) (RunInfo, error) {
+func (c *ControlPanelClient) GetRun(ctx context.Context, runID string) (RunInfo, error) {
 	if c.baseURL == nil {
-		return RunInfo{}, fmt.Errorf("control plane client not configured")
+		return RunInfo{}, fmt.Errorf("control panel client not configured")
 	}
 	u := *c.baseURL
 	rel := strings.TrimPrefix(fmt.Sprintf("/api/v1/runs/%s", strings.TrimSpace(runID)), "/")
@@ -209,9 +209,9 @@ func (c *ControlPlaneClient) GetRun(ctx context.Context, runID string) (RunInfo,
 	return payload.Run, nil
 }
 
-func (c *ControlPlaneClient) DownloadArtifact(ctx context.Context, artifactPath string) ([]byte, error) {
+func (c *ControlPanelClient) DownloadArtifact(ctx context.Context, artifactPath string) ([]byte, error) {
 	if c.baseURL == nil {
-		return nil, fmt.Errorf("control plane client not configured")
+		return nil, fmt.Errorf("control panel client not configured")
 	}
 	u := *c.baseURL
 	rel := strings.TrimPrefix(artifactPath, "/")
@@ -243,9 +243,9 @@ func (c *ControlPlaneClient) DownloadArtifact(ctx context.Context, artifactPath 
 	return data, nil
 }
 
-func (c *ControlPlaneClient) post(ctx context.Context, endpoint string, payload any) error {
+func (c *ControlPanelClient) post(ctx context.Context, endpoint string, payload any) error {
 	if c.baseURL == nil {
-		return fmt.Errorf("control plane client not configured")
+		return fmt.Errorf("control panel client not configured")
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
