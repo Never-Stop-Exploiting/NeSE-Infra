@@ -57,6 +57,7 @@ type RunnerConfig struct {
 	ID                    string
 	Type                  string
 	ControlPlaneURL       string
+	ControlPlaneTimeout   time.Duration
 	MaxParallelJobs       int
 	LogFlushInterval      time.Duration
 	HeartbeatInterval     time.Duration
@@ -163,6 +164,7 @@ func loadRunner() RunnerConfig {
 		ID:                    getenv("RUNNER_ID", ""),
 		Type:                  getenv("RUNNER_TYPE", "default"),
 		ControlPlaneURL:       getenv("CONTROL_PLANE_URL", ""),
+		ControlPlaneTimeout:   getenvDuration("RUNNER_CONTROL_PLANE_TIMEOUT", time.Minute),
 		MaxParallelJobs:       getenvInt("RUNNER_MAX_PARALLEL", 2),
 		LogFlushInterval:      getenvDuration("RUNNER_LOG_FLUSH_INTERVAL", time.Second*2),
 		HeartbeatInterval:     getenvDuration("RUNNER_HEARTBEAT_INTERVAL", time.Second*10),

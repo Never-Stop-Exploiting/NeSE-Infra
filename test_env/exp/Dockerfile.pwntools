@@ -1,0 +1,9 @@
+# Use an official Python runtime as a parent image
+FROM python:3.12-slim AS base
+
+# Install any needed packages specified in requirements.txt
+RUN pip install --no-cache-dir pwntools
+
+FROM ghcr.io/never-stop-exploiting/runner:latest
+
+COPY --from=base / /env

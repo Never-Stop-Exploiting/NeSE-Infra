@@ -1321,6 +1321,13 @@ func (r *Repository) UpsertSubmitter(ctx context.Context, submitter domain.Submi
 	if submitter.Concurrency == 0 && current.Concurrency > 0 {
 		submitter.Concurrency = current.Concurrency
 	}
+	if submitter.WindowSeconds <= 0 {
+		if current.WindowSeconds > 0 {
+			submitter.WindowSeconds = current.WindowSeconds
+		} else {
+			submitter.WindowSeconds = float64(time.Minute.Seconds())
+		}
+	}
 	r.submitters[submitter.ID] = submitter
 	return ctx.Err()
 }

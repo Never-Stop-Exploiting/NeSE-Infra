@@ -131,18 +131,21 @@ func (s *Service) heartbeatLoop(ctx context.Context) error {
 func (s *Service) sendHeartbeat(ctx context.Context) {
 	stats := s.metrics.snapshot()
 	req := heartbeatSubmitterRequest{
-		ID:               s.submitterID,
-		Status:           "online",
-		Type:             "http",
-		Hostname:         "",
-		Concurrency:      s.concurrency,
-		InFlight:         s.currentInFlight(),
-		Pending:          0,
-		RecentThroughput: stats.throughput,
-		AvgLatencyMs:     stats.avgLatency * 1000,
-		Pressure:         stats.pressure(s.concurrency),
-		Labels:           nil,
-		Config:           nil,
+		ID:                s.submitterID,
+		Status:            "online",
+		Type:              "http",
+		Hostname:          "",
+		Concurrency:       s.concurrency,
+		InFlight:          s.currentInFlight(),
+		Pending:           0,
+		RecentThroughput:  stats.throughput,
+		AvgLatencyMs:      stats.avgLatency * 1000,
+		Pressure:          stats.pressure(s.concurrency),
+		WindowSeconds:     stats.windowSeconds,
+		LatencySumSeconds: stats.latencySum,
+		ProcessedCount:    stats.count,
+		Labels:            nil,
+		Config:            nil,
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
 	defer cancel()
@@ -310,30 +313,37 @@ func (s *Service) retryDelay() time.Duration {
 }
 
 type metricsSnapshot struct {
-	throughput float64
-	avgLatency float64
+	throughput    float64
+	avgLatency    float64
+	latencySum    float64
+	count         int
+	windowSeconds float64
 }
 
 func (m metricsSnapshot) pressure(concurrency int) float64 {
 	if concurrency <= 0 {
 		return 0
 	}
-	avg := m.avgLatency
-	if avg <= 0 {
-		avg = defaultSubmitterLatency
+	window := m.windowSeconds
+	if window <= 0 {
+		window = throughputWindow.Seconds()
 	}
-	theoretical := float64(concurrency) / avg
-	if theoretical <= 0 {
+	capacity := float64(concurrency) * window
+	if capacity <= 0 {
 		return 0
 	}
-	return m.throughput / theoretical
+	return m.latencySum / capacity
 }
 
 type metricsTracker struct {
-	window     time.Duration
-	mu         sync.Mutex
-	events     []time.Time
-	avgLatency float64
+	window time.Duration
+	mu     sync.Mutex
+	events []metricEvent
+}
+
+type metricEvent struct {
+	timestamp time.Time
+	latency   float64
 }
 
 func newMetricsTracker(window time.Duration) *metricsTracker {
@@ -342,7 +352,7 @@ func newMetricsTracker(window time.Duration) *metricsTracker {
 	}
 	return &metricsTracker{
 		window: window,
-		events: make([]time.Time, 0, 32),
+		events: make([]metricEvent, 0, 64),
 	}
 }
 
@@ -350,17 +360,12 @@ func (m *metricsTracker) record(latency time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := time.Now()
-	m.events = append(m.events, now)
-	m.prune(now)
 	seconds := latency.Seconds()
 	if seconds <= 0 {
 		seconds = defaultSubmitterLatency
 	}
-	if m.avgLatency <= 0 {
-		m.avgLatency = seconds
-	} else {
-		m.avgLatency = (m.avgLatency*0.8 + seconds*0.2)
-	}
+	m.events = append(m.events, metricEvent{timestamp: now, latency: seconds})
+	m.prune(now)
 }
 
 func (m *metricsTracker) snapshot() metricsSnapshot {
@@ -368,14 +373,23 @@ func (m *metricsTracker) snapshot() metricsSnapshot {
 	defer m.mu.Unlock()
 	now := time.Now()
 	m.prune(now)
-	throughput := float64(len(m.events)) / m.window.Seconds()
-	avg := m.avgLatency
-	if avg <= 0 {
-		avg = defaultSubmitterLatency
+	count := len(m.events)
+	windowSeconds := m.window.Seconds()
+	throughput := float64(count) / windowSeconds
+	latencySum := 0.0
+	for _, event := range m.events {
+		latencySum += event.latency
+	}
+	avg := defaultSubmitterLatency
+	if count > 0 {
+		avg = latencySum / float64(count)
 	}
 	return metricsSnapshot{
-		throughput: throughput,
-		avgLatency: avg,
+		throughput:    throughput,
+		avgLatency:    avg,
+		latencySum:    latencySum,
+		count:         count,
+		windowSeconds: windowSeconds,
 	}
 }
 
@@ -385,14 +399,11 @@ func (m *metricsTracker) prune(now time.Time) {
 	}
 	cutoff := now.Add(-m.window)
 	idx := 0
-	for _, t := range m.events {
-		if t.After(cutoff) {
-			break
-		}
+	for idx < len(m.events) && m.events[idx].timestamp.Before(cutoff) {
 		idx++
 	}
 	if idx > 0 {
-		m.events = append([]time.Time(nil), m.events[idx:]...)
+		m.events = append([]metricEvent(nil), m.events[idx:]...)
 	}
 }
 

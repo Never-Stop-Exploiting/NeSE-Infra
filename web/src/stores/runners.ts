@@ -6,14 +6,16 @@ import { fetchRunners, deleteRunner, fetchSubmitters, deleteSubmitter } from "@/
 export const useRunnerStore = defineStore("runners", () => {
   const runners = ref<RunnerInfo[]>([]);
   const submitters = ref<SubmitterInfo[]>([]);
+  const submitterSummary = ref<{ pressure?: number } | null>(null);
   const loading = ref(false);
 
   async function load() {
     loading.value = true;
     try {
-      const [runnerItems, submitterItems] = await Promise.all([fetchRunners(), fetchSubmitters()]);
+      const [runnerItems, submitterPayload] = await Promise.all([fetchRunners(), fetchSubmitters()]);
       runners.value = runnerItems;
-      submitters.value = submitterItems;
+      submitters.value = submitterPayload.items;
+      submitterSummary.value = submitterPayload.summary ?? null;
     } catch (err) {
       console.error("Failed to load runners", err);
     } finally {
@@ -31,5 +33,5 @@ export const useRunnerStore = defineStore("runners", () => {
     submitters.value = submitters.value.filter((submitter) => submitter.id !== id);
   }
 
-  return { runners, submitters, loading, load, remove, removeSubmitter };
+  return { runners, submitters, submitterSummary, loading, load, remove, removeSubmitter };
 });

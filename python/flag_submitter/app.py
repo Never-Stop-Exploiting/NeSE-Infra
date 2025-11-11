@@ -48,8 +48,7 @@ def parse_int(value: str | None, fallback: int) -> int:
 class MetricsTracker:
     def __init__(self, window_seconds: float = 60.0) -> None:
         self.window = window_seconds
-        self.events: deque[float] = deque()
-        self.avg_latency = 1.0
+        self.events: deque[tuple[float, float]] = deque()
         self.lock = threading.Lock()
 
     def record(self, latency: float) -> None:
@@ -57,24 +56,23 @@ class MetricsTracker:
             latency = 1.0
         now = time.time()
         with self.lock:
-            self.events.append(now)
+            self.events.append((now, latency))
             self._prune_locked(now)
-            if self.avg_latency <= 0:
-                self.avg_latency = latency
-            else:
-                self.avg_latency = self.avg_latency * 0.8 + latency * 0.2
 
-    def snapshot(self) -> tuple[float, float]:
+    def snapshot(self) -> tuple[float, float, float, int, float]:
         now = time.time()
         with self.lock:
             self._prune_locked(now)
-            throughput = len(self.events) / self.window
-            avg = self.avg_latency if self.avg_latency > 0 else 1.0
-        return throughput, avg
+            count = len(self.events)
+            latency_sum = sum(lat for _, lat in self.events)
+        window = self.window if self.window > 0 else 60.0
+        throughput = count / window
+        avg = latency_sum / count if count else 1.0
+        return throughput, avg, latency_sum, count, window
 
     def _prune_locked(self, now: float) -> None:
         cutoff = now - self.window
-        while self.events and self.events[0] < cutoff:
+        while self.events and self.events[0][0] < cutoff:
             self.events.popleft()
 
 
@@ -152,8 +150,10 @@ class FlagSubmitter:
     def heartbeat_loop(self) -> None:
         while True:
             try:
-                throughput, avg_latency = self.metrics.snapshot()
-                pressure = throughput * (avg_latency if avg_latency > 0 else 1.0) / max(self.concurrency, 1)
+                throughput, avg_latency, latency_sum, count, window = self.metrics.snapshot()
+                demand = latency_sum
+                capacity = max(self.concurrency, 1) * window
+                pressure = demand / capacity if capacity > 0 else 0.0
                 payload = {
                     "id": self.submitter_id,
                     "secret": self.secret,
@@ -165,6 +165,9 @@ class FlagSubmitter:
                     "recentThroughput": throughput,
                     "avgLatencyMs": avg_latency * 1000,
                     "pressure": pressure,
+                    "windowSeconds": window,
+                    "latencySumSeconds": latency_sum,
+                    "processedCount": count,
                 }
                 self.session.post(
                     f"{self.control_plane}/api/v1/submitters/heartbeat",

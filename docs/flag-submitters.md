@@ -6,7 +6,8 @@ Flag submitters are pluggable adapters that translate generic flag events into p
 
 1. **Register**: `POST /api/v1/submitters/register` with payload `{id,type,hostname,secret,concurrency}`. Control Plane persists the submitter record.
 2. **Heartbeat**: `POST /api/v1/submitters/heartbeat` every ~10s，附带 `recentThroughput`、`avgLatencyMs`、`pressure`、`inFlight`、`pending` 等指标，便于 UI 展示和超时清理。
-3. **Flag lifecycle**:
+3. **Heartbeat metrics**：payload 需额外上报 `recentThroughput`、`avgLatencyMs`、`pressure`、`windowSeconds`（采样窗口，秒）、`latencySumSeconds`（窗口内提交耗时总和）以及 `processedCount`。Control Plane 会基于这些数据计算单实例与整体压力。
+4. **Flag lifecycle**:
    - `POST /api/v1/flags/{id}/submit/start`，Body `{secret, submitterId}`。成功时返回 flag 元数据（value、challengeId、targetId、runId）。若 flag 已完成或不存在则返回 404/409，submitter 应 Ack 并跳过。
    - `POST /api/v1/flags/{id}/submit/finish`，Body `{secret, submitterId, status, statusCode, message, latencyMs, retryAfterSeconds, payload}`，Control Plane 根据 status 更新 `flags`、追加 `submission_attempts`、日志化，并返回 `{flag:{...}, retry:bool}`。当 `retry=true` 时 submitter 应 `Nack` 当前队列消息并按 `retryAfterSeconds`（或本地策略）延迟重试。
 

@@ -52,6 +52,12 @@
       <div>
         <h2>Flag Submitters</h2>
         <p class="hint">Submitter instances reporting throughput and latency.</p>
+        <div class="overall-pressure" v-if="runnerStore.submitters.length">
+          <span>Overall Pressure:</span>
+          <span class="pressure-chip" :data-level="pressureLevel(overallSubmitterPressure)">
+            {{ formatPressure(overallSubmitterPressure) }}
+          </span>
+        </div>
       </div>
       <button class="refresh" @click="runnerStore.load">Refresh</button>
     </header>
@@ -90,10 +96,14 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted } from "vue";
+import { computed, onMounted } from "vue";
 import { useRunnerStore } from "@/stores/runners";
 
 const runnerStore = useRunnerStore();
+
+const overallSubmitterPressure = computed(
+  () => runnerStore.submitterSummary?.pressure ?? 0
+);
 
 function brokerBadgeText(status?: string) {
   if (!status) return "Unknown";
@@ -305,6 +315,14 @@ header {
 .pressure-chip[data-level="high"] {
   background: rgba(248, 113, 113, 0.2);
   color: #f87171;
+}
+
+.overall-pressure {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.9rem;
+  color: #cbd5f5;
 }
 
 .broker-badge {

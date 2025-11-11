@@ -163,6 +163,9 @@ export interface SubmitterInfo {
   registeredAt?: string;
   labels?: Record<string, string>;
   config?: Record<string, string>;
+  windowSeconds?: number;
+  latencySumSeconds?: number;
+  processedCount?: number;
 }
 
 export interface LogEntry {

@@ -12,8 +12,14 @@ export async function deleteRunner(id: string): Promise<void> {
   await api.delete(runnerBase, { params: { id } });
 }
 
-export async function fetchSubmitters(): Promise<SubmitterInfo[]> {
-  return fallback(api.get<{ items: SubmitterInfo[] }>(submitterBase).then((res) => res.data.items), []);
+export async function fetchSubmitters(): Promise<{ items: SubmitterInfo[]; summary?: { pressure?: number } }> {
+  return fallback(
+    api.get<{ items: SubmitterInfo[]; summary?: { pressure?: number } }>(submitterBase).then((res) => ({
+      items: res.data.items ?? [],
+      summary: res.data.summary
+    })),
+    { items: [], summary: { pressure: 0 } }
+  );
 }
 
 export async function deleteSubmitter(id: string): Promise<void> {

@@ -739,6 +739,9 @@ func (s *Server) handleExploitActions(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		}
 		return
+	case "test-run":
+		s.handleExploitTestRun(w, r, id)
+		return
 	case "revisions":
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -862,6 +865,52 @@ func (s *Server) handleExploitFiles(w http.ResponseWriter, r *http.Request, expl
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
+}
+
+func (s *Server) handleExploitTestRun(w http.ResponseWriter, r *http.Request, exploitID string) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req struct {
+		TargetID string `json:"targetId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid payload")
+		return
+	}
+	targetID := strings.TrimSpace(req.TargetID)
+	if targetID == "" {
+		writeError(w, http.StatusBadRequest, "targetId is required")
+		return
+	}
+	ctx := r.Context()
+	exploit, err := s.repository.GetExploit(ctx, exploitID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "exploit not found")
+		return
+	}
+	target, err := s.repository.GetTarget(ctx, targetID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "target not found")
+		return
+	}
+	if strings.TrimSpace(target.ChallengeID) != strings.TrimSpace(exploit.ChallengeID) {
+		writeError(w, http.StatusBadRequest, "target does not belong to exploit challenge")
+		return
+	}
+	run, err := s.createRunForTarget(ctx, exploit, target)
+	if err != nil {
+		s.logger.Warn("test run enqueue failed",
+			slog.Any("err", err),
+			slog.String("exploit_id", exploitID),
+			slog.String("target_id", targetID))
+		writeError(w, http.StatusInternalServerError, "failed to enqueue test run")
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"run": marshalRunSummary(run, exploit.Name, target.TeamName),
+	})
 }
 
 func (s *Server) handleFlags(w http.ResponseWriter, r *http.Request) {
@@ -1937,7 +1986,10 @@ func (s *Server) handleSubmitters(w http.ResponseWriter, r *http.Request) {
 		for _, sub := range submitters {
 			items = append(items, marshalSubmitter(sub))
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"items": items})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"items":   items,
+			"summary": map[string]any{"pressure": aggregateSubmitterPressure(submitters)},
+		})
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
@@ -2036,19 +2088,22 @@ func (s *Server) handleSubmitterHeartbeat(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var req struct {
-		ID               string            `json:"id"`
-		Secret           string            `json:"secret"`
-		Status           string            `json:"status"`
-		Type             string            `json:"type"`
-		Hostname         string            `json:"hostname"`
-		Concurrency      int               `json:"concurrency"`
-		InFlight         int               `json:"inFlight"`
-		Pending          int               `json:"pending"`
-		RecentThroughput float64           `json:"recentThroughput"`
-		AvgLatencyMs     float64           `json:"avgLatencyMs"`
-		Pressure         float64           `json:"pressure"`
-		Labels           map[string]string `json:"labels"`
-		Config           map[string]string `json:"config"`
+		ID                string            `json:"id"`
+		Secret            string            `json:"secret"`
+		Status            string            `json:"status"`
+		Type              string            `json:"type"`
+		Hostname          string            `json:"hostname"`
+		Concurrency       int               `json:"concurrency"`
+		InFlight          int               `json:"inFlight"`
+		Pending           int               `json:"pending"`
+		RecentThroughput  float64           `json:"recentThroughput"`
+		AvgLatencyMs      float64           `json:"avgLatencyMs"`
+		Pressure          float64           `json:"pressure"`
+		WindowSeconds     float64           `json:"windowSeconds"`
+		LatencySumSeconds float64           `json:"latencySumSeconds"`
+		ProcessedCount    int               `json:"processedCount"`
+		Labels            map[string]string `json:"labels"`
+		Config            map[string]string `json:"config"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid payload")
@@ -2080,26 +2135,32 @@ func (s *Server) handleSubmitterHeartbeat(w http.ResponseWriter, r *http.Request
 		pending = 0
 	}
 	submitter := domain.Submitter{
-		ID:               strings.TrimSpace(req.ID),
-		Type:             strings.TrimSpace(req.Type),
-		Hostname:         strings.TrimSpace(req.Hostname),
-		Status:           strings.TrimSpace(req.Status),
-		Concurrency:      req.Concurrency,
-		InFlight:         inFlight,
-		Pending:          pending,
-		RecentThroughput: req.RecentThroughput,
-		AverageLatencyMS: req.AvgLatencyMs,
-		Pressure:         req.Pressure,
-		Labels:           req.Labels,
-		Config:           req.Config,
-		LastHeartbeat:    now,
-		RegisteredAt:     existing.RegisteredAt,
+		ID:                strings.TrimSpace(req.ID),
+		Type:              strings.TrimSpace(req.Type),
+		Hostname:          strings.TrimSpace(req.Hostname),
+		Status:            strings.TrimSpace(req.Status),
+		Concurrency:       req.Concurrency,
+		InFlight:          inFlight,
+		Pending:           pending,
+		RecentThroughput:  req.RecentThroughput,
+		AverageLatencyMS:  req.AvgLatencyMs,
+		Pressure:          req.Pressure,
+		WindowSeconds:     req.WindowSeconds,
+		LatencySumSeconds: req.LatencySumSeconds,
+		ProcessedCount:    req.ProcessedCount,
+		Labels:            req.Labels,
+		Config:            req.Config,
+		LastHeartbeat:     now,
+		RegisteredAt:      existing.RegisteredAt,
 	}
 	if submitter.RegisteredAt.IsZero() {
 		submitter.RegisteredAt = now
 	}
 	if submitter.Status == "" {
 		submitter.Status = "online"
+	}
+	if submitter.WindowSeconds <= 0 {
+		submitter.WindowSeconds = 60
 	}
 	if err := s.repository.UpsertSubmitter(r.Context(), submitter); err != nil {
 		s.logger.Error("submitter heartbeat failed", slog.Any("err", err), slog.String("submitter_id", req.ID))
@@ -2952,20 +3013,23 @@ func marshalRunner(runner domain.Runner) map[string]any {
 
 func marshalSubmitter(sub domain.Submitter) map[string]any {
 	return map[string]any{
-		"id":               sub.ID,
-		"type":             sub.Type,
-		"hostname":         sub.Hostname,
-		"status":           sub.Status,
-		"concurrency":      sub.Concurrency,
-		"inFlight":         sub.InFlight,
-		"pending":          sub.Pending,
-		"recentThroughput": sub.RecentThroughput,
-		"avgLatencyMs":     sub.AverageLatencyMS,
-		"pressure":         sub.Pressure,
-		"labels":           sub.Labels,
-		"config":           sub.Config,
-		"lastHeartbeat":    sub.LastHeartbeat,
-		"registeredAt":     sub.RegisteredAt,
+		"id":                sub.ID,
+		"type":              sub.Type,
+		"hostname":          sub.Hostname,
+		"status":            sub.Status,
+		"concurrency":       sub.Concurrency,
+		"inFlight":          sub.InFlight,
+		"pending":           sub.Pending,
+		"recentThroughput":  sub.RecentThroughput,
+		"avgLatencyMs":      sub.AverageLatencyMS,
+		"pressure":          sub.Pressure,
+		"labels":            sub.Labels,
+		"config":            sub.Config,
+		"lastHeartbeat":     sub.LastHeartbeat,
+		"registeredAt":      sub.RegisteredAt,
+		"windowSeconds":     sub.WindowSeconds,
+		"latencySumSeconds": sub.LatencySumSeconds,
+		"processedCount":    sub.ProcessedCount,
 	}
 }
 
@@ -3176,6 +3240,39 @@ func (s *Server) cancelRunAndReschedule(ctx context.Context, run domain.Run, rea
 	return nil
 }
 
+func (s *Server) createRunForTarget(ctx context.Context, exploit domain.Exploit, target domain.Target) (domain.Run, error) {
+	if s.broker == nil {
+		return domain.Run{}, errors.New("run queue unavailable")
+	}
+	artifact, err := s.repository.LatestExploitArtifact(ctx, exploit.ID)
+	if err != nil {
+		return domain.Run{}, fmt.Errorf("package exploit %s: %w", exploit.ID, err)
+	}
+	flagRegex, flagFile, timeout := jobs.HintsFromMetadata(exploit.Metadata)
+	run := domain.Run{
+		ExploitID: exploit.ID,
+		TargetID:  target.ID,
+		Status:    domain.RunStatusPending,
+		QueuedAt:  time.Now().UTC(),
+	}
+	if err := s.repository.CreateRun(ctx, &run); err != nil {
+		return domain.Run{}, fmt.Errorf("create run: %w", err)
+	}
+	item := domain.RunWorkItem{
+		RunID:     run.ID,
+		Exploit:   exploit,
+		Target:    target,
+		Artifact:  artifact,
+		FlagRegex: flagRegex,
+		FlagFile:  flagFile,
+		Timeout:   timeout,
+	}
+	if err := scheduler.EnqueueRun(ctx, s.cfg, s.broker, item); err != nil {
+		return domain.Run{}, err
+	}
+	return run, nil
+}
+
 func (s *Server) rescheduleRun(ctx context.Context, previous domain.Run) error {
 	exploitID := strings.TrimSpace(previous.ExploitID)
 	targetID := strings.TrimSpace(previous.TargetID)
@@ -3190,30 +3287,10 @@ func (s *Server) rescheduleRun(ctx context.Context, previous domain.Run) error {
 	if err != nil {
 		return fmt.Errorf("load target %s: %w", targetID, err)
 	}
-	artifact, err := s.repository.LatestExploitArtifact(ctx, exploit.ID)
-	if err != nil {
-		return fmt.Errorf("package exploit %s: %w", exploit.ID, err)
-	}
-	flagRegex, flagFile, timeout := jobs.HintsFromMetadata(exploit.Metadata)
-	newRun := domain.Run{
-		ExploitID: exploit.ID,
-		TargetID:  target.ID,
-		Status:    domain.RunStatusPending,
-		QueuedAt:  time.Now().UTC(),
-	}
-	if err := s.repository.CreateRun(ctx, &newRun); err != nil {
+	if _, err := s.createRunForTarget(ctx, exploit, target); err != nil {
 		return fmt.Errorf("create replacement run: %w", err)
 	}
-	item := domain.RunWorkItem{
-		RunID:     newRun.ID,
-		Exploit:   exploit,
-		Target:    target,
-		Artifact:  artifact,
-		FlagRegex: flagRegex,
-		FlagFile:  flagFile,
-		Timeout:   timeout,
-	}
-	return scheduler.EnqueueRun(ctx, s.cfg, s.broker, item)
+	return nil
 }
 
 func (s *Server) reclaimStalledRuns(ctx context.Context) error {
@@ -3318,6 +3395,35 @@ func reclaimerConsumerName(group string) string {
 		return "reclaimer"
 	}
 	return fmt.Sprintf("%s-reclaimer", group)
+}
+
+func aggregateSubmitterPressure(submitters []domain.Submitter) float64 {
+	var demand float64
+	var capacity float64
+	for _, sub := range submitters {
+		window := sub.WindowSeconds
+		if window <= 0 {
+			window = 60
+		}
+		if sub.Concurrency <= 0 {
+			continue
+		}
+		if sub.LatencySumSeconds > 0 {
+			demand += sub.LatencySumSeconds
+		} else {
+			// fallback to avg latency estimate
+			avgSeconds := sub.AverageLatencyMS / 1000
+			if avgSeconds <= 0 {
+				avgSeconds = 1
+			}
+			demand += avgSeconds * float64(sub.ProcessedCount)
+		}
+		capacity += float64(sub.Concurrency) * window
+	}
+	if capacity <= 0 {
+		return 0
+	}
+	return demand / capacity
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

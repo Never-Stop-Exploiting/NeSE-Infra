@@ -60,19 +60,22 @@ type registerSubmitterRequest struct {
 }
 
 type heartbeatSubmitterRequest struct {
-	ID               string            `json:"id"`
-	Secret           string            `json:"secret"`
-	Status           string            `json:"status"`
-	Type             string            `json:"type,omitempty"`
-	Hostname         string            `json:"hostname,omitempty"`
-	Concurrency      int               `json:"concurrency"`
-	InFlight         int               `json:"inFlight"`
-	Pending          int               `json:"pending"`
-	RecentThroughput float64           `json:"recentThroughput"`
-	AvgLatencyMs     float64           `json:"avgLatencyMs"`
-	Pressure         float64           `json:"pressure"`
-	Labels           map[string]string `json:"labels,omitempty"`
-	Config           map[string]string `json:"config,omitempty"`
+	ID                string            `json:"id"`
+	Secret            string            `json:"secret"`
+	Status            string            `json:"status"`
+	Type              string            `json:"type,omitempty"`
+	Hostname          string            `json:"hostname,omitempty"`
+	Concurrency       int               `json:"concurrency"`
+	InFlight          int               `json:"inFlight"`
+	Pending           int               `json:"pending"`
+	RecentThroughput  float64           `json:"recentThroughput"`
+	AvgLatencyMs      float64           `json:"avgLatencyMs"`
+	Pressure          float64           `json:"pressure"`
+	WindowSeconds     float64           `json:"windowSeconds"`
+	LatencySumSeconds float64           `json:"latencySumSeconds"`
+	ProcessedCount    int               `json:"processedCount"`
+	Labels            map[string]string `json:"labels,omitempty"`
+	Config            map[string]string `json:"config,omitempty"`
 }
 
 type submitStartRequest struct {

@@ -79,20 +79,23 @@ type Runner struct {
 
 // Submitter represents a flag submitter worker reporting to the control plane.
 type Submitter struct {
-	ID               string
-	Type             string
-	Hostname         string
-	Status           string
-	Concurrency      int
-	InFlight         int
-	Pending          int
-	RecentThroughput float64
-	AverageLatencyMS float64
-	Pressure         float64
-	Labels           map[string]string
-	Config           map[string]string
-	LastHeartbeat    time.Time
-	RegisteredAt     time.Time
+	ID                string
+	Type              string
+	Hostname          string
+	Status            string
+	Concurrency       int
+	InFlight          int
+	Pending           int
+	RecentThroughput  float64
+	AverageLatencyMS  float64
+	Pressure          float64
+	Labels            map[string]string
+	Config            map[string]string
+	LastHeartbeat     time.Time
+	RegisteredAt      time.Time
+	WindowSeconds     float64
+	LatencySumSeconds float64
+	ProcessedCount    int
 }
 
 // Run links an exploit revision to a target execution attempt.

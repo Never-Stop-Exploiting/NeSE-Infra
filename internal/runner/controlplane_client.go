@@ -56,8 +56,12 @@ func NewControlPlaneClient(cfg config.Config, log *slog.Logger) (*ControlPlaneCl
 	if secret == "" {
 		return nil, fmt.Errorf("runner secret is empty")
 	}
+	timeout := cfg.Runner.ControlPlaneTimeout
+	if timeout <= 0 {
+		timeout = time.Minute
+	}
 	client := &http.Client{
-		Timeout: time.Second * 10,
+		Timeout: timeout,
 	}
 	return &ControlPlaneClient{
 		baseURL: base,

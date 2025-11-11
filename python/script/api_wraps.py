@@ -300,6 +300,7 @@ class APIConfig:
     api_prefix: str | None = None
     timeout: float | None = None
     runner_secret: str | None = None
+    admin_token: str | None = None
     headers: Mapping[str, str] | None = None
 
     @classmethod
@@ -309,6 +310,7 @@ class APIConfig:
             api_prefix=os.getenv("CONTROL_PLANE_API_PREFIX"),
             timeout=_env_float("CONTROL_PLANE_TIMEOUT", 15.0),
             runner_secret=os.getenv("RUNNER_SECRET"),
+            admin_token=os.getenv("CONTROL_PLANE_TOKEN"),
         )
 
 
@@ -345,6 +347,8 @@ class ControlPlaneAPI:
         self.runner_secret = runner_secret or cfg.runner_secret
         self.session = session or requests.Session()
         headers: dict[str, str] = {"Accept": "application/json"}
+        if cfg.admin_token:
+            headers["Authorization"] = f"Bearer {cfg.admin_token}"
         if cfg.headers:
             headers.update(cfg.headers)
         if default_headers:

@@ -171,9 +171,6 @@ func ensureSchema(ctx context.Context, db *sql.DB) error {
 			file_name TEXT,
 			md5 TEXT
 		);`,
-		`ALTER TABLE exploit_artifacts ADD COLUMN IF NOT EXISTS file_name TEXT;`,
-		`ALTER TABLE exploit_artifacts ADD COLUMN IF NOT EXISTS md5 TEXT;`,
-		`ALTER TABLE exploit_artifacts DROP COLUMN IF EXISTS data;`,
 		`CREATE TABLE IF NOT EXISTS runs (
 			id TEXT PRIMARY KEY,
 			exploit_id TEXT REFERENCES exploits(id) ON DELETE SET NULL,
@@ -240,9 +237,6 @@ func ensureSchema(ctx context.Context, db *sql.DB) error {
 			strategy TEXT NOT NULL DEFAULT 'interval',
 			continuous_delay_seconds INTEGER NOT NULL DEFAULT 0
 		);`,
-		`ALTER TABLE scheduler_settings ADD COLUMN IF NOT EXISTS enabled BOOLEAN NOT NULL DEFAULT false;`,
-		`ALTER TABLE scheduler_settings ADD COLUMN IF NOT EXISTS strategy TEXT NOT NULL DEFAULT 'interval';`,
-		`ALTER TABLE scheduler_settings ADD COLUMN IF NOT EXISTS continuous_delay_seconds INTEGER NOT NULL DEFAULT 0;`,
 		`INSERT INTO scheduler_settings (id, round_interval_seconds, max_dispatch_batch, updated_at, enabled, strategy, continuous_delay_seconds)
 			VALUES ('default', 300, 50, NOW(), false, 'interval', 0)
 			ON CONFLICT (id) DO NOTHING;`,
@@ -264,12 +258,10 @@ func ensureSchema(ctx context.Context, db *sql.DB) error {
 			active_jobs INTEGER,
 			last_heartbeat TIMESTAMPTZ,
 			status TEXT,
-			registered_at TIMESTAMPTZ NOT NULL
+			registered_at TIMESTAMPTZ NOT NULL,
+			config JSONB,
+			last_ip TEXT
 		);`,
-		`ALTER TABLE runners ADD COLUMN IF NOT EXISTS tags JSONB;`,
-		`ALTER TABLE runners ADD COLUMN IF NOT EXISTS active_jobs INTEGER;`,
-		`ALTER TABLE runners ADD COLUMN IF NOT EXISTS config JSONB;`,
-		`ALTER TABLE runners ADD COLUMN IF NOT EXISTS last_ip TEXT;`,
 		`CREATE TABLE IF NOT EXISTS submitters (
 			id TEXT PRIMARY KEY,
 			type TEXT,
@@ -281,11 +273,21 @@ func ensureSchema(ctx context.Context, db *sql.DB) error {
 			recent_throughput DOUBLE PRECISION NOT NULL DEFAULT 0,
 			avg_latency_ms DOUBLE PRECISION NOT NULL DEFAULT 0,
 			pressure DOUBLE PRECISION NOT NULL DEFAULT 0,
+			window_seconds DOUBLE PRECISION NOT NULL DEFAULT 60,
+			latency_sum_seconds DOUBLE PRECISION NOT NULL DEFAULT 0,
+			processed_count INTEGER NOT NULL DEFAULT 0,
 			labels JSONB,
 			config JSONB,
 			last_heartbeat TIMESTAMPTZ,
 			registered_at TIMESTAMPTZ
 		);`,
+		`ALTER TABLE runners ADD COLUMN IF NOT EXISTS tags JSONB;`,
+		`ALTER TABLE runners ADD COLUMN IF NOT EXISTS config JSONB;`,
+		`ALTER TABLE runners ADD COLUMN IF NOT EXISTS last_ip TEXT;`,
+		`ALTER TABLE runners ADD COLUMN IF NOT EXISTS active_jobs INTEGER;`,
+		`ALTER TABLE submitters ADD COLUMN IF NOT EXISTS window_seconds DOUBLE PRECISION NOT NULL DEFAULT 60;`,
+		`ALTER TABLE submitters ADD COLUMN IF NOT EXISTS latency_sum_seconds DOUBLE PRECISION NOT NULL DEFAULT 0;`,
+		`ALTER TABLE submitters ADD COLUMN IF NOT EXISTS processed_count INTEGER NOT NULL DEFAULT 0;`,
 		`CREATE INDEX IF NOT EXISTS idx_submitters_status ON submitters(status);`,
 	}
 
@@ -2784,7 +2786,8 @@ func (r *Repository) DeleteRunner(ctx context.Context, id string) error {
 func (r *Repository) ListSubmitters(ctx context.Context) ([]domain.Submitter, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id, type, hostname, status, concurrency, in_flight, pending, recent_throughput,
-		       avg_latency_ms, pressure, labels, config, last_heartbeat, registered_at
+		       avg_latency_ms, pressure, window_seconds, latency_sum_seconds, processed_count,
+		       labels, config, last_heartbeat, registered_at
 		FROM submitters
 		ORDER BY hostname ASC`)
 	if err != nil {
@@ -2809,6 +2812,9 @@ func (r *Repository) ListSubmitters(ctx context.Context) ([]domain.Submitter, er
 			&item.RecentThroughput,
 			&item.AverageLatencyMS,
 			&item.Pressure,
+			&item.WindowSeconds,
+			&item.LatencySumSeconds,
+			&item.ProcessedCount,
 			&labelsData,
 			&configData,
 			&lastHeartbeat,
@@ -2857,7 +2863,8 @@ func (r *Repository) GetSubmitter(ctx context.Context, id string) (domain.Submit
 	var lastHeartbeat sql.NullTime
 	err := r.db.QueryRowContext(ctx, `
 		SELECT id, type, hostname, status, concurrency, in_flight, pending, recent_throughput,
-		       avg_latency_ms, pressure, labels, config, last_heartbeat, registered_at
+		       avg_latency_ms, pressure, window_seconds, latency_sum_seconds, processed_count,
+		       labels, config, last_heartbeat, registered_at
 		FROM submitters
 		WHERE id = $1`, id,
 	).Scan(
@@ -2871,6 +2878,9 @@ func (r *Repository) GetSubmitter(ctx context.Context, id string) (domain.Submit
 		&item.RecentThroughput,
 		&item.AverageLatencyMS,
 		&item.Pressure,
+		&item.WindowSeconds,
+		&item.LatencySumSeconds,
+		&item.ProcessedCount,
 		&labelsData,
 		&configData,
 		&lastHeartbeat,
@@ -2925,8 +2935,9 @@ func (r *Repository) UpsertSubmitter(ctx context.Context, submitter domain.Submi
 	}
 	_, err = r.db.ExecContext(ctx, `
 		INSERT INTO submitters (id, type, hostname, status, concurrency, in_flight, pending, recent_throughput,
-		                        avg_latency_ms, pressure, labels, config, last_heartbeat, registered_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+		                        avg_latency_ms, pressure, window_seconds, latency_sum_seconds, processed_count,
+		                        labels, config, last_heartbeat, registered_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
 		ON CONFLICT (id) DO UPDATE
 		SET type = EXCLUDED.type,
 		    hostname = EXCLUDED.hostname,
@@ -2937,6 +2948,9 @@ func (r *Repository) UpsertSubmitter(ctx context.Context, submitter domain.Submi
 		    recent_throughput = EXCLUDED.recent_throughput,
 		    avg_latency_ms = EXCLUDED.avg_latency_ms,
 		    pressure = EXCLUDED.pressure,
+		    window_seconds = EXCLUDED.window_seconds,
+		    latency_sum_seconds = EXCLUDED.latency_sum_seconds,
+		    processed_count = EXCLUDED.processed_count,
 		    labels = EXCLUDED.labels,
 		    config = EXCLUDED.config,
 		    last_heartbeat = EXCLUDED.last_heartbeat,
@@ -2951,6 +2965,9 @@ func (r *Repository) UpsertSubmitter(ctx context.Context, submitter domain.Submi
 		submitter.RecentThroughput,
 		submitter.AverageLatencyMS,
 		submitter.Pressure,
+		submitter.WindowSeconds,
+		submitter.LatencySumSeconds,
+		submitter.ProcessedCount,
 		labels,
 		configData,
 		nullTime(submitter.LastHeartbeat),
