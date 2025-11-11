@@ -17,7 +17,7 @@
           <span>Type: {{ runner.type }}</span>
           <span>Hostname: {{ runner.hostname ?? "-" }}</span>
           <span>Active Jobs: {{ runner.activeJobs }}/{{ runner.maxParallel }}</span>
-          <span>Last heartbeat: {{ runner.lastHeartbeat ?? "-" }}</span>
+          <span>Last heartbeat: {{ formatUtcTimestamp(runner.lastHeartbeat) }}</span>
           <span>Source IP: {{ runner.lastIp ?? "-" }}</span>
           <span>
             Broker:
@@ -79,7 +79,7 @@
               {{ formatPressure(submitter.pressure) }}
             </span>
           </span>
-          <span>Last heartbeat: {{ submitter.lastHeartbeat || "-" }}</span>
+          <span>Last heartbeat: {{ formatUtcTimestamp(submitter.lastHeartbeat) }}</span>
         </div>
         <button
           v-if="submitter.status === 'offline'"
@@ -98,6 +98,7 @@
 <script setup lang="ts">
 import { computed, onMounted } from "vue";
 import { useRunnerStore } from "@/stores/runners";
+import { formatUtcTimestamp } from "@/utils/time";
 
 const runnerStore = useRunnerStore();
 

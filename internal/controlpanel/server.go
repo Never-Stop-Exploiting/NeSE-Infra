@@ -3342,7 +3342,21 @@ func (s *Server) handleStaleQueueMessage(ctx context.Context, group string, visi
 	}
 	switch run.Status {
 	case domain.RunStatusPending, domain.RunStatusRunning:
+		timeout := payload.Timeout(s.cfg.Runner.DefaultTimeout)
+		createdAt := payload.CreationTime()
+		if createdAt.IsZero() {
+			createdAt = run.QueuedAt
+		}
+		expired := false
+		if !createdAt.IsZero() && timeout > 0 {
+			if now := time.Now(); now.After(createdAt.Add(timeout)) {
+				expired = true
+			}
+		}
 		reason := fmt.Sprintf("visibility timeout after %s", visibility)
+		if expired {
+			reason = fmt.Sprintf("run timeout after %s", timeout)
+		}
 		updated, cancelErr := s.cancelRunInternal(ctx, run, reason)
 		if cancelErr != nil {
 			return cancelErr

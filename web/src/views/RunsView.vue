@@ -156,6 +156,10 @@
         <div><strong>Status:</strong> <span class="status" :data-status="runStore.selectedRun.status">{{ runStore.selectedRun.status }}</span></div>
         <div><strong>Runner:</strong> <span>{{ runStore.selectedRun.runnerId ?? "not assigned" }}</span></div>
         <div>
+          <strong>Queued:</strong>
+          <span>{{ formatUtcTimestamp(runStore.selectedRun.queuedAt) }}</span>
+        </div>
+        <div>
           <strong>Started:</strong>
           <span>{{ formatUtcTimestamp(runStore.selectedRun.startedAt) }}</span>
         </div>

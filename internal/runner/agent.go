@@ -659,6 +659,15 @@ func (a *Agent) heartbeatConfig() map[string]string {
 	if chroot := a.cfg.Runner.ChrootPath; chroot != "" {
 		add("RUNNER_CHROOT_PATH", chroot)
 	}
+	if retry := a.cfg.RunQueue.RetryDelay; retry >= 0 {
+		add("RUN_QUEUE_RETRY_DELAY", retry.String())
+	}
+	if visibility := a.cfg.RunQueue.Visibility; visibility > 0 {
+		add("RUN_QUEUE_VISIBILITY", visibility.String())
+	}
+	if queueName := a.cfg.RunQueue.Name; queueName != "" {
+		add("RUN_QUEUE_NAME", queueName)
+	}
 	if len(cfg) == 0 {
 		return nil
 	}

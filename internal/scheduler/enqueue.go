@@ -5,6 +5,7 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
+	"time"
 
 	"awdinfra/internal/config"
 	"awdinfra/internal/domain"
@@ -27,6 +28,7 @@ func EnqueueRun(ctx context.Context, cfg config.Config, broker queue.Broker, ite
 		TargetPort:  item.Target.Port,
 		FlagRegex:   item.FlagRegex,
 		FlagFile:    item.FlagFile,
+		CreatedAt:   time.Now().UTC(),
 	}
 	if item.Exploit.Metadata != nil {
 		if script, ok := item.Exploit.Metadata["run_script"].(string); ok {
