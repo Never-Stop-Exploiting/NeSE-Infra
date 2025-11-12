@@ -119,9 +119,12 @@ func (s *Server) maintenanceLoop(ctx context.Context) error {
 				s.logger.Warn("submitter sweep failed", slog.Any("err", err))
 			}
 		case <-reclaimTicker.C:
-			if err := s.reclaimStalledRuns(ctx); err != nil && ctx.Err() == nil {
+			runners, err := s.reclaimStalledRuns(ctx)
+			if err != nil && ctx.Err() == nil {
 				s.logger.Warn("reclaim stalled runs failed", slog.Any("err", err))
+				continue
 			}
+			s.trimRunQueues(ctx, runners)
 		}
 	}
 }
@@ -3293,49 +3296,54 @@ func (s *Server) rescheduleRun(ctx context.Context, previous domain.Run) error {
 	return nil
 }
 
-func (s *Server) reclaimStalledRuns(ctx context.Context) error {
+func (s *Server) reclaimStalledRuns(ctx context.Context) ([]domain.Runner, error) {
 	visibility := s.cfg.RunQueue.Visibility
 	if visibility <= 0 {
-		return nil
+		return nil, nil
 	}
-	groups := s.runnerGroups(ctx)
-	if len(groups) == 0 {
-		return nil
+	runners, err := s.repository.ListRunners(ctx)
+	if err != nil {
+		s.logger.Warn("list runners for reclaim failed", slog.Any("err", err))
+		return nil, err
 	}
-	for _, group := range groups {
-		messages, err := s.broker.Reclaim(ctx, s.cfg.RunQueue.Name, group, reclaimerConsumerName(group), visibility, 64)
+	for _, runner := range runners {
+		queueName := queue.RunnerQueueName(s.cfg.RunQueue.RunnerPrefix, runner.ID)
+		group := runnerGroupName(runner.Type)
+		messages, err := s.broker.Reclaim(ctx, queueName, group, reclaimerConsumerName(group), visibility, 64)
 		if err != nil {
 			if ctx.Err() != nil {
-				return ctx.Err()
+				return nil, ctx.Err()
 			}
 			s.logger.Warn("reclaim stalled jobs failed",
 				slog.Any("err", err),
-				slog.String("group", group))
+				slog.String("group", group),
+				slog.String("queue", queueName))
 			continue
 		}
 		for _, message := range messages {
-			if err := s.handleStaleQueueMessage(ctx, group, visibility, message); err != nil && ctx.Err() == nil {
+			if err := s.handleStaleQueueMessage(ctx, queueName, group, visibility, message); err != nil && ctx.Err() == nil {
 				s.logger.Warn("handle stale job failed",
 					slog.Any("err", err),
 					slog.String("group", group),
+					slog.String("queue", queueName),
 					slog.String("message_id", message.ID))
 			}
 		}
 	}
-	return nil
+	return runners, nil
 }
 
-func (s *Server) handleStaleQueueMessage(ctx context.Context, group string, visibility time.Duration, message queue.Message) error {
+func (s *Server) handleStaleQueueMessage(ctx context.Context, queueName string, group string, visibility time.Duration, message queue.Message) error {
 	payload, err := jobs.DecodeJobPayload(message.Body)
 	if err != nil {
-		if ackErr := s.broker.Ack(ctx, s.cfg.RunQueue.Name, group, message.ID); ackErr != nil {
+		if ackErr := s.broker.Ack(ctx, queueName, group, message.ID); ackErr != nil {
 			return fmt.Errorf("ack malformed job: %w", ackErr)
 		}
 		return nil
 	}
 	run, err := s.repository.GetRun(ctx, payload.RunID)
 	if err != nil {
-		if ackErr := s.broker.Ack(ctx, s.cfg.RunQueue.Name, group, message.ID); ackErr != nil {
+		if ackErr := s.broker.Ack(ctx, queueName, group, message.ID); ackErr != nil {
 			return ackErr
 		}
 		return nil
@@ -3369,30 +3377,48 @@ func (s *Server) handleStaleQueueMessage(ctx context.Context, group string, visi
 	default:
 		// no-op
 	}
-	if err := s.broker.Ack(ctx, s.cfg.RunQueue.Name, group, message.ID); err != nil {
+	if err := s.broker.Ack(ctx, queueName, group, message.ID); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (s *Server) runnerGroups(ctx context.Context) []string {
-	runners, err := s.repository.ListRunners(ctx)
-	if err != nil {
-		s.logger.Warn("list runners for reclaim failed", slog.Any("err", err))
-		return []string{runnerGroupName("")}
+func (s *Server) trimRunQueues(ctx context.Context, runners []domain.Runner) {
+	maxLen := s.cfg.RunQueue.TrimMaxLen
+	trimMain := queue.TrimStrategy{MaxLen: maxLen}
+	minID, err := s.broker.PendingMinID(ctx, s.cfg.RunQueue.Name, "dispatcher")
+	if err != nil && ctx.Err() == nil {
+		s.logger.Debug("pending min id lookup failed",
+			slog.Any("err", err),
+			slog.String("stream", s.cfg.RunQueue.Name))
+	} else if minID != "" {
+		trimMain.MinID = minID
+		trimMain.MaxLen = 0
 	}
-	unique := make(map[string]struct{})
+	if err := s.broker.Trim(ctx, s.cfg.RunQueue.Name, trimMain); err != nil && ctx.Err() == nil {
+		s.logger.Debug("trim main run stream failed",
+			slog.Any("err", err),
+			slog.String("stream", s.cfg.RunQueue.Name))
+	}
 	for _, runner := range runners {
-		unique[runnerGroupName(runner.Type)] = struct{}{}
+		stream := queue.RunnerQueueName(s.cfg.RunQueue.RunnerPrefix, runner.ID)
+		strategy := queue.TrimStrategy{MaxLen: maxLen}
+		group := runnerGroupName(runner.Type)
+		minID, err := s.broker.PendingMinID(ctx, stream, group)
+		if err == nil && minID != "" {
+			strategy.MinID = minID
+			strategy.MaxLen = 0
+		} else if err != nil && ctx.Err() == nil {
+			s.logger.Debug("pending min id lookup failed",
+				slog.Any("err", err),
+				slog.String("stream", stream))
+		}
+		if err := s.broker.Trim(ctx, stream, strategy); err != nil && ctx.Err() == nil {
+			s.logger.Debug("trim runner stream failed",
+				slog.Any("err", err),
+				slog.String("stream", stream))
+		}
 	}
-	if len(unique) == 0 {
-		unique[runnerGroupName("")] = struct{}{}
-	}
-	result := make([]string, 0, len(unique))
-	for group := range unique {
-		result = append(result, group)
-	}
-	return result
 }
 
 func runnerGroupName(runnerType string) string {

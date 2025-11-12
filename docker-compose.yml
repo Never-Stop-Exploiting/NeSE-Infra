@@ -45,6 +45,15 @@ services:
     depends_on:
       - control-panel
 
+  dispatcher:
+    build:
+      context: .
+      dockerfile: docker/dispatcher.Dockerfile
+    env_file:
+      - .env.example
+    depends_on:
+      - scheduler
+
 #  flag-submitter:
 #    build:
 #      context: .

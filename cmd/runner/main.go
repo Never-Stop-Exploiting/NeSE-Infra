@@ -42,6 +42,7 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	startChildReaper(ctx, logger)
 
 	if err := agent.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Error("runner exited", slog.Any("err", err))
@@ -57,4 +58,31 @@ func createBroker(cfg config.Config, logger *slog.Logger) (queue.Broker, string)
 	}
 	logger.Info("redis broker enabled", slog.String("addr", cfg.Redis.Addr))
 	return broker, "connected"
+}
+
+func startChildReaper(ctx context.Context, logger *slog.Logger) {
+	if os.Getpid() != 1 {
+		return
+	}
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGCHLD)
+	go func() {
+		defer signal.Stop(sigCh)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-sigCh:
+				for {
+					pid, err := syscall.Wait4(-1, nil, syscall.WNOHANG, nil)
+					if pid <= 0 {
+						if err != nil && err != syscall.ECHILD {
+							logger.Debug("wait4 failed", slog.Any("err", err))
+						}
+						break
+					}
+				}
+			}
+		}
+	}()
 }

@@ -36,3 +36,11 @@ func (b *Broker) Nack(ctx context.Context, stream string, group string, messageI
 func (b *Broker) Reclaim(ctx context.Context, stream string, group string, consumer string, minIdle time.Duration, count int) ([]queue.Message, error) {
 	return nil, ctx.Err()
 }
+
+func (b *Broker) Trim(ctx context.Context, stream string, strategy queue.TrimStrategy) error {
+	return ctx.Err()
+}
+
+func (b *Broker) PendingMinID(ctx context.Context, stream string, group string) (string, error) {
+	return "", ctx.Err()
+}

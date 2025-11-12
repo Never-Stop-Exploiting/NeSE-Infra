@@ -234,3 +234,44 @@ func (b *Broker) ensureGroup(ctx context.Context, stream, group string) error {
 	}
 	return nil
 }
+
+// Trim applies the provided trimming strategy to a stream.
+func (b *Broker) Trim(ctx context.Context, stream string, strategy queue.TrimStrategy) error {
+	if stream == "" {
+		return errors.New("stream required")
+	}
+	if strategy.MinID == "" && strategy.MaxLen <= 0 {
+		return nil
+	}
+	if strategy.MinID != "" {
+		return b.client.Do(ctx, "XTRIM", stream, "MINID", "~", strategy.MinID).Err()
+	}
+	return b.client.Do(ctx, "XTRIM", stream, "MAXLEN", "~", strategy.MaxLen).Err()
+}
+
+// PendingMinID returns the smallest pending ID for the specified group.
+func (b *Broker) PendingMinID(ctx context.Context, stream, group string) (string, error) {
+	if stream == "" || group == "" {
+		return "", errors.New("stream and group required")
+	}
+	if err := b.ensureGroup(ctx, stream, group); err != nil {
+		return "", err
+	}
+	entries, err := b.client.XPendingExt(ctx, &redis.XPendingExtArgs{
+		Stream: stream,
+		Group:  group,
+		Start:  "-",
+		End:    "+",
+		Count:  1,
+	}).Result()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return "", nil
+		}
+		return "", err
+	}
+	if len(entries) == 0 {
+		return "", nil
+	}
+	return entries[0].ID, nil
+}

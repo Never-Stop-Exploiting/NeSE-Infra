@@ -1,174 +1,195 @@
-# AwD Infra Scaffold
+# AwD Infra
 
-> Attack-with-Defence (AwD) 自动化平台脚手架，已经提供控制面 API、调度器、Runner、Flag Submitter 与 Vue 运维面板，可直接连接 Postgres + Redis 复现一条端到端的攻防自动化链路。
+> Attack-with-Defence (AwD) 自动化平台脚手架：Go + Vue3 打造的控制面、调度、分发、执行、提交流程，可直接连接 Postgres 与 Redis 形成一条端到端的攻防自动化链路。
 
-## 项目简介
+## 功能特性
 
-AwD Infra 以 Go + Vue3 实现一套模块化的 AwD 平台：控制面负责题目/目标/Exploit 元数据和运行状态，调度器生成待执行任务并投递到 Redis Streams，Runner 在隔离工作区执行 Exploit、提取 Flag 并回传日志，Flag Submitter 针对捕获的 flag 实施限速与重试，Web UI 则提供运维视图。当前仓库同时内置 Postgres schema 迁移、artifact 存储、默认 HTTP flag 提交插件以及 Docker Compose 模板，方便本地或实验环境快速落地。
+- **模块化服务**：Control Panel、Scheduler、Dispatcher、Runner、Flag Submitter、Vue 运维面板全部开箱即用，可按需横向扩展。
+- **标签感知分发**：Scheduler 只需写入主 Run Stream，由 Dispatcher 读取并依据 Runner tags/并发压力路由到各 Runner 专属 Stream，彻底消除误抢任务导致的 Nack。
+- **可观测与管控**：Control Panel 暴露 `/api/v1` REST 接口与 Web 面板，支持 Run/Flag/日志/Runner 可视化、执行记录下载、Flag 重试及目标覆盖矩阵维护。
+- **安全执行**：Runner 在 chroot 工作区拉起 exploit，支持 artifact 缓存、run.sh 自动补全、Flag 文件/正则回退及远程取消；进程组会在超时或取消时被整组 `SIGKILL` 并由 PID 1 reaper 收尸。
+- **流量治理**：Flag Submitter 通过 Redis Streams 消费队列并根据插件策略限速重试；Control Panel 负责 run 超时/runner 离线回收并定期 `XTRIM` 主/子 Stream，避免 Redis 无限膨胀。
 
-## 当前能力
+## 核心组件
 
-- **Control Panel / REST API (`cmd/control-panel`)**：提供 `/api/v1` 端点，实现 Challenge/Target/Exploit CRUD、批量导入目标 (`/targets/import`)、artifact 文件/`run.sh` 管理、Run/Flag/日志查询、Run start/finish/cancel Hook、Flag 重试、Runner 注册与心跳、Scheduler 运行参数热更新以及 Target × Exploit 覆盖矩阵维护；捕获的 flag 会落库并写入 Flag 队列。
-- **Scheduler (`cmd/scheduler`)**：按 `SchedulerSettings` 设置的策略（轮询批次或按 Target×Exploit 连续运行）生成 `RunnableWork`，结合 Target 并发限制、Exploit Runner Tags、Target-Exploit Override 计算可执行组合，打包 artifact（内联或 URI）后以 `jobs.JobPayload` 写入 Redis Streams（消费组 + 可见性超时），并在缺乏匹配 Runner Tags 时跳过任务。
-- **Runner (`cmd/runner`)**：注册到控制面并定期心跳，使用 `RUN_QUEUE_NAME` 对应的 Redis Streams 消费组阻塞拉取任务；自动下载/解压 ZIP artifact 到 `/env/tmp/<run-id>`，若缺少 `run.sh` 会用 payload 中的 `runScript/entrypoint` 补齐；通过 `chroot` + `./run.sh <ip> <port>` 执行，收集 stdout/stderr，优先从指定 flag 文件读取 flag，失败时回退到正则；Run 状态会在 start/finish/cancel、心跳、取消检测时同步到控制面，同时把 flag 推送到 flag 队列。
-- **Flag Submitter (`cmd/flag-submitter`)**：消费 `FLAG_QUEUE_NAME`，解析 `submitter.QueueMessage`，调用内置 HTTP 插件（可插拔接口在 `docs/flag-submitters.md`）执行提交；提交结果通过 Control Panel 的 `/flags/{id}/submit/start|finish` API 汇报，控制面统一记录 `flags`/`submission_attempts`/日志，失败场景按 backoff 指示 `Nack` 重排队，可多实例/多语言并行部署。
-- **持久化 (`internal/storage/postgres`)**：初始化完整 Postgres schema（Challenges/Targets/Exploits/Runs/Flags/Runners/Logs/Overrides 等），以本地文件夹存放 Exploit artifacts 与 `run.sh`，支持列出/上传/删除/打包，并保证 ZIP 不可逃逸工作目录。
-- **Web UI (`web/`)**：Vue3 + Vite + Pinia + Axios，路由覆盖 Dashboard、Targets、Exploits、Runs、Flags、Logs、Runners、Scheduler 视图；开发阶段通过 `pnpm --filter ./web dev`（5173）并代理 `/api` 到控制面，生产由 `docker/web.Dockerfile` + Nginx 托管。
-
-## 架构总览
-
-```
-                      ┌──────────────────┐
-                      │      Web UI      │
-                      │ (Vue + Vite)     │
-                      └────────┬─────────┘
-                               │ REST /api + future WS
-                       ┌───────▼────────┐
-        Postgres ◄────►│  Control Panel │◄────► Redis (Queues / Cache)
-                       │  (REST + Biz)  │
-                       └───┬─────────┬──┘
-                           │         │
-                           │         │ Scheduler settings / overrides
-                           │         │
-                     ┌─────▼────┐    │
-                     │Scheduler │    │
-                     │(Go loop) │    │
-                     └────┬─────┘    │
-                          │ publishes Run jobs
-                ┌─────────▼───────────┐
-                │   Redis Streams     │
-                │   (Run Queue)       │
-                └─────────▲───────────┘
-                          │ consumes
-                    ┌─────┴─────┐
-                    │ Runner(s) │───┐
-                    │ (chroot)  │   │ emits flags/logs
-                    └─────┬─────┘   │
-                          │         │
-                 ┌────────▼────────┐│
-                 │ Redis Streams   ││
-                 │  (Flag Queue)   ││
-                 └────────▲────────┘│
-                          │         │
-                    ┌─────┴────────┐│
-                    │ Flag Submitter│
-                    │ (HTTP plugin) │
-                    └───────────────┘
-```
-
-## 代码结构
+| 组件 | 说明 |
+| --- | --- |
+| **Control Panel (`cmd/control-panel`)** | 提供 `/api/v1` REST API、Runner/Submitter 心跳注册、Run/Flag/日志查询、Scheduler 设置、Target×Exploit Override 管理，并驱动队列 reclaim 与 stream trim。|
+| **Scheduler (`cmd/scheduler`)** | 从 Postgres 读取 runnable work（目标状态、并发限制、Runner Tags、Overrides），按照 Interval/Continuous 策略打包 `jobs.JobPayload` 写入主 Run Stream。|
+| **Dispatcher (`cmd/dispatcher`)** | 消费主 Run Stream，根据 Runner tag 集与实时负载挑选合适 Runner，并把 payload 转发到该 Runner 的专属 Stream + consumer group。|
+| **Runner (`cmd/runner`)** | 在 chroot 工作区执行 exploit，支持 artifact 缓存、Flag 文件/正则提取、远程取消、完整日志回传，并将捕获 flag 写入 Flag Stream；最新版本会为每次 run 创建独立进程组，并在容器 PID1 场景下主动 Wait4 清理僵尸进程。|
+| **Flag Submitter (`cmd/flag-submitter`)** | 消费 Flag Stream，调用内置或自定义插件提交旗帜，并回传 `/flags/{id}/submit/start|finish`，失败时按 backoff 再排队。|
+| **Web UI (`web/`)** | Vue3 + Vite + Pinia + Tailwind。提供 Dashboard、Targets、Exploits、Runs、Flags、Logs、Runners、Scheduler 视图；访问需提供 `CONTROL_PANEL_TOKEN`（浏览器本地缓存）。|
 
 ```
-cmd/                    # 控制面、调度器、Runner、Flag Submitter 入口
-internal/
-  config/               # 统一环境变量解析
-  controlpanel/         # HTTP server + handler
-  scheduler/            # 调度主循环
-  runner/               # Runner agent、控制面客户端
-  submitter/            # flag submitter、插件、消息定义
-  storage/postgres/     # Repository + artifact 管理
-  queue/                # Redis Streams 实现 + noop 回落
-web/                    # Vue3 前端
-docs/                   # 扩展协议等文档
-docker/                 # 服务 Dockerfile + web Nginx
+                   ┌────────────┐           ┌─────────────┐
+                   │    Web     │<─────────>│ ControlPane │<───┐
+                   │ (Vue UI)   │  REST API │  l + API    │    │
+                   └────┬───────┘           └──────┬──────┘    │
+                        │                           │          │
+                        │ Scheduler settings        │          │
+                        │                           │          ▼
+                    ┌───▼──────┐             ┌──────▼──────┐  Redis
+                    │Scheduler │  Enqueue    │ Dispatcher  │ Streams
+                    └───┬──────┘  main run  └──────┬──────┘  (exp:pending, exp:runner:<id>, flag:pending)
+                        │      stream              │
+                        │                          │ routes per runner
+                        ▼                          ▼
+                 ┌─────────────┐            ┌─────────────┐
+                 │ Runner (n)  │───────────►│ Flag Queue  │
+                 │ (chroot)    │ flags/logs │ + Submitter │
+                 └─────────────┘            └─────────────┘
 ```
-
-## API 能力概览
-
-| 资源 | 路径 | 能力 |
-| --- | --- | --- |
-| Challenges | `/api/v1/challenges` | GET/POST/PUT/PATCH/DELETE，维护题目元数据及 Metadata |
-| Targets | `/api/v1/targets` | GET/POST + PATCH/DELETE，支持并发限制/状态更新 |
-| Targets Import | `/api/v1/targets/import` | 依据基准 IP + 数量批量生成目标，自动填充队伍名称 |
-| Exploits | `/api/v1/exploits` & `/api/v1/exploits/{id}` | 列表、创建（JSON 或 multipart）、启用/禁用、超时时间、Metadata 更新、删除、上传/下载 artifact/文件/`run.sh` |
-| Runs | `/api/v1/runs` & `/api/v1/runs/{id}` | 游标查询、详情（含 stdout/stderr/flag）、start/finish/cancel Hook |
-| Flags | `/api/v1/flags` & `/api/v1/flags/{id}` | 列表/过滤、详情（包含 attempts）、重试 (`/requeue`)、查看日志 (`/logs`) |
-| Runners | `/api/v1/runners` | 列表、手动删除僵尸 Runner、`/register`、`/heartbeat` |
-| Scheduler | `/api/v1/scheduler/settings` & `/api/v1/scheduler/targets` | 获取/修改调度参数、查看每个 Target 的 Exploit 覆盖、覆写 Target × Exploit 启停 |
-| Logs | `/api/v1/logs` | 结构化日志查询，支持 level/source/runId/flagId/limit 过滤 |
 
 ## 快速开始
 
-- **依赖准备**：Go 1.21+、pnpm（Node 18+）、Docker / Docker Compose、Redis 7、Postgres 15。如果使用本仓的 Compose 模板则无需额外安装 Redis/Postgres。
-- **配置环境变量**：复制示例变量并根据实际修改。
+1. **基础依赖**：Docker / Docker Compose、Go 1.22+、Node 18+/pnpm（前端开发可选）。
+2. **环境变量**：复制 `.env.example` 为 `.env`（或对各服务单独覆写）。至少需要设置 `CONTROL_PANEL_TOKEN`、`RUNNER_SECRET`、`SUBMITTER_SECRET`。默认 Redis/ Postgres 账号密码已经在示例文件中提供。
+3. **启动核心链路**：
+   ```bash
+   docker compose up -d postgres redis
+   docker compose up -d control-panel scheduler dispatcher web
+   # 可视需求再起 submitter / runner
+   ```
+4. **测试运行链路**：仓库附带 `test_env/`，包含示例挑战、flag server 以及 requests/pwntools Runner：
+   ```bash
+   cd test_env
+   docker compose up --build
+   ```
+   Web UI 默认暴露在 `http://localhost:5173`，Token 填写 `.env.example` 的 `CONTROL_PANEL_TOKEN`。
 
-  ```bash
-  cp .env.example .env
-  ```
+## 配置环境变量
 
-- **启动基础依赖**（可选，若未使用 Compose 运行全栈）：  
-  `docker compose up -d postgres redis`
+以下仅列出仍在代码中使用的关键变量，更多可查阅 `internal/config/config.go`。
 
-- **运行控制面 / 调度器 / Flag Submitter / Runner（本地方式）**：
+### 通用
 
-  ```bash
-  go mod download
-  go run ./cmd/control-panel &
-  go run ./cmd/scheduler &
-  go run ./cmd/flag-submitter &
-  CONTROL_PANEL_URL=http://localhost:8080 go run ./cmd/runner &
-  ```
-
-- **运行 Web 控制台**：
-
-  ```bash
-  pnpm install --filter ./web
-  pnpm --filter ./web dev
-  # 浏览 http://localhost:5173（Vite 自动代理 /api -> http://localhost:8080）
-  ```
-
-- **端到端模式（推荐）**：单条命令启动 Postgres、Redis、控制面、调度器、Python flag submitter、Runner 以及 Web。
-
-  ```bash
-  docker compose up --build
-  ```
-
-## 配置项速查
-
-| 变量 | 说明 | 默认值（`.env.example`） |
+| 变量 | 说明 | 默认值 |
 | --- | --- | --- |
-| `POSTGRES_DSN` | 控制面/调度器/submitter 使用的 PostgreSQL 连接串 | `postgres://awd:awd@postgres:5432/awd?sslmode=disable` |
-| `POSTGRES_ARTIFACT_DIR` | Exploit artifact+脚本存放目录 | `/var/lib/awd/artifacts` |
-| `REDIS_ADDR` | Redis 地址（用于 Run/Flag 队列） | `redis:6379` |
-| `RUN_QUEUE_NAME` / `FLAG_QUEUE_NAME` | 队列名称与可见性、重试间隔 | `exp:pending` / `flag:pending`（在 `internal/config` 中有默认值） |
-| `SCHEDULER_POLL_INTERVAL` / `SCHEDULER_MAX_BATCH` | 调度轮询间隔与单轮派发上限 | `5s` / `50` |
-| `RUNNER_SECRET` | Runner 调用 `/runs/*`、`/runners/*` 的共享密钥 | `dev-runner-secret` |
-| `CONTROL_PANEL_TOKEN` | 访问 `/api/v1/**` 运维接口时需要携带的 `Authorization: Bearer` Token | _无默认值，必须显式设置_ |
-| `CONTROL_PANEL_URL` | Runner 注册/下载 artifact 时访问的控制面地址 | `http://control-panel:8080` |
-| `RUNNER_CHROOT_PATH` / `RUNNER_WORKSPACE_ROOT` | Runner chroot 根目录与临时工作区 | `/env` / `/env/tmp` |
-| `RUNNER_FLAG_FILE` / `RUNNER_FLAG_REGEX` | Flag 文件名与匹配正则 | `flag` / `flag\{[a-zA-Z0-9_\-]+\}` |
-| `FLAG_SUBMIT_URL` / `FLAG_SUBMIT_TIMEOUT` | 默认 HTTP 提交端点与超时 | `http://flagserver:5000/upload_flag` / `10s` |
-| `SUBMITTER_SECRET` | Submitter 注册/心跳/flag 回报共用密钥 | `dev-submitter-secret` |
-| `SUBMITTER_CONTROL_PANEL_URL` | Submitter 专用 Control Panel 地址，默认为 `CONTROL_PANEL_URL` | `http://control-panel:8080` |
+| `APP_NAME` | 日志/标签展示名称 | `awd-infra` |
+| `LOG_LEVEL` | slog 等级 | `info` |
+| `CONTROL_PANEL_TOKEN` | 访问 `/api/v1/**` 与 Web UI 时的 Bearer Token | **必填** |
+| `RUNNER_SECRET` / `SUBMITTER_SECRET` | Runner/Submitter 调用控制面 API 的共享密钥 | `dev-runner-secret` / `dev-submitter-secret` |
+| `POSTGRES_*` | DSN、连接池配置、artifact 存储目录 | 见 `.env.example` |
+| `REDIS_ADDR` / `REDIS_PASSWORD` | Redis 连接信息 | `redis:6379` / `dev-redis-password` |
 
-更多变量可参考 `internal/config/config.go` 中的默认值解释。
+### Run / Flag 队列
 
-## 调度与执行流程
+| 变量 | 说明 | 默认值 |
+| --- | --- | --- |
+| `RUN_QUEUE_NAME` / `FLAG_QUEUE_NAME` | 主 Run Stream、Flag Stream 名称 | `exp:pending` / `flag:pending` |
+| `RUN_QUEUE_VISIBILITY` | 消费可见性（Control Panel reclaim 超时阈值） | `30s` |
+| `RUN_QUEUE_RETRY_DELAY` | Dispatcher/Runner `NACK` 再排队延迟 | `5s` |
+| `RUN_QUEUE_RUNNER_PREFIX` | 生成 per-runner stream 的前缀 | `<RUN_QUEUE_NAME>:runner` |
+| `RUN_QUEUE_TRIM_MAXLEN` | Stream 保留的最大条目数；超出会 `XTRIM` | `50000` |
+| `FLAG_QUEUE_VISIBILITY` / `FLAG_QUEUE_RETRY_DELAY` | Flag Stream 可见性/重试间隔 | `30s` / `10s` |
 
-1. Operator 通过 Web UI 或直接调用 Control Panel API 维护 Challenge、Target、Exploit，并可批量导入目标或上传/下载 artifact。
-2. 调度器读取可运行的 RunWorkItem（结合 Target 状态、并发限制、Override、Runner Tags），遵循 `RoundInterval` 和 `MaxDispatchBatch` 将任务编码成 `jobs.JobPayload` 并推送到 Redis Streams。
-3. Runner 按心跳间隔抢占可用 slot，下载 artifact、在 chroot 工作区执行 `run.sh`，并把 stdout/stderr、Flag、错误信息上报到 Control Panel；若检测到 Run 被取消会中止执行。
-4. Runner 将解析出的 Flag 经结构化消息写入 Flag 队列，Control Panel 同步更新日志。
-5. Flag Submitter 轮询队列，调用插件提交 flag，记录 `submission_attempts`、更新 Flag 状态并将结果写入日志；未知状态会重试并按 backoff 延迟。
+### Scheduler
 
-## Web 控制台
+| 变量 | 说明 | 默认值 |
+| --- | --- | --- |
+| `SCHEDULER_POLL_INTERVAL` | Interval 策略基础间隔 | `5s` |
+| `SCHEDULER_MAX_BATCH` | 单轮派发上限 | `50` |
 
-- Targets 支持单个新增、批量导入、状态编辑以及并发上限调节。
-- Exploits 列表可上传 ZIP/二进制、查看/替换 `run.sh`、配置 Runner Tags、Schedule Weight、Timeout、Metadata。
-- Runs 页面展示最新队列，进入详情可查看 stdout/stderr/Flag，必要时可手动取消。
-- Flags 页面展示状态、Run 关联、提交历史，支持一键重试与查看日志。
-- Scheduler 视图列出每个 Target 能匹配的 Exploit 并可针对单个 Target 覆写启停。
-- Logs 与 Runners 视图分别提供结构化日志筛选、Runner 心跳状态监控。
-- 访问 Web UI 时需先在登录页输入 `CONTROL_PANEL_TOKEN`，浏览器会缓存该 Token 并自动为后续请求附加 `Authorization: Bearer` 头。
+### Dispatcher
 
-## 测试与质量
+| 变量 | 说明 | 默认值 |
+| --- | --- | --- |
+| `DISPATCHER_ID` | Dispatcher 消费者 ID（Redis group=dispatcher） | `dispatcher` |
+| `DISPATCHER_MAX_BATCH` | `XREADGROUP` 每次获取消息上限 | `32` |
+| `DISPATCHER_BLOCK_TIMEOUT` | 阻塞读取最大时长 | `5s` |
+| `DISPATCHER_REFRESH_INTERVAL` | 缓存 Runner 列表的刷新周期 | `10s` |
 
-- Go 代码：`go test ./...`
-- Web 前端：`pnpm --filter ./web lint`、`pnpm --filter ./web build`
-- 推荐在提交前运行 `docker compose build` 验证 Dockerfile 没有缺依赖。
+### Runner
 
-## 文档与后续
+| 变量 | 说明 | 默认值 |
+| --- | --- | --- |
+| `RUNNER_ID` | Runner 唯一 ID，用于 stream/心跳 | 自动生成 |
+| `RUNNER_TYPE` | Redis consumer group 名（`runner-<type>`） | `default` |
+| `RUNNER_TAGS` | 逗号分隔标签，Dispatcher 会基于此路由 | - |
+| `RUNNER_MAX_PARALLEL` | 并发 slot 数量 | `2` |
+| `RUNNER_WORKSPACE_ROOT` / `RUNNER_CHROOT_PATH` | 临时目录与 chroot 根 | `/env/tmp` / `/env` |
+| `CONTROL_PANEL_URL` | 控制面地址（下载 artifact / 心跳） | - |
+| `RUNNER_FLAG_FILE` / `RUNNER_FLAG_REGEX` | Flag 文件名 / 正则 | `flag` / `flag\{[a-zA-Z0-9_\-]+\}` |
+| `RUNNER_ARTIFACT_CACHE_*` | artifact 缓存路径/TTL/容量 | `/env/tmp/cache`, `30m`, `2GiB` |
 
-- 架构细节请参考 `design.md`。
-- Flag Submitter 插件协议详见 `docs/flag-submitters.md`。
-- 持续规划、待办收敛在 `TODO.md`，包括真实消息队列、观测性、Kubernetes 部署等主题。
+### Flag Submitter
+
+| 变量 | 说明 | 默认值 |
+| --- | --- | --- |
+| `FLAG_SUBMIT_URL` / `FLAG_SUBMIT_TIMEOUT` | HTTP 提交端点与超时 | `http://flagserver:5000/upload_flag` / `5s` |
+| `FLAG_SUBMIT_GLOBAL_RATE` / `FLAG_SUBMIT_PER_CHALLENGE` | 限速 | `10` / `5` |
+| `FLAG_SUBMIT_MAX_ATTEMPTS` / `FLAG_SUBMIT_RETRY_BACKOFF` | 重试次数与退避 | `5` / `30s` |
+| `FLAG_SUBMIT_CONCURRENCY` | Submitter 并发 | `1` |
+
+## API 速览
+
+所有请求均需在 Header 中带上 `Authorization: Bearer <CONTROL_PANEL_TOKEN>`。
+
+### Challenge / Target
+
+- `GET /api/v1/challenges` 、`POST /api/v1/challenges`、`GET /api/v1/challenges/{id}`、`DELETE /api/v1/challenges/{id}`
+- `GET /api/v1/targets`、`POST /api/v1/targets`、`POST /api/v1/targets/import`（CSV 批量导入）、`PATCH /api/v1/targets/{id}`（状态/并发限制）
+
+### Exploit 及 Artifact
+
+- `GET /api/v1/exploits`、`POST /api/v1/exploits`、`PATCH /api/v1/exploits/{id}`（标签、权重、超时、metadata）
+- `POST /api/v1/exploits/{id}/run-script`、`GET /api/v1/exploits/{id}/run-script`
+- `POST /api/v1/exploits/{id}/revisions`（上传新的 ZIP/二进制）、`GET /api/v1/exploits/{id}/artifact`
+- `POST /api/v1/exploits/{id}/test-run`：对指定 target 触发一次标准 run，**会完整进入 Dispatcher → Runner → Flag Submitter 流程，因此若 exploit 成功会真实提交 flag**。
+
+### Runs
+
+- `GET /api/v1/runs`：支持 `status` / `exploitId` / `targetId` / `page` / `pageSize` 查询。
+- `GET /api/v1/runs/{id}`：返回 run 详情、stdout/stderr、flag 信息。
+- `POST /api/v1/runs/{id}/cancel`：请求取消当前 run，Runner 会在下一次取消轮询时杀掉进程组。
+- `POST /api/v1/runs/cancel`：批量接受 run_id 列表并取消。
+
+### Flags
+
+- `GET /api/v1/flags`：按状态/挑战筛选。
+- `POST /api/v1/flags/retry`、`POST /api/v1/flags/cancel`：批量重试或取消。
+- `GET /api/v1/flags/{id}`、`GET /api/v1/flags/{id}/logs`：查看提交历史。
+
+### Runner / Submitter
+
+- `GET /api/v1/runners`：展示所有注册 Runner，包括 tags、心跳时间、活跃 job、`RUN_QUEUE_NAME` 等。
+- `DELETE /api/v1/runners/{id}`：删除 offline Runner 记录。
+- `GET /api/v1/submitters`、`DELETE /api/v1/submitters/{id}`。
+
+### Scheduler
+
+- `GET /api/v1/scheduler/settings`、`POST /api/v1/scheduler/settings`：查询/更新轮询策略。
+- `GET /api/v1/scheduler/targets`、`PATCH /api/v1/scheduler/targets/{targetId}`：针对某个 target 覆写是否允许调度、指定 exploit 白/黑名单。
+
+### 日志
+
+- `GET /api/v1/logs?level=info&runId=...`：按 level/source/runId/flagId 筛选结构化日志。
+
+## 开发与测试
+
+- **Go 单元测试**：`go test ./...`（确保 `$HOME/.cache/go-build` 可写）。
+- **前端调试**：
+  ```bash
+  pnpm install
+  pnpm --filter ./web dev   # http://localhost:5173
+  pnpm --filter ./web build # 产出静态资源
+  ```
+- **Docker 本地镜像**：`docker compose build control-panel scheduler dispatcher runner flag-submitter web`
+
+## 运维/调试贴士
+
+- Control Panel 的 maintenance loop 会在每个 `RUN_QUEUE_VISIBILITY/2`：
+  1. reclaim 掉超时但未 ack 的 run，更新数据库状态并重新排队；
+  2. 对主 stream 以及每个 `RUN_QUEUE_RUNNER_PREFIX:<runnerId>` stream 执行 `XTRIM`，若存在 pending 则只删除早于最老 pending 的 entry，否则按 `RUN_QUEUE_TRIM_MAXLEN` 近似裁剪。
+- Dispatcher 默认组名为 `dispatcher`，可用 `redis-cli XPENDING exp:pending dispatcher` 观察积压。
+- Runner 使用 `Setpgid` + `SIGKILL` + child reaper，若仍观察到僵尸建议确认 Runner 是否运行在 PID1，以及内核是否允许 `wait4`。
+- `POST /api/v1/exploits/{id}/test-run` 触发的 run 会进入 Flag Submitter，因此在真实靶场使用时请谨慎。
+
+## 相关文档
+
+- `design.md`：总体架构、队列模型与未来规划。
+- `docs/flag-submitters.md`：自定义 Flag Submitter 插件协议。
+- `TODO.md`：待办与长期优化清单。
+
+欢迎在 Issue/PR 中讨论新的调度策略、Runner 沙箱、更加细粒度的指标与观测方案。
