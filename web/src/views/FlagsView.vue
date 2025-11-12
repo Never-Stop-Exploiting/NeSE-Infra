@@ -118,6 +118,14 @@
       <header>
         <h3>Flag Detail</h3>
         <span>Status: {{ formatStatus(selectedFlag.status) }}</span>
+        <button
+          class="refresh"
+          type="button"
+          :disabled="detailLoading || !selectedFlagId"
+          @click="refreshSelectedFlagDetail"
+        >
+          {{ detailLoading ? "Refreshing..." : "Refresh Detail" }}
+        </button>
       </header>
       <section class="detail-meta">
         <div>
@@ -416,6 +424,13 @@ function formatStatus(value?: string) {
     return "Unknown";
   }
   return statusTextMap[value] ?? value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+async function refreshSelectedFlagDetail() {
+  if (!selectedFlagId.value) {
+    return;
+  }
+  await loadFlagDetail(selectedFlagId.value);
 }
 
 onMounted(() => {

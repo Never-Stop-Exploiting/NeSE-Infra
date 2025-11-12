@@ -127,6 +127,14 @@
         <h3>Run Detail</h3>
         <div class="detail-actions">
           <button
+            class="ghost"
+            type="button"
+            :disabled="detailRefreshing"
+            @click.stop="refreshSelectedRunDetail"
+          >
+            {{ detailRefreshing ? "Refreshing..." : "Refresh Detail" }}
+          </button>
+          <button
             v-if="showCancelButton"
             class="danger"
             type="button"
@@ -138,6 +146,7 @@
           <button class="close" type="button" @click="runStore.clearSelected">Close</button>
         </div>
       </header>
+      <p v-if="detailRefreshError" class="error-text">{{ detailRefreshError }}</p>
       <section class="meta">
         <div>
           <strong>Exploit:</strong>
@@ -238,6 +247,7 @@ import { formatUtcTimestamp } from "@/utils/time";
 
 const runStore = useRunStore();
 const canceling = ref(false);
+const detailRefreshing = ref(false);
 const bulkCanceling = ref(false);
 const bulkError = ref<string | null>(null);
 const selectedRuns = ref<Set<string>>(new Set());
@@ -249,6 +259,7 @@ const flagDetail = ref<FlagRecord | null>(null);
 const flagLoading = ref(false);
 const flagError = ref<string | null>(null);
 const flagRetrying = ref(false);
+const detailRefreshError = ref<string | null>(null);
 
 const cancelActionLabel = computed(() => {
   const status = runStore.selectedRun?.status;
@@ -307,6 +318,8 @@ watch(
     flagDetail.value = null;
     flagError.value = null;
     flagRetrying.value = false;
+    detailRefreshError.value = null;
+    detailRefreshing.value = false;
   }
 );
 
@@ -431,6 +444,28 @@ async function retryFlagSubmission() {
     flagError.value = "Failed to retry flag submission";
   } finally {
     flagRetrying.value = false;
+  }
+}
+
+async function refreshSelectedRunDetail() {
+  const currentId = runStore.selectedRun?.id;
+  if (!currentId || detailRefreshing.value) {
+    return;
+  }
+  detailRefreshing.value = true;
+  detailRefreshError.value = null;
+  try {
+    await runStore.selectRun(currentId);
+    if (flagPanelOpen.value) {
+      flagDetail.value = null;
+      flagError.value = null;
+      await ensureFlagDetailLoaded();
+    }
+  } catch (err) {
+    console.error(err);
+    detailRefreshError.value = "Failed to refresh run detail";
+  } finally {
+    detailRefreshing.value = false;
   }
 }
 
