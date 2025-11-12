@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"awdinfra/internal/config"
 	"awdinfra/internal/domain"
@@ -1678,7 +1679,7 @@ func (s *Server) handleRunFinish(w http.ResponseWriter, r *http.Request, runID s
 			Message: fmt.Sprintf("run %s stdout", runID),
 			RunID:   runID,
 			Fields: map[string]any{
-				"output": truncateLogOutput(req.Stdout),
+				"output": s.truncateLogOutput(req.Stdout),
 			},
 		})
 	}
@@ -1690,7 +1691,7 @@ func (s *Server) handleRunFinish(w http.ResponseWriter, r *http.Request, runID s
 			Message: fmt.Sprintf("run %s stderr", runID),
 			RunID:   runID,
 			Fields: map[string]any{
-				"output": truncateLogOutput(req.Stderr),
+				"output": s.truncateLogOutput(req.Stderr),
 			},
 		})
 	}
@@ -1926,14 +1927,27 @@ func (s *Server) enqueueFlag(ctx context.Context, flag domain.Flag) {
 	})
 }
 
-func truncateLogOutput(value string) string {
+func (s *Server) truncateLogOutput(value string) string {
 	value = strings.TrimSpace(value)
-	const limit = 2048
-	runes := []rune(value)
-	if len(runes) <= limit {
+	limit := s.cfg.ControlPanel.LogOutputLimit
+	if limit <= 0 {
+		limit = 4096
+	}
+	if value == "" {
 		return value
 	}
-	return string(runes[:limit]) + "…"
+	data := []byte(value)
+	if len(data) <= limit {
+		return value
+	}
+	truncated := data[:limit]
+	for len(truncated) > 0 && !utf8.Valid(truncated) {
+		truncated = truncated[:len(truncated)-1]
+	}
+	if len(truncated) == 0 {
+		return "…"
+	}
+	return string(truncated) + "…"
 }
 
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {

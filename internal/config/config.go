@@ -47,6 +47,7 @@ type ControlPanelConfig struct {
 	MetricsAddr     string
 	WebsocketOrigin string
 	AdminToken      string
+	LogOutputLimit  int
 }
 
 type SchedulerConfig struct {
@@ -155,6 +156,7 @@ func loadControlPanel() ControlPanelConfig {
 		MetricsAddr:     getenv("CONTROL_PANEL_METRICS", ":9100"),
 		WebsocketOrigin: getenv("CONTROL_PANEL_WS_ORIGIN", "*"),
 		AdminToken:      getenv("CONTROL_PANEL_TOKEN", ""),
+		LogOutputLimit:  getenvInt("CONTROL_PANEL_LOG_OUTPUT_LIMIT", 4096),
 	}
 }
 

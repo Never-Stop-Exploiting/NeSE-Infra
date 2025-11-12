@@ -69,6 +69,7 @@
 | `APP_NAME` | 日志/标签展示名称 | `awd-infra` |
 | `LOG_LEVEL` | slog 等级 | `info` |
 | `CONTROL_PANEL_TOKEN` | 访问 `/api/v1/**` 与 Web UI 时的 Bearer Token | **必填** |
+| `CONTROL_PANEL_LOG_OUTPUT_LIMIT` | Run stdout/stderr 保留的最大字节数，超出会截断 | `4096` |
 | `RUNNER_SECRET` / `SUBMITTER_SECRET` | Runner/Submitter 调用控制面 API 的共享密钥 | `dev-runner-secret` / `dev-submitter-secret` |
 | `POSTGRES_*` | DSN、连接池配置、artifact 存储目录 | 见 `.env.example` |
 | `REDIS_ADDR` / `REDIS_PASSWORD` | Redis 连接信息 | `redis:6379` / `dev-redis-password` |
