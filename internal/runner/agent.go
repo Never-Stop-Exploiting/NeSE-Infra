@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"awdinfra/internal/config"
@@ -95,6 +96,7 @@ func (a *Agent) Run(ctx context.Context) error {
 
 func (a *Agent) consumeLoop(ctx context.Context) error {
 	group := runnerGroup(a.cfg.Runner.Type)
+	queueName := a.runQueueName()
 	maxParallel := max(1, a.cfg.Runner.MaxParallelJobs)
 	block := a.cfg.Runner.HeartbeatInterval * 2
 	if block <= 0 {
@@ -121,7 +123,7 @@ func (a *Agent) consumeLoop(ctx context.Context) error {
 			continue
 		}
 
-		messages, err := a.broker.Claim(ctx, a.cfg.RunQueue.Name, group, runnerID(a.cfg.Runner.ID), available, block)
+		messages, err := a.broker.Claim(ctx, queueName, group, runnerID(a.cfg.Runner.ID), available, block)
 		if err != nil {
 			if errors.Is(err, queue.ErrNoMessages) {
 				continue
@@ -142,18 +144,18 @@ func (a *Agent) consumeLoop(ctx context.Context) error {
 				if err := a.handleMessage(ctx, msgCopy); err != nil {
 					if errors.Is(err, errJobDiscard) {
 						a.log.Info("job discarded", slog.String("id", msgCopy.ID))
-						if ackErr := a.broker.Ack(ctx, a.cfg.RunQueue.Name, group, msgCopy.ID); ackErr != nil {
+						if ackErr := a.broker.Ack(ctx, queueName, group, msgCopy.ID); ackErr != nil {
 							a.log.Warn("failed to ack discarded job", slog.Any("err", ackErr), slog.String("id", msgCopy.ID))
 						}
 						return
 					}
 					a.log.Error("job failed", slog.Any("err", err), slog.String("id", msgCopy.ID))
-					if err := a.broker.Nack(ctx, a.cfg.RunQueue.Name, group, msgCopy.ID, retryDelay); err != nil {
+					if err := a.broker.Nack(ctx, queueName, group, msgCopy.ID, retryDelay); err != nil {
 						a.log.Warn("failed to nack message", slog.Any("err", err), slog.String("id", msgCopy.ID))
 					}
 					return
 				}
-				if err := a.broker.Ack(ctx, a.cfg.RunQueue.Name, group, msgCopy.ID); err != nil {
+				if err := a.broker.Ack(ctx, queueName, group, msgCopy.ID); err != nil {
 					a.log.Warn("failed to ack message", slog.Any("err", err), slog.String("id", msgCopy.ID))
 				}
 			}()
@@ -487,6 +489,10 @@ func runnerGroup(value string) string {
 	return "runner"
 }
 
+func (a *Agent) runQueueName() string {
+	return queue.RunnerQueueName(a.cfg.RunQueue.RunnerPrefix, runnerID(a.cfg.Runner.ID))
+}
+
 func (a *Agent) ensureRunScript(workspace string, payload jobs.JobPayload) error {
 	runPath := filepath.Join(workspace, "run.sh")
 	if _, err := os.Stat(runPath); err == nil {
@@ -665,7 +671,7 @@ func (a *Agent) heartbeatConfig() map[string]string {
 	if visibility := a.cfg.RunQueue.Visibility; visibility > 0 {
 		add("RUN_QUEUE_VISIBILITY", visibility.String())
 	}
-	if queueName := a.cfg.RunQueue.Name; queueName != "" {
+	if queueName := a.runQueueName(); queueName != "" {
 		add("RUN_QUEUE_NAME", queueName)
 	}
 	if len(cfg) == 0 {
@@ -910,15 +916,32 @@ func (a *Agent) execute(ctx context.Context, relPath string, ip string, port int
 		ip,
 		portStr,
 	)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	cmd.Env = append(os.Environ(), "RUNNER_IP="+ip, "RUNNER_PORT="+portStr)
+	go func() {
+		<-ctx.Done()
+		terminateProcessGroup(cmd)
+	}()
 
 	err := cmd.Run()
 	return stdout.Bytes(), stderr.Bytes(), err
+}
+
+func terminateProcessGroup(cmd *exec.Cmd) {
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	pgid, err := syscall.Getpgid(cmd.Process.Pid)
+	if err == nil && pgid > 0 {
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		return
+	}
+	_ = cmd.Process.Kill()
 }
 
 func (a *Agent) extractFlag(workspace string, stdout []byte, payload jobs.JobPayload) (string, string, error) {

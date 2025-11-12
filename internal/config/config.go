@@ -21,6 +21,7 @@ type Config struct {
 	FlagSubmitter     FlagSubmitterConfig
 	RunQueue          QueueConfig
 	FlagQueue         QueueConfig
+	Dispatcher        DispatcherConfig
 	RunnerSecret      string
 	SubmitterSecret   string
 	AllowedRunnerTags []string
@@ -86,9 +87,18 @@ type FlagSubmitterConfig struct {
 }
 
 type QueueConfig struct {
-	Name       string
-	Visibility time.Duration
-	RetryDelay time.Duration
+	Name         string
+	Visibility   time.Duration
+	RetryDelay   time.Duration
+	RunnerPrefix string
+	TrimMaxLen   int64
+}
+
+type DispatcherConfig struct {
+	ID              string
+	MaxBatch        int
+	BlockTimeout    time.Duration
+	RefreshInterval time.Duration
 }
 
 // Load returns a Config populated from environment variables with sane defaults.
@@ -104,6 +114,7 @@ func Load() (Config, error) {
 		FlagSubmitter:     loadFlagSubmitter(),
 		RunQueue:          loadQueue("RUN", "exp:pending", 30*time.Second, 5*time.Second),
 		FlagQueue:         loadQueue("FLAG", "flag:pending", 30*time.Second, 10*time.Second),
+		Dispatcher:        loadDispatcher(),
 		RunnerSecret:      getenv("RUNNER_SECRET", "dev-runner-secret"),
 		SubmitterSecret:   getenv("SUBMITTER_SECRET", "dev-submitter-secret"),
 		AllowedRunnerTags: splitAndTrim(getenv("ALLOWED_RUNNER_TAGS", "")),
@@ -196,11 +207,31 @@ func loadFlagSubmitter() FlagSubmitterConfig {
 }
 
 func loadQueue(prefix, defaultName string, defaultVisibility, defaultRetry time.Duration) QueueConfig {
+	name := getenv(prefix+"_QUEUE_NAME", defaultName)
 	return QueueConfig{
-		Name:       getenv(prefix+"_QUEUE_NAME", defaultName),
-		Visibility: getenvDuration(prefix+"_QUEUE_VISIBILITY", defaultVisibility),
-		RetryDelay: getenvDuration(prefix+"_QUEUE_RETRY_DELAY", defaultRetry),
+		Name:         name,
+		Visibility:   getenvDuration(prefix+"_QUEUE_VISIBILITY", defaultVisibility),
+		RetryDelay:   getenvDuration(prefix+"_QUEUE_RETRY_DELAY", defaultRetry),
+		RunnerPrefix: getenv(prefix+"_QUEUE_RUNNER_PREFIX", defaultRunnerPrefix(name)),
+		TrimMaxLen:   getenvInt64(prefix+"_QUEUE_TRIM_MAXLEN", 50000),
 	}
+}
+
+func loadDispatcher() DispatcherConfig {
+	return DispatcherConfig{
+		ID:              getenv("DISPATCHER_ID", "dispatcher"),
+		MaxBatch:        getenvInt("DISPATCHER_MAX_BATCH", 32),
+		BlockTimeout:    getenvDuration("DISPATCHER_BLOCK_TIMEOUT", 5*time.Second),
+		RefreshInterval: getenvDuration("DISPATCHER_REFRESH_INTERVAL", time.Second*10),
+	}
+}
+
+func defaultRunnerPrefix(base string) string {
+	value := strings.TrimSpace(base)
+	if value == "" {
+		return "runner"
+	}
+	return value + ":runner"
 }
 
 func getenv(key, fallback string) string {
