@@ -1,17 +1,51 @@
 <template>
   <section class="layout">
     <article class="panel table">
-      <header>
+      <header class="panel-header">
         <h2>Flags</h2>
-        <div class="actions">
-          <label class="filter">
-            <span>Status</span>
-            <select v-model="statusFilter" @change="changeFilter">
+        <button class="refresh" :disabled="flagStore.loading" @click="flagStore.refresh">
+          {{ flagStore.loading ? "Refreshing..." : "Refresh" }}
+        </button>
+      </header>
+      <div class="toolbar">
+        <form class="filters" @submit.prevent="applyFilters">
+          <div class="filter-group">
+            <label>Status</label>
+            <select v-model="filterDraft.status">
               <option v-for="option in statusOptions" :key="option.value" :value="option.value">
                 {{ option.label }}
               </option>
             </select>
-          </label>
+          </div>
+          <div class="filter-group">
+            <label>Exploit</label>
+            <input
+              v-model.trim="filterDraft.challengeName"
+              type="text"
+              placeholder="Exploit name"
+            />
+          </div>
+          <div class="filter-group">
+            <label>Team</label>
+            <input
+              v-model.trim="filterDraft.targetName"
+              type="text"
+              placeholder="Target or team"
+            />
+          </div>
+          <div class="filter-actions">
+            <button type="submit" class="ghost" :disabled="!filterDirty">Apply</button>
+            <button
+              type="button"
+              class="ghost secondary"
+              :disabled="!filterDirty && !hasActiveFilters"
+              @click="resetFilters"
+            >
+              Reset
+            </button>
+          </div>
+        </form>
+        <div class="bulk-actions">
           <button
             class="ghost danger"
             type="button"
@@ -28,12 +62,9 @@
           >
             {{ bulkRetrying ? "Retrying..." : `Retry Selected (${selectedCount})` }}
           </button>
-          <button class="refresh" :disabled="flagStore.loading" @click="flagStore.refresh">
-            {{ flagStore.loading ? "Refreshing..." : "Refresh" }}
-          </button>
         </div>
-        <p v-if="bulkError" class="error-text">{{ bulkError }}</p>
-      </header>
+      </div>
+      <p v-if="bulkError" class="error-text">{{ bulkError }}</p>
       <div class="table-wrapper">
         <table>
           <thead>
@@ -192,7 +223,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
-import { useFlagStore } from "@/stores/flags";
+import { useFlagStore, type FlagFilters } from "@/stores/flags";
 import type { FlagRecord } from "@/types";
 import { fetchFlagDetail } from "@/api/flags";
 
@@ -202,13 +233,13 @@ const selectedFlagDetail = ref<FlagRecord | null>(null);
 const detailLoading = ref(false);
 const detailError = ref<string | null>(null);
 const logOutput = ref("Select a flag to view logs");
-const statusFilter = ref("");
 const retryingFlag = ref<string | null>(null);
 const selectedFlags = ref<Set<string>>(new Set());
 const cancelingFlag = ref<string | null>(null);
 const bulkCanceling = ref(false);
 const bulkRetrying = ref(false);
 const bulkError = ref<string | null>(null);
+const filterDraft = ref<FlagFilters>(cloneFilters(flagStore.filters as FlagFilters));
 
 const selectedFlag = computed(() =>
   flagStore.flags.find((flag) => flag.id === selectedFlagId.value)
@@ -236,6 +267,13 @@ const statusTextMap: Record<string, string> = {
 };
 
 const selectedCount = computed(() => selectedFlags.value.size);
+const hasActiveFilters = computed(() => {
+  const value = flagStore.filters as FlagFilters;
+  return Boolean(value.status || value.challengeName || value.targetName);
+});
+const filterDirty = computed(
+  () => !filtersEqual(filterDraft.value, flagStore.filters as FlagFilters)
+);
 const allVisibleSelected = computed(() => {
   const cancellable = flagStore.flags.filter((flag) => canCancelFlag(flag));
   if (!cancellable.length) {
@@ -243,15 +281,11 @@ const allVisibleSelected = computed(() => {
   }
   return cancellable.every((flag) => selectedFlags.value.has(flag.id));
 });
-const canBulkCancel = computed(() => selectedCount.value > 0 && !bulkCanceling.value && !bulkRetrying.value);
-const canBulkRetry = computed(() => selectedCount.value > 0 && !bulkRetrying.value && !bulkCanceling.value);
-
-watch(
-  () => flagStore.statusFilter,
-  (value) => {
-    statusFilter.value = value;
-  },
-  { immediate: true }
+const canBulkCancel = computed(
+  () => selectedCount.value > 0 && !bulkCanceling.value && !bulkRetrying.value
+);
+const canBulkRetry = computed(
+  () => selectedCount.value > 0 && !bulkRetrying.value && !bulkCanceling.value
 );
 
 watch(
@@ -260,6 +294,14 @@ watch(
     const allowed = new Set(flagStore.flags.filter((flag) => canCancelFlag(flag)).map((flag) => flag.id));
     selectedFlags.value = new Set([...selectedFlags.value].filter((id) => allowed.has(id)));
   }
+);
+
+watch(
+  () => ({ ...(flagStore.filters as FlagFilters) }),
+  (value) => {
+    filterDraft.value = cloneFilters(value);
+  },
+  { deep: true }
 );
 
 async function selectFlag(id: string) {
@@ -344,8 +386,18 @@ function canCancelFlag(flag: FlagRecord) {
   return !["accepted", "dropped", "failed", "duplicated"].includes(flag.status);
 }
 
-async function changeFilter() {
-  await flagStore.setStatusFilter(statusFilter.value);
+async function applyFilters() {
+  await flagStore.setFilters(normalizeFilter(filterDraft.value));
+  selectedFlagId.value = null;
+  selectedFlagDetail.value = null;
+  logOutput.value = "Select a flag to view logs";
+  selectedFlags.value = new Set();
+  bulkError.value = null;
+}
+
+async function resetFilters() {
+  filterDraft.value = { status: "", challengeName: "", targetName: "" };
+  await flagStore.setFilters({});
   selectedFlagId.value = null;
   selectedFlagDetail.value = null;
   logOutput.value = "Select a flag to view logs";
@@ -433,6 +485,38 @@ async function refreshSelectedFlagDetail() {
   await loadFlagDetail(selectedFlagId.value);
 }
 
+function cloneFilters(source?: FlagFilters): FlagFilters {
+  return {
+    status: source?.status ?? "",
+    challengeName: source?.challengeName ?? "",
+    targetName: source?.targetName ?? ""
+  };
+}
+
+function normalizeFilter(source: FlagFilters): FlagFilters {
+  const target: FlagFilters = {};
+  if (source.status?.trim()) {
+    target.status = source.status.trim();
+  }
+  if (source.challengeName?.trim()) {
+    target.challengeName = source.challengeName.trim();
+  }
+  if (source.targetName?.trim()) {
+    target.targetName = source.targetName.trim();
+  }
+  return target;
+}
+
+function filtersEqual(a: FlagFilters, b: FlagFilters) {
+  const left = normalizeFilter(a);
+  const right = normalizeFilter(b);
+  return (
+    (left.status ?? "") === (right.status ?? "") &&
+    (left.challengeName ?? "") === (right.challengeName ?? "") &&
+    (left.targetName ?? "") === (right.targetName ?? "")
+  );
+}
+
 onMounted(() => {
   flagStore.load();
 });
@@ -455,21 +539,43 @@ onMounted(() => {
   gap: 1rem;
 }
 
-.actions {
+.panel-header {
   display: flex;
-  gap: 0.75rem;
+  justify-content: space-between;
   align-items: center;
+  gap: 1rem;
 }
 
-.filter {
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  justify-content: space-between;
+  align-items: flex-start;
+}
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: flex-end;
+}
+
+.filter-group {
   display: flex;
   flex-direction: column;
-  gap: 0.2rem;
-  font-size: 0.85rem;
-  color: #94a3b8;
+  gap: 0.25rem;
 }
 
-.filter select {
+.filter-group label {
+  font-size: 0.75rem;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.filters input,
+.filters select {
   background: rgba(15, 23, 42, 0.85);
   color: #f8fafc;
   border: 1px solid rgba(148, 163, 184, 0.3);
@@ -477,7 +583,24 @@ onMounted(() => {
   padding: 0.35rem 0.9rem;
 }
 
-.actions .ghost {
+.filters input {
+  border-radius: 8px;
+  min-width: 220px;
+}
+
+.filter-actions {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.bulk-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.ghost {
   background: transparent;
   border: 1px solid rgba(148, 163, 184, 0.5);
   color: #e2e8f0;
@@ -486,9 +609,19 @@ onMounted(() => {
   cursor: pointer;
 }
 
-.actions .ghost.danger {
+.ghost.danger {
   border-color: rgba(248, 113, 113, 0.8);
   color: #fecaca;
+}
+
+.ghost.secondary {
+  border-color: rgba(148, 163, 184, 0.35);
+  color: rgba(226, 232, 240, 0.8);
+}
+
+.ghost:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .error-text {

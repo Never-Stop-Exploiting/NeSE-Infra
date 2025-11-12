@@ -929,6 +929,9 @@ func (s *Server) handleFlags(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	challengeNames := s.loadChallengeNames(ctx)
+	targetNames := s.loadTargetNames(ctx)
+
 	statusFilter := strings.TrimSpace(r.URL.Query().Get("status"))
 	if statusFilter != "" {
 		filtered := flags[:0]
@@ -936,6 +939,34 @@ func (s *Server) handleFlags(w http.ResponseWriter, r *http.Request) {
 			if strings.EqualFold(string(flag.Status), statusFilter) {
 				filtered = append(filtered, flag)
 			}
+		}
+		flags = filtered
+	}
+
+	challengeFilter := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("challengeName")))
+	targetFilter := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("targetName")))
+	if challengeFilter != "" || targetFilter != "" {
+		filtered := flags[:0]
+		for _, flag := range flags {
+			if challengeFilter != "" {
+				name := strings.ToLower(challengeNames[flag.ChallengeID])
+				if name == "" {
+					name = strings.ToLower(flag.ChallengeID)
+				}
+				if !strings.Contains(name, challengeFilter) {
+					continue
+				}
+			}
+			if targetFilter != "" {
+				label := strings.ToLower(targetNames[flag.TargetID])
+				if label == "" {
+					label = strings.ToLower(flag.TargetID)
+				}
+				if !strings.Contains(label, targetFilter) {
+					continue
+				}
+			}
+			filtered = append(filtered, flag)
 		}
 		flags = filtered
 	}
@@ -967,9 +998,6 @@ func (s *Server) handleFlags(w http.ResponseWriter, r *http.Request) {
 		end = len(flags)
 	}
 	page := flags[start:end]
-
-	challengeNames := s.loadChallengeNames(ctx)
-	targetNames := s.loadTargetNames(ctx)
 
 	items := make([]map[string]any, 0, len(page))
 	for _, flag := range page {

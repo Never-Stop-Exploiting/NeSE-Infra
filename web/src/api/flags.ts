@@ -11,11 +11,15 @@ export interface BulkFlagActionResponse {
   }>;
 }
 
-export async function fetchFlags(params?: {
+export interface FlagQueryParams {
   status?: string;
   cursor?: string;
   limit?: number;
-}): Promise<{ items: FlagRecord[]; nextCursor: string | null }> {
+  challengeName?: string;
+  targetName?: string;
+}
+
+export async function fetchFlags(params?: FlagQueryParams): Promise<{ items: FlagRecord[]; nextCursor: string | null }> {
   const query = new URLSearchParams();
   if (params?.status) {
     query.set("status", params.status);
@@ -25,6 +29,12 @@ export async function fetchFlags(params?: {
   }
   if (params?.limit) {
     query.set("limit", params.limit.toString());
+  }
+  if (params?.challengeName) {
+    query.set("challengeName", params.challengeName);
+  }
+  if (params?.targetName) {
+    query.set("targetName", params.targetName);
   }
   const url = query.toString() ? `${base}?${query.toString()}` : base;
   return fallback(

@@ -7,8 +7,15 @@ import {
   fetchFlagLogs,
   cancelFlag as apiCancelFlag,
   cancelFlags,
-  retryFlags
+  retryFlags,
+  type FlagQueryParams
 } from "@/api/flags";
+
+export interface FlagFilters {
+  status?: string;
+  challengeName?: string;
+  targetName?: string;
+}
 
 export const useFlagStore = defineStore("flags", () => {
   const flags = ref<FlagRecord[]>([]);
@@ -17,7 +24,7 @@ export const useFlagStore = defineStore("flags", () => {
   const logCache = ref<Record<string, string[]>>({});
   const nextCursor = ref<string | null>(null);
   const hasMore = ref(true);
-  const statusFilter = ref<string>("");
+  const filters = ref<FlagFilters>({});
 
   async function refresh() {
     flags.value = [];
@@ -30,6 +37,23 @@ export const useFlagStore = defineStore("flags", () => {
     await refresh();
   }
 
+  function buildQuery(cursor?: string | null): FlagQueryParams {
+    const params: FlagQueryParams = {};
+    if (cursor) {
+      params.cursor = cursor;
+    }
+    if (filters.value.status) {
+      params.status = filters.value.status;
+    }
+    if (filters.value.challengeName) {
+      params.challengeName = filters.value.challengeName;
+    }
+    if (filters.value.targetName) {
+      params.targetName = filters.value.targetName;
+    }
+    return params;
+  }
+
   async function loadMore() {
     if (loading.value || !hasMore.value) {
       return;
@@ -37,10 +61,7 @@ export const useFlagStore = defineStore("flags", () => {
     loading.value = true;
     error.value = null;
     try {
-      const response = await fetchFlags({
-        status: statusFilter.value || undefined,
-        cursor: nextCursor.value || undefined
-      });
+      const response = await fetchFlags(buildQuery(nextCursor.value));
       if (!nextCursor.value) {
         flags.value = response.items;
       } else {
@@ -56,11 +77,22 @@ export const useFlagStore = defineStore("flags", () => {
     }
   }
 
-  async function setStatusFilter(status: string) {
-    if (statusFilter.value === status) {
-      return;
+  function normalizeFilters(input: FlagFilters): FlagFilters {
+    const normalized: FlagFilters = {};
+    if (input.status?.trim()) {
+      normalized.status = input.status.trim();
     }
-    statusFilter.value = status;
+    if (input.challengeName?.trim()) {
+      normalized.challengeName = input.challengeName.trim();
+    }
+    if (input.targetName?.trim()) {
+      normalized.targetName = input.targetName.trim();
+    }
+    return normalized;
+  }
+
+  async function setFilters(next: FlagFilters) {
+    filters.value = normalizeFilters(next);
     await refresh();
   }
 
@@ -118,11 +150,11 @@ export const useFlagStore = defineStore("flags", () => {
     loading,
     error,
     hasMore,
-    statusFilter,
+    filters,
     load,
     refresh,
     loadMore,
-    setStatusFilter,
+    setFilters,
     retry,
     loadLogs,
     cancel,
