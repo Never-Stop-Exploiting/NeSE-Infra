@@ -146,17 +146,24 @@
     </article>
 
     <article class="panel detail" v-if="selectedFlag">
-      <header>
-        <h3>Flag Detail</h3>
-        <span>Status: {{ formatStatus(selectedFlag.status) }}</span>
-        <button
-          class="refresh"
-          type="button"
-          :disabled="detailLoading || !selectedFlagId"
-          @click="refreshSelectedFlagDetail"
-        >
-          {{ detailLoading ? "Refreshing..." : "Refresh Detail" }}
-        </button>
+      <header class="detail-header">
+        <div>
+          <p class="detail-label">Flag Detail</p>
+          <h3>{{ selectedFlagDetail?.id ?? selectedFlag.id }}</h3>
+        </div>
+        <div class="detail-header-actions">
+          <span class="status-pill" :data-status="detailStatus || 'unknown'">
+            {{ detailStatusLabel }}
+          </span>
+          <button
+            class="refresh"
+            type="button"
+            :disabled="detailLoading || !selectedFlagId"
+            @click="refreshSelectedFlagDetail"
+          >
+            {{ detailLoading ? "Refreshing..." : "Refresh Detail" }}
+          </button>
+        </div>
       </header>
       <section class="detail-meta">
         <div>
@@ -244,6 +251,10 @@ const filterDraft = ref<FlagFilters>(cloneFilters(flagStore.filters as FlagFilte
 const selectedFlag = computed(() =>
   flagStore.flags.find((flag) => flag.id === selectedFlagId.value)
 );
+const detailStatus = computed(
+  () => selectedFlagDetail.value?.status ?? selectedFlag.value?.status ?? ""
+);
+const detailStatusLabel = computed(() => formatStatus(detailStatus.value));
 
 const statusOptions = [
   { label: "All", value: "" },
@@ -740,15 +751,56 @@ tr.active {
   color: #c4b5fd;
 }
 
-.detail header {
+.detail-header {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 0.35rem;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
 }
 
-.detail header span {
-  color: rgba(148, 163, 184, 0.9);
+.detail-label {
+  margin: 0;
+  text-transform: uppercase;
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  color: rgba(148, 163, 184, 0.7);
+}
+
+.detail-header h3 {
+  margin: 0.15rem 0 0;
+}
+
+.detail-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.status-pill {
+  padding: 0.25rem 0.85rem;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  text-transform: capitalize;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  background: rgba(15, 23, 42, 0.8);
+}
+
+.status-pill[data-status="accepted"] {
+  border-color: rgba(34, 197, 94, 0.4);
+  color: #4ade80;
+}
+
+.status-pill[data-status="failed"],
+.status-pill[data-status="dropped"] {
+  border-color: rgba(248, 113, 113, 0.4);
+  color: #f87171;
+}
+
+.status-pill[data-status="retry"],
+.status-pill[data-status="submitting"] {
+  border-color: rgba(250, 204, 21, 0.4);
+  color: #facc15;
 }
 
 .detail-meta {

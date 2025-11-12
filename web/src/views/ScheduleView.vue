@@ -98,66 +98,76 @@
           {{ isGroupExpanded(group.challengeId) ? "Collapse" : "Expand" }}
         </button>
       </header>
-      <div class="target-list" v-if="group.targets.length && isGroupExpanded(group.challengeId)">
-        <div
-          v-for="item in group.targets"
-          :key="item.target.id"
-          class="target-card"
-        >
-          <button
-            type="button"
-            class="target-summary"
-            @click="toggleExpanded(item.target.id)"
+      <div v-if="!group.targets.length" class="empty">No exploits configured for this challenge.</div>
+      <div v-else>
+        <div v-if="isGroupExpanded(group.challengeId)" class="target-list">
+          <div
+            v-for="item in group.targets"
+            :key="item.target.id"
+            class="target-card"
           >
-            <div class="info">
-              <strong>{{ item.target.teamName }}</strong>
-              <span>{{ item.target.ip }}:{{ item.target.port }}</span>
-            </div>
-            <div class="status">
-              <span class="dots">{{ statusPreview(item.summary.indicators) }}</span>
-              <span class="counts">{{ item.summary.enabled }}/{{ item.summary.total }}</span>
-            </div>
-            <span class="chevron" :class="{ open: isExpanded(item.target.id) }">⌄</span>
-          </button>
-          <div v-if="isExpanded(item.target.id)" class="target-details">
-            <div class="details-header">
-              <div v-if="thumbnail(item)" class="thumb">
-                <img :src="thumbnail(item)" alt="Target thumbnail" />
+            <button
+              type="button"
+              class="target-summary"
+              @click="toggleExpanded(item.target.id)"
+            >
+              <div class="info">
+                <strong>{{ item.target.teamName }}</strong>
+                <span>{{ item.target.ip }}:{{ item.target.port }}</span>
               </div>
-              <div class="actions">
-                <button
-                  type="button"
-                  @click.stop="handleBulk(item, true)"
-                  :disabled="isTargetUpdating(item.target.id)"
-                >
-                  Enable All
-                </button>
-                <button
-                  type="button"
-                  @click.stop="handleBulk(item, false)"
-                  :disabled="isTargetUpdating(item.target.id)"
-                  class="secondary"
-                >
-                  Disable All
-                </button>
+              <div class="status">
+                <span class="dots">{{ statusPreview(item.summary.indicators) }}</span>
+                <span class="counts">{{ item.summary.enabled }}/{{ item.summary.total }}</span>
               </div>
+              <span class="chevron" :class="{ open: isExpanded(item.target.id) }">⌄</span>
+            </button>
+            <div v-if="isExpanded(item.target.id)" class="target-details">
+              <div class="details-header">
+                <div v-if="thumbnail(item)" class="thumb">
+                  <img :src="thumbnail(item)" alt="Target thumbnail" />
+                </div>
+                <div class="actions">
+                  <button
+                    type="button"
+                    @click.stop="handleBulk(item, true)"
+                    :disabled="isTargetUpdating(item.target.id)"
+                  >
+                    Enable All
+                  </button>
+                  <button
+                    type="button"
+                    @click.stop="handleBulk(item, false)"
+                    :disabled="isTargetUpdating(item.target.id)"
+                    class="secondary"
+                  >
+                    Disable All
+                  </button>
+                </div>
+              </div>
+              <ul class="exploit-grid">
+                <li v-for="status in item.exploits" :key="status.exploitId" class="exploit-card">
+                  <input
+                    type="checkbox"
+                    :checked="status.enabled"
+                    :disabled="isTargetUpdating(item.target.id)"
+                    @change="handleToggle(item, status, $event)"
+                  />
+                  <span class="name">{{ status.exploitName }}</span>
+                  <span v-if="status.enabled !== status.defaultEnabled" class="badge">Override</span>
+                </li>
+              </ul>
             </div>
-            <ul class="exploit-grid">
-              <li v-for="status in item.exploits" :key="status.exploitId" class="exploit-card">
-                <input
-                  type="checkbox"
-                  :checked="status.enabled"
-                  :disabled="isTargetUpdating(item.target.id)"
-                  @change="handleToggle(item, status, $event)"
-                />
-                <span class="name">{{ status.exploitName }}</span>
-                <span v-if="status.enabled !== status.defaultEnabled" class="badge">Override</span>
-              </li>
-            </ul>
           </div>
         </div>
+        <div v-else class="collapsed-summary">
+          <ul class="collapsed-list">
+            <li v-for="preview in collapsedPreview(group)" :key="preview.id">
+              <strong class="team-name">{{ preview.team }}</strong>
+              <span class="collapsed-dots">{{ preview.indicators }}</span>
+            </li>
+          </ul>
+        </div>
       </div>
-      <p v-else class="empty">No exploits configured for this challenge.</p>
     </article>
   </section>
 </template>
@@ -209,6 +219,11 @@ watch(
 
 const expanded = ref<Record<string, boolean>>({});
 const expandedGroups = ref<Record<string, boolean>>({});
+type ChallengeGroup = {
+  challengeId: string;
+  challengeName: string;
+  targets: TargetSchedule[];
+};
 
 function isExpanded(id: string) {
   return !!expanded.value[id];
@@ -224,7 +239,7 @@ watch(
     const next: Record<string, boolean> = { ...expandedGroups.value };
     groups.forEach((group) => {
       if (next[group.challengeId] === undefined) {
-        next[group.challengeId] = true;
+        next[group.challengeId] = false;
       }
     });
     expandedGroups.value = next;
@@ -233,7 +248,7 @@ watch(
 );
 
 function isGroupExpanded(id: string) {
-  return expandedGroups.value[id] ?? true;
+  return expandedGroups.value[id] ?? false;
 }
 
 function toggleGroup(id: string) {
@@ -250,6 +265,14 @@ function statusPreview(indicators: string) {
 function thumbnail(item: TargetSchedule) {
   const labels = item.target.labels ?? {};
   return labels.thumbnail || labels.thumb || labels.image || labels.screenshot || "";
+}
+
+function collapsedPreview(group: ChallengeGroup) {
+  return group.targets.map((item) => ({
+    id: item.target.id,
+    team: item.target.teamName,
+    indicators: statusPreview(item.summary.indicators)
+  }));
 }
 
 function isTargetUpdating(id: string) {
@@ -639,6 +662,48 @@ button.ghost:hover:not(:disabled) {
   padding: 0.1rem 0.6rem;
   font-size: 0.75rem;
   font-weight: 500;
+}
+
+.collapsed-summary {
+  border: 1px dashed rgba(148, 163, 184, 0.3);
+  border-radius: 12px;
+  padding: 1rem;
+  background: rgba(15, 23, 42, 0.35);
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.collapsed-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.45rem;
+}
+
+.collapsed-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.45);
+}
+
+.team-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.collapsed-dots {
+  letter-spacing: 0.04rem;
+  font-family: "JetBrains Mono", Menlo, monospace;
 }
 
 .empty {
