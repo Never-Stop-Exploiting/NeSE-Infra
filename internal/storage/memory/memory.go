@@ -1240,6 +1240,9 @@ func (r *Repository) UpsertRunner(ctx context.Context, runner domain.Runner) err
 	if runner.Hostname == "" {
 		runner.Hostname = _runner.Hostname
 	}
+	if runner.InstanceID == "" {
+		runner.InstanceID = _runner.InstanceID
+	}
 	if runner.MaxParallel == 0 && _runner.MaxParallel > 0 {
 		runner.MaxParallel = _runner.MaxParallel
 	}

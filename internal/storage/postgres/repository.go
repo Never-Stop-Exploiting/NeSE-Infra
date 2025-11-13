@@ -254,6 +254,7 @@ func ensureSchema(ctx context.Context, db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_target_exploit_overrides_exploit_id ON target_exploit_overrides(exploit_id);`,
 		`CREATE TABLE IF NOT EXISTS runners (
 			id TEXT PRIMARY KEY,
+			instance_id TEXT,
 			type TEXT,
 			hostname TEXT,
 			labels JSONB,
@@ -2634,7 +2635,7 @@ func (r *Repository) AppendLog(ctx context.Context, entry domain.LogEntry) error
 
 func (r *Repository) ListRunners(ctx context.Context) ([]domain.Runner, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT id, type, hostname, labels, tags, max_parallel, active_jobs, last_heartbeat, status, registered_at, config, last_ip
+		SELECT id, instance_id, type, hostname, labels, tags, max_parallel, active_jobs, last_heartbeat, status, registered_at, config, last_ip
 		FROM runners
 		ORDER BY hostname ASC`)
 	if err != nil {
@@ -2648,9 +2649,10 @@ func (r *Repository) ListRunners(ctx context.Context) ([]domain.Runner, error) {
 		var labels, tags, configData []byte
 		var activeJobs sql.NullInt64
 		var lastHeartbeat sql.NullTime
-		var typ, hostname, status, lastIP sql.NullString
+		var typ, hostname, status, lastIP, instanceID sql.NullString
 		if err := rows.Scan(
 			&runner.ID,
+			&instanceID,
 			&typ,
 			&hostname,
 			&labels,
@@ -2664,6 +2666,9 @@ func (r *Repository) ListRunners(ctx context.Context) ([]domain.Runner, error) {
 			&lastIP,
 		); err != nil {
 			return nil, err
+		}
+		if instanceID.Valid {
+			runner.InstanceID = instanceID.String
 		}
 		if typ.Valid {
 			runner.Type = typ.String
@@ -2715,15 +2720,16 @@ func (r *Repository) ListRunners(ctx context.Context) ([]domain.Runner, error) {
 func (r *Repository) GetRunner(ctx context.Context, id string) (domain.Runner, error) {
 	var runner domain.Runner
 	var labels, tags, configData []byte
-	var typ, hostname, status, lastIP sql.NullString
+	var typ, hostname, status, lastIP, instanceID sql.NullString
 	var lastHeartbeat sql.NullTime
 	var activeJobs sql.NullInt64
 	err := r.db.QueryRowContext(ctx, `
-		SELECT id, type, hostname, labels, tags, max_parallel, active_jobs, last_heartbeat, status, registered_at, config, last_ip
+		SELECT id, instance_id, type, hostname, labels, tags, max_parallel, active_jobs, last_heartbeat, status, registered_at, config, last_ip
 		FROM runners
 		WHERE id = $1`, id,
 	).Scan(
 		&runner.ID,
+		&instanceID,
 		&typ,
 		&hostname,
 		&labels,
@@ -2769,6 +2775,9 @@ func (r *Repository) GetRunner(ctx context.Context, id string) (domain.Runner, e
 		}
 		runner.Config = cfg
 	}
+	if instanceID.Valid {
+		runner.InstanceID = instanceID.String
+	}
 	if activeJobs.Valid {
 		runner.ActiveJobs = int(activeJobs.Int64)
 	}
@@ -2805,10 +2814,11 @@ func (r *Repository) UpsertRunner(ctx context.Context, runner domain.Runner) err
 	}
 
 	_, err = r.db.ExecContext(ctx, `
-		INSERT INTO runners (id, type, hostname, labels, tags, max_parallel, active_jobs, last_heartbeat, status, registered_at, config, last_ip)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		INSERT INTO runners (id, instance_id, type, hostname, labels, tags, max_parallel, active_jobs, last_heartbeat, status, registered_at, config, last_ip)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		ON CONFLICT (id) DO UPDATE
-		SET type = EXCLUDED.type,
+		SET instance_id = EXCLUDED.instance_id,
+		    type = EXCLUDED.type,
 		    hostname = EXCLUDED.hostname,
 		    labels = EXCLUDED.labels,
 		    tags = EXCLUDED.tags,
@@ -2820,6 +2830,7 @@ func (r *Repository) UpsertRunner(ctx context.Context, runner domain.Runner) err
 		    config = EXCLUDED.config,
 		    last_ip = EXCLUDED.last_ip`,
 		runner.ID,
+		nullString(runner.InstanceID),
 		runner.Type,
 		runner.Hostname,
 		labels,

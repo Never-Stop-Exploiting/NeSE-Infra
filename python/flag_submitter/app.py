@@ -11,7 +11,9 @@ from typing import Any
 
 import redis
 import requests
-from redis.exceptions import ResponseError
+from redis.backoff import ExponentialBackoff
+from redis.exceptions import ResponseError, ConnectionError as RedisConnectionError, TimeoutError as RedisTimeoutError
+from redis.retry import Retry
 
 from plugin import FlagPlugin, HttpFlagPlugin, SubmissionResult
 
@@ -80,12 +82,21 @@ class FlagSubmitter:
     def __init__(self) -> None:
         redis_addr = env("REDIS_ADDR", "localhost:6379")
         host, _, port = redis_addr.partition(":")
-        self.redis = redis.Redis(
-            host=host or "localhost",
-            port=int(port or 6379),
-            password=env("REDIS_PASSWORD"),
-            decode_responses=False,
-        )
+        socket_timeout = parse_duration(env("REDIS_SOCKET_TIMEOUT", "5s"), 5.0)
+        health_interval = max(1, int(parse_duration(env("REDIS_HEALTH_CHECK_INTERVAL", "30s"), 30.0)))
+        self._redis_kwargs = {
+            "host": host or "localhost",
+            "port": int(port or 6379),
+            "password": env("REDIS_PASSWORD"),
+            "db": parse_int(env("REDIS_DB", "0"), 0),
+            "decode_responses": False,
+            "socket_keepalive": True,
+            "socket_timeout": socket_timeout,
+            "health_check_interval": health_interval,
+            "retry_on_timeout": True,
+        }
+        self._redis_lock = threading.Lock()
+        self.redis = self._create_redis_client()
 
         control_panel = env("SUBMITTER_CONTROL_PANEL_URL", env("CONTROL_PANEL_URL"))
         if not control_panel:
@@ -125,7 +136,7 @@ class FlagSubmitter:
 
     def ensure_group(self) -> None:
         try:
-            self.redis.xgroup_create(self.stream, self.group, id="0", mkstream=True)
+            self.redis_call("xgroup_create", self.stream, self.group, id="0", mkstream=True)
         except ResponseError as exc:
             if "BUSYGROUP" not in str(exc):
                 raise
@@ -213,7 +224,8 @@ class FlagSubmitter:
                 time.sleep(1)
 
     def consume_once(self, consumer: str) -> None:
-        messages = self.redis.xreadgroup(
+        messages = self.redis_call(
+            "xreadgroup",
             self.group,
             consumer,
             {self.stream: ">"},
@@ -227,13 +239,13 @@ class FlagSubmitter:
                 body = data.get(b"data") or data.get("data")
                 if not body:
                     logging.warning("missing payload body for %s", message_id)
-                    self.redis.xack(self.stream, self.group, message_id)
+                    self.redis_call("xack", self.stream, self.group, message_id)
                     continue
                 try:
                     payload = json.loads(body.decode() if isinstance(body, (bytes, bytearray)) else body)
                 except json.JSONDecodeError as exc:
                     logging.error("decode payload failed: %s", exc)
-                    self.redis.xack(self.stream, self.group, message_id)
+                    self.redis_call("xack", self.stream, self.group, message_id)
                     continue
                 retry = False
                 try:
@@ -245,7 +257,7 @@ class FlagSubmitter:
                     delay = max(self.retry_backoff, 5.0)
                     self.nack_and_reschedule(message_id, body, delay)
                 else:
-                    self.redis.xack(self.stream, self.group, message_id)
+                    self.redis_call("xack", self.stream, self.group, message_id)
 
     def process_payload(self, payload: dict[str, Any]) -> bool:
         flag_id = payload.get("flag_id")
@@ -314,11 +326,14 @@ class FlagSubmitter:
         return resp.json()
 
     def nack_and_reschedule(self, message_id: str, body: bytes, delay: float) -> None:
-        self.redis.xack(self.stream, self.group, message_id)
+        self.redis_call("xack", self.stream, self.group, message_id)
 
         def _requeue() -> None:
             time.sleep(delay)
-            self.redis.xadd(self.stream, {"data": body})
+            try:
+                self.redis_call("xadd", self.stream, {"data": body})
+            except Exception as exc:  # pylint: disable=broad-except
+                logging.error("failed to requeue flag: %s", exc)
 
         threading.Thread(target=_requeue, name="submitter-requeue", daemon=True).start()
 
@@ -329,6 +344,38 @@ class FlagSubmitter:
     def current_in_flight(self) -> int:
         with self.lock:
             return self.in_flight
+
+    # Redis helpers --------------------------------------------------------
+
+    def _create_redis_client(self) -> redis.Redis:
+        kwargs = dict(self._redis_kwargs)
+        kwargs["retry"] = Retry(ExponentialBackoff(cap=10, base=1), 5)
+        return redis.Redis(**kwargs)
+
+    def _reconnect_redis(self) -> None:
+        with self._redis_lock:
+            try:
+                self.redis.close()
+            except Exception:  # pylint: disable=broad-except
+                pass
+            self.redis = self._create_redis_client()
+            logging.info("re-created redis client for submitter %s", self.submitter_id)
+
+    def redis_call(self, method: str, *args, **kwargs):
+        attempt = 0
+        while True:
+            try:
+                client = self.redis
+                func = getattr(client, method)
+                return func(*args, **kwargs)
+            except (RedisConnectionError, RedisTimeoutError) as exc:
+                attempt += 1
+                logging.warning("redis %s failed (attempt %d): %s", method, attempt, exc)
+                self._reconnect_redis()
+                time.sleep(min(2 ** attempt, 5))
+            except ResponseError:
+                raise
+
 
 
 if __name__ == "__main__":

@@ -19,7 +19,7 @@ AwD Infra 是 Attack-with-Defence 竞赛的自动化平台，帮助队伍协调�
 ### 关键组件
 - **Control Panel / API**：统一配置中心，管理挑战、目标、Exploit、Runner、Flag 等元数据；提供 REST API，未来扩展 WebSocket。
 - **Scheduler**：基于「目标 × Exploit」组合生成待执行任务，执行并发控制、排队策略、重试回退；将任务投递到消息队列。
-- **Runner**：在隔离环境（Docker+chroot `/env`）执行 exploit；下载并解压 artifact，调用 `./run.sh <ip> <port>`，收集 stdout/stderr 并解析 flag。
+- **Runner**：在隔离环境（Docker+chroot `/env`）执行 exploit；下载并解压 artifact，调用 `./run.sh <ip> <port>`，收集 stdout/stderr 并解析 flag。每个 Runner 启动都会生成短 `instanceId` 并对应独立 stream（`exp:pending:runner:<runnerId>:<instanceId>`），心跳缺失两轮后会被要求旋转 instanceId，避免旧实例重新消费。
 - **Flag Submitter**：从 Redis 队列获取已捕获的 flag，执行去重、限速和重试策略；当前实现通过 HTTP（默认 `FLAG_SUBMIT_URL`，例如测试 flagserver）提交，并记录提交历史。
 - **存储层**：PostgreSQL（结构化配置与运行数据）、Redis（队列/锁/限流/缓存）以及对象存储（依赖包等工件）——当前实现为内存仓库。
 - **观测性**：组件统一使用 slog 输出结构化日志到 stdout，后续仍规划接入 Loki / ELK、Prometheus、OpenTelemetry。

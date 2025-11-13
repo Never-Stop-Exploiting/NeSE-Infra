@@ -149,7 +149,6 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/runs/cancel", s.handleRunBulkCancel)
 	mux.HandleFunc("/api/v1/runs/", s.handleRunDetail)
 	mux.HandleFunc("/api/v1/logs", s.handleLogs)
-	mux.HandleFunc("/api/v1/runners/register", s.handleRunnerRegister)
 	mux.HandleFunc("/api/v1/runners/heartbeat", s.handleRunnerHeartbeat)
 	mux.HandleFunc("/api/v1/runners", s.handleRunners)
 	mux.HandleFunc("/api/v1/submitters/register", s.handleSubmitterRegister)
@@ -2183,76 +2182,6 @@ func (s *Server) handleSubmitterHeartbeat(w http.ResponseWriter, r *http.Request
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"submitter": marshalSubmitter(submitter)})
 }
-func (s *Server) handleRunnerRegister(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	var req struct {
-		ID          string            `json:"id"`
-		Type        string            `json:"type"`
-		Hostname    string            `json:"hostname"`
-		Secret      string            `json:"secret"`
-		Tags        []string          `json:"tags"`
-		Labels      map[string]string `json:"labels"`
-		MaxParallel int               `json:"maxParallel"`
-		Status      string            `json:"status"`
-		Config      map[string]string `json:"config"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid payload")
-		return
-	}
-	if strings.TrimSpace(req.Secret) == "" || req.Secret != s.cfg.RunnerSecret {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
-		return
-	}
-	if strings.TrimSpace(req.ID) == "" {
-		writeError(w, http.StatusBadRequest, "id is required")
-		return
-	}
-	now := time.Now().UTC()
-	tags := normalizeTags(req.Tags)
-	if req.MaxParallel <= 0 {
-		req.MaxParallel = 1
-	}
-	status := req.Status
-	if status == "" {
-		status = "online"
-	}
-	runner := domain.Runner{
-		ID:            req.ID,
-		Type:          strings.TrimSpace(req.Type),
-		Hostname:      strings.TrimSpace(req.Hostname),
-		Tags:          tags,
-		Labels:        req.Labels,
-		Config:        req.Config,
-		MaxParallel:   req.MaxParallel,
-		Status:        status,
-		LastHeartbeat: now,
-		RegisteredAt:  now,
-		LastIP:        clientIP(r),
-	}
-	if runner.Labels == nil {
-		runner.Labels = map[string]string{}
-	}
-	if runner.Type == "" {
-		runner.Type = "default"
-	}
-	if runner.Hostname == "" {
-		runner.Hostname = req.ID
-	}
-	if err := s.repository.UpsertRunner(r.Context(), runner); err != nil {
-		s.logger.Error("runner register failed", slog.Any("err", err), slog.String("runner_id", req.ID))
-		writeError(w, http.StatusInternalServerError, "failed to register runner")
-		return
-	}
-	if err := s.sweepStaleRunners(r.Context()); err != nil {
-		s.logger.Warn("runner sweep failed", slog.Any("err", err))
-	}
-	writeJSON(w, http.StatusCreated, map[string]any{"runner": marshalRunner(runner)})
-}
-
 func (s *Server) populateRunOutput(ctx context.Context, run domain.Run) domain.Run {
 	if run.Stdout != "" || run.Stderr != "" || run.FlagValue != "" || run.FlagSource != "" {
 		return run
@@ -2398,16 +2327,8 @@ func (s *Server) handleRunnerHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		ID          string            `json:"id"`
-		Secret      string            `json:"secret"`
-		Status      string            `json:"status"`
-		Type        string            `json:"type"`
-		Hostname    string            `json:"hostname"`
-		Tags        []string          `json:"tags"`
-		Labels      map[string]string `json:"labels"`
-		MaxParallel int               `json:"maxParallel"`
-		ActiveJobs  int               `json:"activeJobs"`
-		Config      map[string]string `json:"config"`
+		runnerReportPayload
+		Secret string `json:"secret"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid payload")
@@ -2421,68 +2342,193 @@ func (s *Server) handleRunnerHeartbeat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "id is required")
 		return
 	}
-
-	existing, err := s.repository.GetRunner(r.Context(), req.ID)
-	if err != nil && !strings.Contains(err.Error(), "not found") {
-		s.logger.Error("load runner for heartbeat failed", slog.Any("err", err), slog.String("runner_id", req.ID))
-		writeError(w, http.StatusInternalServerError, "failed to update runner")
+	instanceID := strings.TrimSpace(req.InstanceID)
+	if instanceID == "" {
+		writeError(w, http.StatusBadRequest, "instanceId is required")
 		return
 	}
 
+	ctx := r.Context()
+	existing, err := s.repository.GetRunner(ctx, req.ID)
+	notFound := false
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			notFound = true
+		} else {
+			s.logger.Error("load runner for heartbeat failed", slog.Any("err", err), slog.String("runner_id", req.ID))
+			writeError(w, http.StatusInternalServerError, "failed to update runner")
+			return
+		}
+	}
+
 	now := time.Now().UTC()
+	if notFound || strings.TrimSpace(existing.ID) == "" {
+		runner := s.runnerFromReport(req.runnerReportPayload, now, clientIP(r))
+		if err := s.repository.UpsertRunner(ctx, runner); err != nil {
+			s.logger.Error("runner heartbeat failed", slog.Any("err", err), slog.String("runner_id", req.ID))
+			writeError(w, http.StatusInternalServerError, "failed to update runner")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"runner": marshalRunner(runner)})
+		if err := s.sweepStaleRunners(ctx); err != nil {
+			s.logger.Warn("runner sweep failed", slog.Any("err", err))
+		}
+		return
+	}
+
+	requiresReset := needsInstanceReset(existing)
+	previousInstance := strings.TrimSpace(existing.InstanceID)
+	if requiresReset && previousInstance != "" && previousInstance == instanceID {
+		if strings.ToLower(strings.TrimSpace(existing.Status)) != "restoring" {
+			existing.Status = "restoring"
+			existing.LastHeartbeat = now
+			existing.LastIP = clientIP(r)
+			if err := s.repository.UpsertRunner(ctx, existing); err != nil {
+				s.logger.Warn("failed to mark runner restoring", slog.Any("err", err), slog.String("runner_id", existing.ID))
+			}
+		}
+		s.writeInstanceResetResponse(w, existing)
+		return
+	}
+
 	runner := existing
-	runner.ID = req.ID
-	if req.Type != "" {
-		runner.Type = req.Type
+	runner.InstanceID = instanceID
+	if strings.TrimSpace(req.Type) != "" {
+		runner.Type = strings.TrimSpace(req.Type)
 	} else if runner.Type == "" {
 		runner.Type = "default"
 	}
-	if req.Hostname != "" {
-		runner.Hostname = req.Hostname
+	if strings.TrimSpace(req.Hostname) != "" {
+		runner.Hostname = strings.TrimSpace(req.Hostname)
 	} else if runner.Hostname == "" {
 		runner.Hostname = req.ID
 	}
 	if len(req.Tags) > 0 {
 		runner.Tags = normalizeTags(req.Tags)
-	} else if runner.Tags == nil {
-		runner.Tags = nil
 	}
 	if req.Labels != nil {
-		runner.Labels = req.Labels
+		runner.Labels = ensureLabels(req.Labels)
 	} else if runner.Labels == nil {
 		runner.Labels = map[string]string{}
 	}
+	if req.Config != nil {
+		runner.Config = req.Config
+	} else if runner.Config == nil {
+		runner.Config = map[string]string{}
+	}
 	if req.MaxParallel > 0 {
 		runner.MaxParallel = req.MaxParallel
-	} else if runner.MaxParallel == 0 {
+	} else if runner.MaxParallel <= 0 {
 		runner.MaxParallel = 1
 	}
 	if req.ActiveJobs >= 0 {
 		runner.ActiveJobs = req.ActiveJobs
 	}
-	if req.Config != nil {
-		runner.Config = req.Config
-	}
-	if req.Status != "" {
-		runner.Status = req.Status
-	} else if runner.Status == "" {
-		runner.Status = "online"
-	}
+	runner.Status = normalizeRunnerStatus(req.Status)
 	if runner.RegisteredAt.IsZero() {
 		runner.RegisteredAt = now
 	}
 	runner.LastHeartbeat = now
 	runner.LastIP = clientIP(r)
 
-	if err := s.repository.UpsertRunner(r.Context(), runner); err != nil {
+	if err := s.repository.UpsertRunner(ctx, runner); err != nil {
 		s.logger.Error("runner heartbeat failed", slog.Any("err", err), slog.String("runner_id", req.ID))
 		writeError(w, http.StatusInternalServerError, "failed to update runner")
 		return
 	}
-	if err := s.sweepStaleRunners(r.Context()); err != nil {
+	writeJSON(w, http.StatusOK, map[string]any{"runner": marshalRunner(runner)})
+	if err := s.sweepStaleRunners(ctx); err != nil {
 		s.logger.Warn("runner sweep failed", slog.Any("err", err))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"runner": marshalRunner(runner)})
+}
+
+func defaultString(value string, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func maxInt(value int, fallback int) int {
+	if value > 0 {
+		return value
+	}
+	return fallback
+}
+
+func ensureLabels(src map[string]string) map[string]string {
+	if src == nil {
+		return map[string]string{}
+	}
+	return copyStringMap(src)
+}
+
+func ensureConfig(src map[string]string) map[string]string {
+	if src == nil {
+		return map[string]string{}
+	}
+	return copyStringMap(src)
+}
+
+func copyStringMap(src map[string]string) map[string]string {
+	dst := make(map[string]string, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+func normalizeRunnerStatus(value string) string {
+	status := strings.ToLower(strings.TrimSpace(value))
+	if status == "" {
+		return "online"
+	}
+	return status
+}
+
+func needsInstanceReset(runner domain.Runner) bool {
+	status := strings.ToLower(strings.TrimSpace(runner.Status))
+	return status == "offline" || status == "restoring"
+}
+
+func (s *Server) writeInstanceResetResponse(w http.ResponseWriter, runner domain.Runner) {
+	writeJSON(w, http.StatusConflict, map[string]any{
+		"error":   "instance_reset_required",
+		"message": "runner instance expired; rotate instanceId and re-register",
+		"runner":  marshalRunner(runner),
+	})
+}
+
+type runnerReportPayload struct {
+	ID          string            `json:"id"`
+	InstanceID  string            `json:"instanceId"`
+	Type        string            `json:"type"`
+	Hostname    string            `json:"hostname"`
+	Tags        []string          `json:"tags"`
+	Labels      map[string]string `json:"labels"`
+	MaxParallel int               `json:"maxParallel"`
+	ActiveJobs  int               `json:"activeJobs"`
+	Status      string            `json:"status"`
+	Config      map[string]string `json:"config"`
+}
+
+func (s *Server) runnerFromReport(req runnerReportPayload, now time.Time, ip string) domain.Runner {
+	return domain.Runner{
+		ID:            strings.TrimSpace(req.ID),
+		InstanceID:    strings.TrimSpace(req.InstanceID),
+		Type:          defaultString(strings.TrimSpace(req.Type), "default"),
+		Hostname:      defaultString(strings.TrimSpace(req.Hostname), req.ID),
+		Tags:          normalizeTags(req.Tags),
+		Labels:        ensureLabels(req.Labels),
+		Config:        ensureConfig(req.Config),
+		MaxParallel:   maxInt(req.MaxParallel, 1),
+		ActiveJobs:    maxInt(req.ActiveJobs, 0),
+		Status:        normalizeRunnerStatus(req.Status),
+		RegisteredAt:  now,
+		LastHeartbeat: now,
+		LastIP:        ip,
+	}
 }
 
 func (s *Server) handleSchedulerSettings(w http.ResponseWriter, r *http.Request) {
@@ -3034,6 +3080,7 @@ func marshalRunDetail(run domain.Run, exploitName, targetLabel string) map[strin
 func marshalRunner(runner domain.Runner) map[string]any {
 	return map[string]any{
 		"id":            runner.ID,
+		"instanceId":    runner.InstanceID,
 		"type":          runner.Type,
 		"hostname":      runner.Hostname,
 		"lastIp":        runner.LastIP,
@@ -3341,7 +3388,7 @@ func (s *Server) reclaimStalledRuns(ctx context.Context) ([]domain.Runner, error
 		return nil, err
 	}
 	for _, runner := range runners {
-		queueName := queue.RunnerQueueName(s.cfg.RunQueue.RunnerPrefix, runner.ID)
+		queueName := queue.RunnerQueueName(s.cfg.RunQueue.RunnerPrefix, runner.ID, runner.InstanceID)
 		group := runnerGroupName(runner.Type)
 		messages, err := s.broker.Reclaim(ctx, queueName, group, reclaimerConsumerName(group), visibility, 64)
 		if err != nil {
@@ -3435,7 +3482,7 @@ func (s *Server) trimRunQueues(ctx context.Context, runners []domain.Runner) {
 			slog.String("stream", s.cfg.RunQueue.Name))
 	}
 	for _, runner := range runners {
-		stream := queue.RunnerQueueName(s.cfg.RunQueue.RunnerPrefix, runner.ID)
+		stream := queue.RunnerQueueName(s.cfg.RunQueue.RunnerPrefix, runner.ID, runner.InstanceID)
 		strategy := queue.TrimStrategy{MaxLen: maxLen}
 		group := runnerGroupName(runner.Type)
 		minID, err := s.broker.PendingMinID(ctx, stream, group)

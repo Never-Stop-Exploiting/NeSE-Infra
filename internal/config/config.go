@@ -57,6 +57,7 @@ type SchedulerConfig struct {
 
 type RunnerConfig struct {
 	ID                    string
+	InstanceID            string
 	Type                  string
 	ControlPanelURL       string
 	ControlPanelTimeout   time.Duration
@@ -176,6 +177,7 @@ func loadRunner() RunnerConfig {
 	}
 	return RunnerConfig{
 		ID:                    getenv("RUNNER_ID", ""),
+		InstanceID:            getenv("RUNNER_INSTANCE_ID", ""),
 		Type:                  getenv("RUNNER_TYPE", "default"),
 		ControlPanelURL:       getenv("CONTROL_PANEL_URL", ""),
 		ControlPanelTimeout:   getenvDuration("RUNNER_CONTROL_PANEL_TIMEOUT", time.Minute),

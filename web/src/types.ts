@@ -136,6 +136,7 @@ export interface SubmissionAttempt {
 
 export interface RunnerInfo {
   id: string;
+  instanceId?: string;
   type: string;
   hostname?: string;
   lastIp?: string;

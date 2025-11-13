@@ -71,20 +71,9 @@ func NewControlPanelClient(cfg config.Config, log *slog.Logger) (*ControlPanelCl
 	}, nil
 }
 
-type registerRunnerRequest struct {
-	ID          string            `json:"id"`
-	Type        string            `json:"type"`
-	Hostname    string            `json:"hostname"`
-	Secret      string            `json:"secret"`
-	Tags        []string          `json:"tags,omitempty"`
-	Labels      map[string]string `json:"labels,omitempty"`
-	MaxParallel int               `json:"maxParallel"`
-	Status      string            `json:"status"`
-	Config      map[string]string `json:"config,omitempty"`
-}
-
 type heartbeatRequest struct {
 	ID          string            `json:"id"`
+	InstanceID  string            `json:"instanceId"`
 	Secret      string            `json:"secret"`
 	Status      string            `json:"status"`
 	Type        string            `json:"type,omitempty"`
@@ -120,12 +109,6 @@ type RunResult struct {
 	FlagSource string
 	Stdout     string
 	Stderr     string
-}
-
-func (c *ControlPanelClient) RegisterRunner(ctx context.Context, req registerRunnerRequest) error {
-	req.Secret = c.secret
-	req.Status = "online"
-	return c.post(ctx, "/api/v1/runners/register", req)
 }
 
 func (c *ControlPanelClient) Heartbeat(ctx context.Context, req heartbeatRequest) error {

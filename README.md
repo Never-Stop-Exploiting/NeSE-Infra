@@ -7,7 +7,7 @@
 - **模块化服务**：Control Panel、Scheduler、Dispatcher、Runner、Flag Submitter、Vue 运维面板全部开箱即用，可按需横向扩展。
 - **标签感知分发**：Scheduler 只需写入主 Run Stream，由 Dispatcher 读取并依据 Runner tags/并发压力路由到各 Runner 专属 Stream，彻底消除误抢任务导致的 Nack。
 - **可观测与管控**：Control Panel 暴露 `/api/v1` REST 接口与 Web 面板，支持 Run/Flag/Runner 可视化、执行记录下载、Flag 重试及目标覆盖矩阵维护；结构化日志统一输出到 stdout，可直接通过 `docker compose logs` 观测。
-- **安全执行**：Runner 在 chroot 工作区拉起 exploit，支持 artifact 缓存、run.sh 自动补全、Flag 文件/正则回退及远程取消；进程组会在超时或取消时被整组 `SIGKILL` 并由 PID 1 reaper 收尸。
+- **安全执行**：Runner 在 chroot 工作区拉起 exploit，支持 artifact 缓存、run.sh 自动补全、Flag 文件/正则回退及远程取消；进程组会在超时或取消时被整组 `SIGKILL` 并由 PID 1 reaper 收尸。每次启动都会生成独立 `instanceId` 并使用专属 stream，心跳超时后控制面会要求 Runner 旋转 instanceId，旧 stream 立刻清理，避免“僵尸”实例误消费。
 - **流量治理**：Flag Submitter 通过 Redis Streams 消费队列并根据插件策略限速重试；Control Panel 负责 run 超时/runner 离线回收并定期 `XTRIM` 主/子 Stream，避免 Redis 无限膨胀。
 
 ## 核心组件
@@ -17,7 +17,7 @@
 | **Control Panel (`cmd/control-panel`)** | 提供 `/api/v1` REST API、Runner/Submitter 心跳注册、Run/Flag 查询、Scheduler 设置、Target×Exploit Override 管理，并驱动队列 reclaim 与 stream trim；运行日志直接写 stdout。|
 | **Scheduler (`cmd/scheduler`)** | 从 Postgres 读取 runnable work（目标状态、并发限制、Runner Tags、Overrides），按照 Interval/Continuous 策略打包 `jobs.JobPayload` 写入主 Run Stream。|
 | **Dispatcher (`cmd/dispatcher`)** | 消费主 Run Stream，根据 Runner tag 集与实时负载挑选合适 Runner，并把 payload 转发到该 Runner 的专属 Stream + consumer group。|
-| **Runner (`cmd/runner`)** | 在 chroot 工作区执行 exploit，支持 artifact 缓存、Flag 文件/正则提取、远程取消，并将 stdout/stderr 通过 Control Panel 打到 stdout，同时把捕获 flag 写入 Flag Stream；最新版本会为每次 run 创建独立进程组，并在容器 PID1 场景下主动 Wait4 清理僵尸进程。|
+| **Runner (`cmd/runner`)** | 在 chroot 工作区执行 exploit，支持 artifact 缓存、Flag 文件/正则提取、远程取消，并将 stdout/stderr 通过 Control Panel 打到 stdout，同时把捕获 flag 写入 Flag Stream；进程组按 run 隔离且由 PID1 Wait4 收尸。Runner 启动会生成短 `instanceId` 并注册为独立 stream（`exp:pending:runner:<runnerId>:<instanceId>`），若心跳超时会被标记为 `offline → restoring`，新的 heartbeat 必须携带全新的 instanceId 才能恢复。|
 | **Flag Submitter (`cmd/flag-submitter`)** | 消费 Flag Stream，调用内置或自定义插件提交旗帜，并回传 `/flags/{id}/submit/start|finish`，失败时按 backoff 再排队。|
 | **Web UI (`web/`)** | Vue3 + Vite + Pinia + Tailwind。提供 Dashboard、Targets、Exploits、Runs、Flags、Runners、Scheduler 视图；访问需提供 `CONTROL_PANEL_TOKEN`（浏览器本地缓存）。|
 
@@ -106,6 +106,7 @@
 | 变量 | 说明 | 默认值 |
 | --- | --- | --- |
 | `RUNNER_ID` | Runner 唯一 ID，用于 stream/心跳 | 自动生成 |
+| `RUNNER_INSTANCE_ID` | Runner 实例 ID（留空则启动时随机生成 4 位 hex） | 自动生成 |
 | `RUNNER_TYPE` | Redis consumer group 名（`runner-<type>`） | `default` |
 | `RUNNER_TAGS` | 逗号分隔标签，Dispatcher 会基于此路由 | - |
 | `RUNNER_MAX_PARALLEL` | 并发 slot 数量 | `2` |
@@ -158,6 +159,8 @@
 - `GET /api/v1/runners`：展示所有注册 Runner，包括 tags、心跳时间、活跃 job、`RUN_QUEUE_NAME` 等。
 - `DELETE /api/v1/runners/{id}`：删除 offline Runner 记录。
 - `GET /api/v1/submitters`、`DELETE /api/v1/submitters/{id}`。
+
+Runner 状态包括 `online`、`offline`、`restoring`。当心跳连续缺失被判定为 offline 后，Control Panel 会返回 `restoring` 并要求 Runner 旋转新的 `instanceId`；只有携带新的 `instanceId` 重新注册/心跳后才会恢复为 `online`。
 
 ### Scheduler
 

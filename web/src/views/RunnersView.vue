@@ -10,12 +10,24 @@
     <div class="cards">
       <article v-for="runner in runnerStore.runners" :key="runner.id" class="card">
         <div class="header">
-          <h3>{{ runner.id }}</h3>
+          <div class="title">
+            <h3>{{ runner.id }}</h3>
+            <small class="instance-tag" v-if="runner.instanceId">#{{ runner.instanceId }}</small>
+            <small class="instance-tag muted" v-else>#pending</small>
+          </div>
           <span class="status" :data-status="runner.status">{{ runner.status }}</span>
         </div>
+        <p v-if="runner.status === 'restoring'" class="restoring-hint">
+          Restoring… waiting for the runner to rotate instance ID.
+        </p>
         <div class="meta">
           <span>Type: {{ runner.type }}</span>
           <span>Hostname: {{ runner.hostname ?? "-" }}</span>
+          <span class="instance-row">
+            Instance:
+            <code v-if="runner.instanceId" class="instance-chip">#{{ runner.instanceId }}</code>
+            <span v-else class="instance-chip muted">pending</span>
+          </span>
           <span>Active Jobs: {{ runner.activeJobs }}/{{ runner.maxParallel }}</span>
           <span>Last heartbeat: {{ formatUtcTimestamp(runner.lastHeartbeat) }}</span>
           <span>Source IP: {{ runner.lastIp ?? "-" }}</span>
@@ -217,6 +229,21 @@ header {
   align-items: center;
 }
 
+.title {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+}
+
+.instance-tag {
+  font-size: 0.85rem;
+  color: #a5b4fc;
+}
+
+.instance-tag.muted {
+  color: #64748b;
+}
+
 .status {
   text-transform: capitalize;
   padding: 0.2rem 0.6rem;
@@ -236,6 +263,16 @@ header {
   color: #ef4444;
 }
 
+.status[data-status="restoring"] {
+  color: #fbbf24;
+}
+
+.restoring-hint {
+  margin: 0;
+  color: #fbbf24;
+  font-size: 0.85rem;
+}
+
 .meta {
   display: grid;
   gap: 0.25rem;
@@ -247,6 +284,23 @@ header {
   align-items: center;
   gap: 0.4rem;
   flex-wrap: wrap;
+}
+
+.instance-row {
+  gap: 0.3rem;
+}
+
+.instance-chip {
+  padding: 0.1rem 0.5rem;
+  border-radius: 6px;
+  font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+  background: rgba(148, 163, 184, 0.2);
+  color: #e2e8f0;
+}
+
+.instance-chip.muted {
+  background: rgba(71, 85, 105, 0.4);
+  color: #94a3b8;
 }
 
 .labels {

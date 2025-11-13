@@ -67,8 +67,6 @@ func skipAuthForRequest(r *http.Request) bool {
 	switch {
 	case r.URL.Path == "/healthz":
 		return true
-	case r.URL.Path == "/api/v1/runners/register" && r.Method == http.MethodPost:
-		return true
 	case r.URL.Path == "/api/v1/runners/heartbeat" && r.Method == http.MethodPost:
 		return true
 	case r.URL.Path == "/api/v1/submitters/register" && r.Method == http.MethodPost:

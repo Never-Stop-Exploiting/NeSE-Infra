@@ -44,7 +44,7 @@ RUNNER_TAGS就可以标明这个runner可以跑哪些类型的exp（比如pwntoo
 ## 最新实现简述
 
 - 新增 `docker/runner-base.Dockerfile` 作为 Runner 的基础镜像模版，默认打包 Runner 二进制并准备好 `/env` chroot 目录，业务 Runner 可以按上述方式 `FROM runner-base:latest` 继续扩展语言运行环境。
-- 后端增加 `/api/v1/runners/register` 与 `/api/v1/runners/heartbeat` 接口，Runner 在启动时会使用 `RUNNER_SECRET` 完成认证注册，并周期性发送心跳，上报标签（`RUNNER_TAGS`）、并行能力以及活跃任务数。
+- 后端提供 `/api/v1/runners/heartbeat` 接口，Runner 使用 `RUNNER_SECRET` 周期性汇报状态、标签（`RUNNER_TAGS`）、并行能力以及活跃任务数；首次心跳若尚未登记会自动创建 Runner 记录。
 - Runner 服务新增 `CONTROL_PANEL_URL`、`RUNNER_TAGS` 等配置，会在启动时自动向 Control Panel 注册自身，同时心跳失败会记录日志。
 - 控制台 Runner 页面展示 Runner 标签与活动任务，便于按照标签调度能力。
 - Exploit 列表新增「Upload Artifact」「Edit run.sh」分离操作，run.sh 可在前端弹窗里直接编辑或单独上传文本文件。

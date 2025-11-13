@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"awdinfra/internal/config"
@@ -21,6 +22,10 @@ func main() {
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
+	}
+
+	if strings.TrimSpace(cfg.Runner.InstanceID) == "" {
+		cfg.Runner.InstanceID = runner.GenerateInstanceID()
 	}
 
 	logger := logging.NewLogger(cfg.LogLevel)

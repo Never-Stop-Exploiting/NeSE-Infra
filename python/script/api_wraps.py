@@ -155,13 +155,16 @@ class LogRecord(TypedDict):
 
 class RunnerInfo(TypedDict):
     id: str
+    instanceId: NotRequired[str | None]
     type: str
     hostname: str
     tags: list[str]
     activeJobs: int
     labels: NotRequired[dict[str, Any] | None]
+    config: NotRequired[dict[str, Any] | None]
     maxParallel: int
     lastHeartbeat: str
+    lastIp: NotRequired[str | None]
     status: str
     registeredAt: str
 
@@ -757,31 +760,34 @@ class ControlPanelAPI:
         self,
         *,
         runner_id: str,
+        instance_id: str,
         runner_type: str | None = None,
         hostname: str | None = None,
         tags: Sequence[str] | None = None,
         labels: Mapping[str, str] | None = None,
         max_parallel: int | None = None,
         status: str | None = None,
+        active_jobs: int | None = None,
         secret: str | None = None,
     ) -> RunnerInfo:
-        body = {
-            "id": runner_id,
-            "type": runner_type,
-            "hostname": hostname,
-            "secret": self._runner_secret(secret),
-            "tags": list(tags) if tags else None,
-            "labels": dict(labels) if labels else None,
-            "maxParallel": max_parallel,
-            "status": status,
-        }
-        payload = self.post("runners/register", json_body=body, expected_status=(201,))
-        return payload.get("runner", {})
+        return self.runner_heartbeat(
+            runner_id=runner_id,
+            instance_id=instance_id,
+            status=status or "online",
+            runner_type=runner_type,
+            hostname=hostname,
+            tags=tags,
+            labels=labels,
+            max_parallel=max_parallel,
+            active_jobs=active_jobs or 0,
+            secret=secret,
+        )
 
     def runner_heartbeat(
         self,
         *,
         runner_id: str,
+        instance_id: str,
         status: str | None = None,
         runner_type: str | None = None,
         hostname: str | None = None,
@@ -791,8 +797,11 @@ class ControlPanelAPI:
         active_jobs: int | None = None,
         secret: str | None = None,
     ) -> RunnerInfo:
+        if not instance_id:
+            raise ValueError("instance_id is required")
         body = {
             "id": runner_id,
+            "instanceId": instance_id,
             "secret": self._runner_secret(secret),
             "status": status,
             "type": runner_type,

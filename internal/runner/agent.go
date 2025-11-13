@@ -43,6 +43,7 @@ type Agent struct {
 	baseLabels    map[string]string
 	runnerTagsSet map[string]struct{}
 	artifactCache *artifactCache
+	instanceMu    sync.RWMutex
 }
 
 var errJobDiscard = errors.New("runner job discarded")
@@ -78,6 +79,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	if err := a.registerSelf(ctx); err != nil {
 		return err
 	}
+	a.sendHeartbeat(ctx)
 
 	g, ctx := errgroup.WithContext(ctx)
 
@@ -97,7 +99,6 @@ func (a *Agent) Run(ctx context.Context) error {
 
 func (a *Agent) consumeLoop(ctx context.Context) error {
 	group := runnerGroup(a.cfg.Runner.Type)
-	queueName := a.runQueueName()
 	maxParallel := max(1, a.cfg.Runner.MaxParallelJobs)
 	block := a.cfg.Runner.HeartbeatInterval * 2
 	if block <= 0 {
@@ -118,13 +119,15 @@ func (a *Agent) consumeLoop(ctx context.Context) error {
 		default:
 		}
 
+		queueName := a.runQueueName()
+		consumer := a.consumerName()
 		available := maxParallel - len(sema)
 		if available <= 0 {
 			time.Sleep(time.Millisecond * 50)
 			continue
 		}
 
-		messages, err := a.broker.Claim(ctx, queueName, group, runnerID(a.cfg.Runner.ID), available, block)
+		messages, err := a.broker.Claim(ctx, queueName, group, consumer, available, block)
 		if err != nil {
 			if errors.Is(err, queue.ErrNoMessages) {
 				continue
@@ -136,6 +139,7 @@ func (a *Agent) consumeLoop(ctx context.Context) error {
 
 		for _, message := range messages {
 			msgCopy := message
+			streamName := queueName
 			sema <- struct{}{}
 			go func() {
 				defer func() { <-sema }()
@@ -145,18 +149,18 @@ func (a *Agent) consumeLoop(ctx context.Context) error {
 				if err := a.handleMessage(ctx, msgCopy); err != nil {
 					if errors.Is(err, errJobDiscard) {
 						a.log.Info("job discarded", slog.String("id", msgCopy.ID))
-						if ackErr := a.broker.Ack(ctx, queueName, group, msgCopy.ID); ackErr != nil {
+						if ackErr := a.broker.Ack(ctx, streamName, group, msgCopy.ID); ackErr != nil {
 							a.log.Warn("failed to ack discarded job", slog.Any("err", ackErr), slog.String("id", msgCopy.ID))
 						}
 						return
 					}
 					a.log.Error("job failed", slog.Any("err", err), slog.String("id", msgCopy.ID))
-					if err := a.broker.Nack(ctx, queueName, group, msgCopy.ID, retryDelay); err != nil {
+					if err := a.broker.Nack(ctx, streamName, group, msgCopy.ID, retryDelay); err != nil {
 						a.log.Warn("failed to nack message", slog.Any("err", err), slog.String("id", msgCopy.ID))
 					}
 					return
 				}
-				if err := a.broker.Ack(ctx, queueName, group, msgCopy.ID); err != nil {
+				if err := a.broker.Ack(ctx, streamName, group, msgCopy.ID); err != nil {
 					a.log.Warn("failed to ack message", slog.Any("err", err), slog.String("id", msgCopy.ID))
 				}
 			}()
@@ -372,6 +376,7 @@ func (a *Agent) sendHeartbeat(ctx context.Context) {
 	defer cancel()
 	req := heartbeatRequest{
 		ID:          runnerID(a.cfg.Runner.ID),
+		InstanceID:  a.ensureInstanceID(),
 		Status:      "online",
 		Type:        a.cfg.Runner.Type,
 		Hostname:    a.hostname,
@@ -382,10 +387,37 @@ func (a *Agent) sendHeartbeat(ctx context.Context) {
 		Config:      a.heartbeatConfig(),
 	}
 	if err := a.controlClient.Heartbeat(hbCtx, req); err != nil {
-		a.log.Warn("failed to send heartbeat", slog.Any("err", err))
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict {
+			a.log.Warn("heartbeat rejected; rotating instance id",
+				slog.String("runner_id", req.ID),
+				slog.Any("err", err))
+			if rotateErr := a.rotateInstance(ctx); rotateErr != nil {
+				a.log.Error("failed to rotate instance id",
+					slog.String("runner_id", req.ID),
+					slog.Any("err", rotateErr))
+			}
+		} else {
+			a.log.Warn("failed to send heartbeat", slog.Any("err", err))
+		}
 		return
 	}
 	a.lastHeartbeat = time.Now().UTC()
+}
+
+func (a *Agent) rotateInstance(ctx context.Context) error {
+	newID := GenerateInstanceID()
+	a.instanceMu.Lock()
+	a.cfg.Runner.InstanceID = newID
+	a.instanceMu.Unlock()
+	a.log.Info("rotated runner instance id",
+		slog.String("runner_id", runnerID(a.cfg.Runner.ID)),
+		slog.String("instance_id", newID))
+	if err := a.registerSelf(ctx); err != nil {
+		return err
+	}
+	a.sendHeartbeat(ctx)
+	return nil
 }
 
 func (a *Agent) registerSelf(ctx context.Context) error {
@@ -394,12 +426,15 @@ func (a *Agent) registerSelf(ctx context.Context) error {
 		host = runnerID(a.cfg.Runner.ID)
 	}
 	a.hostname = host
+	instanceID := a.ensureInstanceID()
 	labels := map[string]string{
-		"os":       runtime.GOOS,
-		"arch":     runtime.GOARCH,
-		"app":      a.cfg.AppName,
-		"hostname": host,
-		"broker":   a.brokerStatus,
+		"os":        runtime.GOOS,
+		"arch":      runtime.GOARCH,
+		"app":       a.cfg.AppName,
+		"hostname":  host,
+		"broker":    a.brokerStatus,
+		"instance":  instanceID,
+		"runner_id": runnerID(a.cfg.Runner.ID),
 	}
 	a.baseLabels = cloneLabels(labels)
 	if a.controlClient == nil {
@@ -407,24 +442,10 @@ func (a *Agent) registerSelf(ctx context.Context) error {
 			slog.String("runner_id", runnerID(a.cfg.Runner.ID)))
 		return nil
 	}
-	registerCtx, cancel := context.WithTimeout(ctx, time.Second*10)
-	defer cancel()
-	req := registerRunnerRequest{
-		ID:          runnerID(a.cfg.Runner.ID),
-		Type:        a.cfg.Runner.Type,
-		Hostname:    host,
-		Tags:        a.cfg.Runner.Tags,
-		Labels:      labels,
-		MaxParallel: a.cfg.Runner.MaxParallelJobs,
-		Config:      a.heartbeatConfig(),
-	}
-	if err := a.controlClient.RegisterRunner(registerCtx, req); err != nil {
-		return fmt.Errorf("register runner with control panel: %w", err)
-	}
-	a.log.Info("registered runner with control panel",
-		slog.String("runner_id", req.ID),
+	a.log.Info("runner initialized",
+		slog.String("runner_id", runnerID(a.cfg.Runner.ID)),
+		slog.String("instance_id", instanceID),
 		slog.String("control_panel", a.controlClient.baseURL.String()))
-	a.sendHeartbeat(ctx)
 	return nil
 }
 
@@ -491,7 +512,33 @@ func runnerGroup(value string) string {
 }
 
 func (a *Agent) runQueueName() string {
-	return queue.RunnerQueueName(a.cfg.RunQueue.RunnerPrefix, runnerID(a.cfg.Runner.ID))
+	return queue.RunnerQueueName(a.cfg.RunQueue.RunnerPrefix, runnerID(a.cfg.Runner.ID), a.currentInstanceID())
+}
+
+func (a *Agent) consumerName() string {
+	instanceID := a.currentInstanceID()
+	base := runnerID(a.cfg.Runner.ID)
+	if instanceID == "" {
+		return base
+	}
+	return fmt.Sprintf("%s-%s", base, instanceID)
+}
+
+func (a *Agent) currentInstanceID() string {
+	a.instanceMu.RLock()
+	defer a.instanceMu.RUnlock()
+	return strings.TrimSpace(a.cfg.Runner.InstanceID)
+}
+
+func (a *Agent) ensureInstanceID() string {
+	a.instanceMu.Lock()
+	defer a.instanceMu.Unlock()
+	id := strings.TrimSpace(a.cfg.Runner.InstanceID)
+	if id == "" {
+		id = GenerateInstanceID()
+		a.cfg.Runner.InstanceID = id
+	}
+	return id
 }
 
 func (a *Agent) ensureRunScript(workspace string, payload jobs.JobPayload) error {
@@ -639,6 +686,9 @@ func (a *Agent) runnerLabels() map[string]string {
 	labels["broker"] = a.brokerStatus
 	if a.hostname != "" {
 		labels["hostname"] = a.hostname
+	}
+	if instance := a.currentInstanceID(); instance != "" {
+		labels["instance"] = instance
 	}
 	return labels
 }

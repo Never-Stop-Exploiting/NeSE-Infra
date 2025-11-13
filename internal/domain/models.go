@@ -64,6 +64,7 @@ type ExploitRevision struct {
 // Runner represents an execution worker registered to the control panel.
 type Runner struct {
 	ID            string
+	InstanceID    string
 	Type          string
 	Hostname      string
 	LastIP        string

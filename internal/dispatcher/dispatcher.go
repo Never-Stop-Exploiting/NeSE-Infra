@@ -94,7 +94,7 @@ func (d *Dispatcher) handleMessage(ctx context.Context, group string, message qu
 			slog.Any("required_tags", payload.RunnerTags))
 		return d.retryLater(ctx, group, message.ID, errors.New("no runner available"))
 	}
-	queueName := queue.RunnerQueueName(d.cfg.RunQueue.RunnerPrefix, runner.ID)
+	queueName := queue.RunnerQueueName(d.cfg.RunQueue.RunnerPrefix, runner.ID, runner.InstanceID)
 	if _, err := d.broker.Publish(ctx, queueName, message.Body); err != nil {
 		return d.retryLater(ctx, group, message.ID, err)
 	}
@@ -104,6 +104,7 @@ func (d *Dispatcher) handleMessage(ctx context.Context, group string, message qu
 	d.log.Debug("dispatched job",
 		slog.String("run_id", payload.RunID),
 		slog.String("runner_id", runner.ID),
+		slog.String("instance_id", runner.InstanceID),
 		slog.String("queue", queueName))
 	return nil
 }
