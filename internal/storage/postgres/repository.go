@@ -183,7 +183,11 @@ func ensureSchema(ctx context.Context, db *sql.DB) error {
 			finished_at TIMESTAMPTZ,
 			log_uri TEXT,
 			flag_id TEXT,
-			error_message TEXT
+			error_message TEXT,
+			stdout TEXT,
+			stderr TEXT,
+			flag_value TEXT,
+			flag_source TEXT
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_runs_flag_id ON runs(flag_id);`,
 		`CREATE TABLE IF NOT EXISTS flags (
@@ -502,8 +506,8 @@ func (r *Repository) CreateRun(ctx context.Context, run *domain.Run) error {
 	}
 
 	_, err := r.db.ExecContext(ctx, `
-		INSERT INTO runs (id, exploit_id, exploit_revision, target_id, runner_id, status, queued_at, started_at, finished_at, log_uri, flag_id, error_message)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+		INSERT INTO runs (id, exploit_id, exploit_revision, target_id, runner_id, status, queued_at, started_at, finished_at, log_uri, flag_id, error_message, stdout, stderr, flag_value, flag_source)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
 		run.ID,
 		nullString(run.ExploitID),
 		nullString(run.ExploitRevision),
@@ -516,6 +520,10 @@ func (r *Repository) CreateRun(ctx context.Context, run *domain.Run) error {
 		nullString(run.LogURI),
 		nullString(run.FlagID),
 		nullString(run.ErrorMessage),
+		nullString(run.Stdout),
+		nullString(run.Stderr),
+		nullString(run.FlagValue),
+		nullString(run.FlagSource),
 	)
 	return err
 }
@@ -526,8 +534,8 @@ func (r *Repository) UpdateRun(ctx context.Context, run *domain.Run) error {
 	}
 	res, err := r.db.ExecContext(ctx, `
 		UPDATE runs
-		SET exploit_id=$1, exploit_revision=$2, target_id=$3, runner_id=$4, status=$5, queued_at=$6, started_at=$7, finished_at=$8, log_uri=$9, flag_id=$10, error_message=$11
-		WHERE id=$12`,
+		SET exploit_id=$1, exploit_revision=$2, target_id=$3, runner_id=$4, status=$5, queued_at=$6, started_at=$7, finished_at=$8, log_uri=$9, flag_id=$10, error_message=$11, stdout=$12, stderr=$13, flag_value=$14, flag_source=$15
+		WHERE id=$16`,
 		nullString(run.ExploitID),
 		nullString(run.ExploitRevision),
 		nullString(run.TargetID),
@@ -539,6 +547,10 @@ func (r *Repository) UpdateRun(ctx context.Context, run *domain.Run) error {
 		nullString(run.LogURI),
 		nullString(run.FlagID),
 		nullString(run.ErrorMessage),
+		nullString(run.Stdout),
+		nullString(run.Stderr),
+		nullString(run.FlagValue),
+		nullString(run.FlagSource),
 		run.ID,
 	)
 	if err != nil {
@@ -2218,7 +2230,7 @@ func (r *Repository) ListRuns(ctx context.Context, filter domain.RunFilter, limi
 			args = append(args, queryLimit)
 			limitPos := len(args)
 			query := fmt.Sprintf(`
-				SELECT id, exploit_id, exploit_revision, target_id, runner_id, status, queued_at, started_at, finished_at, log_uri, flag_id, error_message
+				SELECT id, exploit_id, exploit_revision, target_id, runner_id, status, queued_at, started_at, finished_at, log_uri, flag_id, error_message, stdout, stderr, flag_value, flag_source
 				FROM runs
 				WHERE ((%s) < $1 OR ((%s) = $1 AND id < $2))%s
 				ORDER BY %s DESC, id DESC
@@ -2239,7 +2251,7 @@ func (r *Repository) ListRuns(ctx context.Context, filter domain.RunFilter, limi
 		args = append(args, queryLimit)
 		limitPos := len(args)
 		query := fmt.Sprintf(`
-			SELECT id, exploit_id, exploit_revision, target_id, runner_id, status, queued_at, started_at, finished_at, log_uri, flag_id, error_message
+			SELECT id, exploit_id, exploit_revision, target_id, runner_id, status, queued_at, started_at, finished_at, log_uri, flag_id, error_message, stdout, stderr, flag_value, flag_source
 			FROM runs
 			WHERE 1=1%s
 			ORDER BY %s DESC, id DESC
@@ -2260,6 +2272,7 @@ func (r *Repository) ListRuns(ctx context.Context, filter domain.RunFilter, limi
 		var run domain.Run
 		var queued, started, finished sql.NullTime
 		var exploitID, exploitRevision, targetID, runnerID, logURI, flagID, errorMessage sql.NullString
+		var stdout, stderr, flagValue, flagSource sql.NullString
 		var status string
 		if err := rows.Scan(
 			&run.ID,
@@ -2274,6 +2287,10 @@ func (r *Repository) ListRuns(ctx context.Context, filter domain.RunFilter, limi
 			&logURI,
 			&flagID,
 			&errorMessage,
+			&stdout,
+			&stderr,
+			&flagValue,
+			&flagSource,
 		); err != nil {
 			return nil, "", err
 		}
@@ -2297,6 +2314,18 @@ func (r *Repository) ListRuns(ctx context.Context, filter domain.RunFilter, limi
 		}
 		if errorMessage.Valid {
 			run.ErrorMessage = errorMessage.String
+		}
+		if stdout.Valid {
+			run.Stdout = stdout.String
+		}
+		if stderr.Valid {
+			run.Stderr = stderr.String
+		}
+		if flagValue.Valid {
+			run.FlagValue = flagValue.String
+		}
+		if flagSource.Valid {
+			run.FlagSource = flagSource.String
 		}
 		run.Status = domain.RunStatus(status)
 		if queued.Valid {
@@ -2325,9 +2354,10 @@ func (r *Repository) GetRun(ctx context.Context, id string) (domain.Run, error) 
 	var run domain.Run
 	var queued, started, finished sql.NullTime
 	var exploitID, exploitRevision, targetID, runnerID, logURI, flagID, errorMessage sql.NullString
+	var stdout, stderr, flagValue, flagSource sql.NullString
 	var status string
 	err := r.db.QueryRowContext(ctx, `
-		SELECT id, exploit_id, exploit_revision, target_id, runner_id, status, queued_at, started_at, finished_at, log_uri, flag_id, error_message
+		SELECT id, exploit_id, exploit_revision, target_id, runner_id, status, queued_at, started_at, finished_at, log_uri, flag_id, error_message, stdout, stderr, flag_value, flag_source
 		FROM runs
 		WHERE id = $1`,
 		id,
@@ -2344,6 +2374,10 @@ func (r *Repository) GetRun(ctx context.Context, id string) (domain.Run, error) 
 		&logURI,
 		&flagID,
 		&errorMessage,
+		&stdout,
+		&stderr,
+		&flagValue,
+		&flagSource,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Run{}, errors.New("run not found")
@@ -2382,12 +2416,24 @@ func (r *Repository) GetRun(ctx context.Context, id string) (domain.Run, error) 
 	if finished.Valid {
 		run.FinishedAt = finished.Time
 	}
+	if stdout.Valid {
+		run.Stdout = stdout.String
+	}
+	if stderr.Valid {
+		run.Stderr = stderr.String
+	}
+	if flagValue.Valid {
+		run.FlagValue = flagValue.String
+	}
+	if flagSource.Valid {
+		run.FlagSource = flagSource.String
+	}
 	return run, nil
 }
 
 func (r *Repository) ListRunnerActiveRuns(ctx context.Context, runnerID string) ([]domain.Run, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT id, exploit_id, exploit_revision, target_id, runner_id, status, queued_at, started_at, finished_at, log_uri, flag_id, error_message
+		SELECT id, exploit_id, exploit_revision, target_id, runner_id, status, queued_at, started_at, finished_at, log_uri, flag_id, error_message, stdout, stderr, flag_value, flag_source
 		FROM runs
 		WHERE runner_id = $1 AND status = 'running'`,
 		runnerID,
@@ -2401,6 +2447,7 @@ func (r *Repository) ListRunnerActiveRuns(ctx context.Context, runnerID string) 
 	for rows.Next() {
 		var run domain.Run
 		var exploitID, exploitRevision, targetID, runner, logURI, flagID, errorMessage sql.NullString
+		var stdout, stderr, flagValue, flagSource sql.NullString
 		var queued, started, finished sql.NullTime
 		var status string
 		if scanErr := rows.Scan(
@@ -2416,6 +2463,10 @@ func (r *Repository) ListRunnerActiveRuns(ctx context.Context, runnerID string) 
 			&logURI,
 			&flagID,
 			&errorMessage,
+			&stdout,
+			&stderr,
+			&flagValue,
+			&flagSource,
 		); scanErr != nil {
 			return nil, scanErr
 		}
@@ -2448,6 +2499,18 @@ func (r *Repository) ListRunnerActiveRuns(ctx context.Context, runnerID string) 
 		}
 		if finished.Valid {
 			run.FinishedAt = finished.Time
+		}
+		if stdout.Valid {
+			run.Stdout = stdout.String
+		}
+		if stderr.Valid {
+			run.Stderr = stderr.String
+		}
+		if flagValue.Valid {
+			run.FlagValue = flagValue.String
+		}
+		if flagSource.Valid {
+			run.FlagSource = flagSource.String
 		}
 		run.Status = domain.RunStatus(status)
 		runs = append(runs, run)

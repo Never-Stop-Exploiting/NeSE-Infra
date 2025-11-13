@@ -112,6 +112,10 @@ type Run struct {
 	LogURI          string
 	FlagID          string
 	ErrorMessage    string
+	Stdout          string
+	Stderr          string
+	FlagValue       string
+	FlagSource      string
 }
 
 // RunFilter captures query parameters for run listing.

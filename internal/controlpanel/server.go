@@ -1454,9 +1454,8 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		exploitName := s.lookupExploitName(ctx, run.ExploitID)
 		targetLabel := s.lookupTargetLabel(ctx, run.TargetID)
-		stdout, stderr, flagValue, flagSource := s.collectRunOutput(ctx, runID)
 		writeJSON(w, http.StatusOK, map[string]any{
-			"run": marshalRunDetail(run, stdout, stderr, flagValue, flagSource, exploitName, targetLabel),
+			"run": marshalRunDetail(s.populateRunOutput(ctx, run), exploitName, targetLabel),
 		})
 		return
 	}
@@ -1611,6 +1610,29 @@ func (s *Server) handleRunFinish(w http.ResponseWriter, r *http.Request, runID s
 		}
 	}
 
+	if flagValue != "" {
+		run.FlagValue = flagValue
+	}
+	if flagSource != "" {
+		run.FlagSource = flagSource
+	}
+
+	if strings.TrimSpace(req.Stdout) != "" {
+		trimmed := s.truncateLogOutput(req.Stdout)
+		s.logger.Debug(fmt.Sprintf("run %s stdout", runID),
+			slog.String("run_id", runID),
+			slog.String("output", trimmed))
+		run.Stdout = trimmed
+	}
+
+	if strings.TrimSpace(req.Stderr) != "" {
+		trimmed := s.truncateLogOutput(req.Stderr)
+		s.logger.Debug(fmt.Sprintf("run %s stderr", runID),
+			slog.String("run_id", runID),
+			slog.String("output", trimmed))
+		run.Stderr = trimmed
+	}
+
 	if err := s.repository.UpdateRun(ctx, &run); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update run")
 		return
@@ -1648,20 +1670,6 @@ func (s *Server) handleRunFinish(w http.ResponseWriter, r *http.Request, runID s
 			flagArgs = append(flagArgs, slog.String("source", flagSource))
 		}
 		s.logger.Info(fmt.Sprintf("run %s captured flag", runID), flagArgs...)
-	}
-
-	if strings.TrimSpace(req.Stdout) != "" {
-		trimmed := s.truncateLogOutput(req.Stdout)
-		s.logger.Debug(fmt.Sprintf("run %s stdout", runID),
-			slog.String("run_id", runID),
-			slog.String("output", trimmed))
-	}
-
-	if strings.TrimSpace(req.Stderr) != "" {
-		trimmed := s.truncateLogOutput(req.Stderr)
-		s.logger.Debug(fmt.Sprintf("run %s stderr", runID),
-			slog.String("run_id", runID),
-			slog.String("output", trimmed))
 	}
 
 	if createdFlag != nil {
@@ -1708,9 +1716,9 @@ func (s *Server) handleRunCancel(w http.ResponseWriter, r *http.Request, runID s
 
 	exploitName := s.lookupExploitName(ctx, run.ExploitID)
 	targetLabel := s.lookupTargetLabel(ctx, run.TargetID)
-	stdout, stderr, flagValue, flagSource := s.collectRunOutput(ctx, runID)
+	run = s.populateRunOutput(ctx, run)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"run": marshalRunDetail(run, stdout, stderr, flagValue, flagSource, exploitName, targetLabel),
+		"run": marshalRunDetail(run, exploitName, targetLabel),
 	})
 }
 
@@ -2245,7 +2253,30 @@ func (s *Server) handleRunnerRegister(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{"runner": marshalRunner(runner)})
 }
 
-func (s *Server) collectRunOutput(ctx context.Context, runID string) (string, string, string, string) {
+func (s *Server) populateRunOutput(ctx context.Context, run domain.Run) domain.Run {
+	if run.Stdout != "" || run.Stderr != "" || run.FlagValue != "" || run.FlagSource != "" {
+		return run
+	}
+	if strings.TrimSpace(run.ID) == "" {
+		return run
+	}
+	stdout, stderr, flagValue, flagSource := s.collectLegacyRunOutput(ctx, run.ID)
+	if run.Stdout == "" {
+		run.Stdout = stdout
+	}
+	if run.Stderr == "" {
+		run.Stderr = stderr
+	}
+	if run.FlagValue == "" {
+		run.FlagValue = flagValue
+	}
+	if run.FlagSource == "" {
+		run.FlagSource = flagSource
+	}
+	return run
+}
+
+func (s *Server) collectLegacyRunOutput(ctx context.Context, runID string) (string, string, string, string) {
 	filter := domain.LogFilter{
 		RunID: runID,
 	}
@@ -2990,13 +3021,13 @@ func marshalRunSummary(run domain.Run, exploitName, targetLabel string) map[stri
 	}
 }
 
-func marshalRunDetail(run domain.Run, stdout, stderr, flagValue, flagSource, exploitName, targetLabel string) map[string]any {
+func marshalRunDetail(run domain.Run, exploitName, targetLabel string) map[string]any {
 	data := marshalRunSummary(run, exploitName, targetLabel)
 	data["flagId"] = run.FlagID
-	data["stdout"] = stdout
-	data["stderr"] = stderr
-	data["flagValue"] = flagValue
-	data["flagSource"] = flagSource
+	data["stdout"] = run.Stdout
+	data["stderr"] = run.Stderr
+	data["flagValue"] = run.FlagValue
+	data["flagSource"] = run.FlagSource
 	return data
 }
 
