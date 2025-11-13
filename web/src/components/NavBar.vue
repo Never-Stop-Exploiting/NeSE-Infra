@@ -10,7 +10,6 @@
       <RouterLink to="/flags">Flags</RouterLink>
       <RouterLink to="/runs">Runs</RouterLink>
       <RouterLink to="/runners">Runners</RouterLink>
-      <RouterLink to="/logs">Logs</RouterLink>
     </nav>
     <div class="actions">
       <span class="token-status">Token 已加载</span>

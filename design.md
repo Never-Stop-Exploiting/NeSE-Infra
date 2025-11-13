@@ -8,7 +8,7 @@ AwD Infra 是 Attack-with-Defence 竞赛的自动化平台，帮助队伍协调�
 │ ControlPanel │◄───►│ Scheduler   │◄───►│ Queue/Broker│
 └─────▲────────┘     └────┬────────┘     └─────▲──────┘
       │                    │                      │
-      │ REST/WebSocket     │ 任务投递             │Run/Flag/Log
+      │ REST/WebSocket     │ 任务投递             │Run/Flag
       ▼                    ▼                      │
 ┌──────────────┐     ┌─────────────┐         ┌────▼──────┐
 │ Web UI       │     │ Runner(s)   │         │ Flag      │
@@ -20,10 +20,10 @@ AwD Infra 是 Attack-with-Defence 竞赛的自动化平台，帮助队伍协调�
 - **Control Panel / API**：统一配置中心，管理挑战、目标、Exploit、Runner、Flag 等元数据；提供 REST API，未来扩展 WebSocket。
 - **Scheduler**：基于「目标 × Exploit」组合生成待执行任务，执行并发控制、排队策略、重试回退；将任务投递到消息队列。
 - **Runner**：在隔离环境（Docker+chroot `/env`）执行 exploit；下载并解压 artifact，调用 `./run.sh <ip> <port>`，收集 stdout/stderr 并解析 flag。
-- **Flag Submitter**：从 Redis 队列获取已捕获的 flag，执行去重、限速和重试策略；当前实现通过 HTTP（默认 `FLAG_SUBMIT_URL`，例如测试 flagserver）提交，记录提交历史和日志。
-- **存储层**：PostgreSQL（结构化配置与运行数据）、Redis（队列/锁/限流/缓存）以及对象存储（日志、依赖包）——当前实现为内存仓库。
-- **观测性**：结构化日志（后续接入 Loki / ELK）、指标（Prometheus）、分布式追踪（OpenTelemetry）规划。
-- **Web UI**：Vue3 + Vite + Pinia 构建的运维界面，支持配置管理、状态监控、日志查看等功能。
+- **Flag Submitter**：从 Redis 队列获取已捕获的 flag，执行去重、限速和重试策略；当前实现通过 HTTP（默认 `FLAG_SUBMIT_URL`，例如测试 flagserver）提交，并记录提交历史。
+- **存储层**：PostgreSQL（结构化配置与运行数据）、Redis（队列/锁/限流/缓存）以及对象存储（依赖包等工件）——当前实现为内存仓库。
+- **观测性**：组件统一使用 slog 输出结构化日志到 stdout，后续仍规划接入 Loki / ELK、Prometheus、OpenTelemetry。
+- **Web UI**：Vue3 + Vite + Pinia 构建的运维界面，支持配置管理、状态监控等功能。
 
 ## 2. 数据模型
 核心领域模型定义在 `internal/domain/models.go`：
@@ -33,7 +33,7 @@ AwD Infra 是 Attack-with-Defence 竞赛的自动化平台，帮助队伍协调�
 - `Run`：一次 Exploit 对 Target 的执行记录；包含状态、时间戳、关联 Runner/Flag。
 - `Flag` / `SubmissionAttempt`：Flag 捕获及提交历史；记录提交状态、错误信息、下次重试时间。
 - `Runner`：注册 Runner 的类型、能力、心跳状态。
-- `LogEntry`：结构化日志条目，支持按 level/source/runId/flagId 过滤。
+- `LogEntry`：结构化日志条目（兼容保留，当前默认不再落库，主要通过 stdout 观测）。
 - `RunWorkItem`：Scheduler 投递给 Runner 的调度任务（包含 Artifact、Flag 解析规则等）。
 
 ## 3. 运行流程
@@ -41,7 +41,7 @@ AwD Infra 是 Attack-with-Defence 竞赛的自动化平台，帮助队伍协调�
 2. **调度阶段**：Scheduler 定期从仓库查询可运行的目标与启用的 Exploit，依据策略生成 `RunWorkItem` 并投递到 Redis Streams 队列。
 3. **执行阶段**：Runner 作为 Redis Streams consumer group 成员阻塞等待任务，解压 Artifact 至 `/env/tmp/<run-id>`，执行 `./run.sh ip port`，捕获输出、解析 flag、上传执行结果。
 4. **Flag 管理**：捕获 flag 存入 `flag` 表，Flag Submitter 统一限速、去重、重试后输出最终状态。
-5. **可视化/监控**：Web UI 通过 `/api/v1` REST 接口（未来可扩展 WebSocket）展示 targets/exploits/runs/flags/logs 状态；日志、metrics 计划接入 Loki/Prometheus。
+5. **可视化/监控**：Web UI 通过 `/api/v1` REST 接口（未来可扩展 WebSocket）展示 targets/exploits/runs/flags 状态；日志通过容器 stdout 查看，metrics 计划接入 Loki/Prometheus。
 
 ## 4. 配置与约定
 - 所有服务通过 `internal/config` 读取环境变量（`.env`），统一控制 Postgres/Redis 连接、Runner 参数、Flag 提交流程。
@@ -56,10 +56,9 @@ AwD Infra 是 Attack-with-Defence 竞赛的自动化平台，帮助队伍协调�
   - Dashboard：展示各类计数、Runner 负载、Flag 状态概览。
   - Targets：支持单个添加、批量导入（IP 递增、队伍名称列表）并预览。
   - Exploits：创建、启用/禁用、设置 timeout、上传 revision。
-  - Flags：查看提交状态、日志、点击重试。
+  - Flags：查看提交状态、提交记录、点击重试。
   - Runs：查看执行队列、RunDetail（stdout/stderr）、状态流转。
   - Runners：展示在线 Runner 及并发能力。
-  - Logs：支持多条件筛选的结构化日志列表。
 - **开发/部署**：
   - 开发：`pnpm install --filter ./web`；`pnpm --filter ./web dev` (5173)。
   - 生产：`pnpm --filter ./web build`，由 `docker/web.Dockerfile` 使用 Nginx 服务静态资源并反向代理 `/api/`。

@@ -1087,12 +1087,7 @@ func (s *Server) handleFlagDetail(w http.ResponseWriter, r *http.Request) {
 		if err := s.repository.AddFlagAttempt(r.Context(), id, attempt); err != nil {
 			s.logger.Warn("add manual attempt failed", slog.Any("err", err))
 		}
-		_ = s.repository.AppendLog(r.Context(), domain.LogEntry{
-			Level:   "info",
-			Source:  "control-panel",
-			Message: fmt.Sprintf("flag %s requeued", id),
-			FlagID:  id,
-		})
+		s.logger.Info("flag requeued", slog.String("flag_id", id))
 		if s.broker != nil {
 			payload := submitter.QueueMessage{
 				FlagID:      flag.ID,
@@ -1295,20 +1290,6 @@ func (s *Server) handleFlagSubmitFinish(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	logFields := map[string]any{
-		"status":     finalStatus,
-		"submitter":  req.SubmitterID,
-		"statusCode": req.StatusCode,
-	}
-	if req.Message != "" {
-		logFields["message"] = req.Message
-	}
-	if req.LatencyMs > 0 {
-		logFields["latencyMs"] = req.LatencyMs
-	}
-	if req.RetryAfterSeconds > 0 {
-		logFields["retryAfterSeconds"] = req.RetryAfterSeconds
-	}
 	level := "info"
 	switch finalStatus {
 	case domain.FlagStatusFailed, domain.FlagStatusDuplicated:
@@ -1316,14 +1297,22 @@ func (s *Server) handleFlagSubmitFinish(w http.ResponseWriter, r *http.Request, 
 	case domain.FlagStatusRetry:
 		level = "error"
 	}
-	_ = s.repository.AppendLog(r.Context(), domain.LogEntry{
-		Level:     level,
-		Source:    "flag-submitter",
-		Message:   fmt.Sprintf("flag %s submitted", flagID),
-		FlagID:    flagID,
-		Timestamp: now,
-		Fields:    logFields,
-	})
+	logArgs := []any{
+		slog.String("flag_id", flagID),
+		slog.String("status", string(finalStatus)),
+		slog.String("submitter_id", req.SubmitterID),
+		slog.Int("status_code", req.StatusCode),
+	}
+	if req.Message != "" {
+		logArgs = append(logArgs, slog.String("message", req.Message))
+	}
+	if req.LatencyMs > 0 {
+		logArgs = append(logArgs, slog.Float64("latency_ms", req.LatencyMs))
+	}
+	if req.RetryAfterSeconds > 0 {
+		logArgs = append(logArgs, slog.Int("retry_after_seconds", req.RetryAfterSeconds))
+	}
+	s.logWithLevel(level, fmt.Sprintf("flag %s submitted", flagID), logArgs...)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"flag": map[string]any{
@@ -1529,15 +1518,13 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request, runID st
 		writeError(w, http.StatusInternalServerError, "failed to update run")
 		return
 	}
-	_ = s.repository.AppendLog(ctx, domain.LogEntry{
-		Level:   "info",
-		Source:  "runner",
-		Message: fmt.Sprintf("run %s started", runID),
-		RunID:   runID,
-		Fields: map[string]any{
-			"runnerId": run.RunnerID,
-		},
-	})
+	attrs := []any{
+		slog.String("run_id", runID),
+	}
+	if strings.TrimSpace(run.RunnerID) != "" {
+		attrs = append(attrs, slog.String("runner_id", run.RunnerID))
+	}
+	s.logger.Info(fmt.Sprintf("run %s started", runID), attrs...)
 	writeJSON(w, http.StatusOK, map[string]any{"run_id": runID, "status": run.Status})
 }
 
@@ -1633,67 +1620,48 @@ func (s *Server) handleRunFinish(w http.ResponseWriter, r *http.Request, runID s
 	if status != domain.RunStatusSucceeded {
 		logLevel = "warn"
 	}
-	fields := map[string]any{
-		"status":   string(status),
-		"runnerId": run.RunnerID,
+	finishArgs := []any{
+		slog.String("run_id", runID),
+		slog.String("status", string(status)),
+	}
+	if strings.TrimSpace(run.RunnerID) != "" {
+		finishArgs = append(finishArgs, slog.String("runner_id", run.RunnerID))
 	}
 	if run.ErrorMessage != "" {
-		fields["error"] = run.ErrorMessage
+		finishArgs = append(finishArgs, slog.String("error", run.ErrorMessage))
 	}
 	if createdFlag != nil {
-		fields["flagId"] = createdFlag.ID
+		finishArgs = append(finishArgs, slog.String("flag_id", createdFlag.ID))
 		if flagSource != "" {
-			fields["flagSource"] = flagSource
+			finishArgs = append(finishArgs, slog.String("flag_source", flagSource))
 		}
 	}
-	_ = s.repository.AppendLog(ctx, domain.LogEntry{
-		Level:   logLevel,
-		Source:  "runner",
-		Message: fmt.Sprintf("run %s finished", runID),
-		RunID:   runID,
-		Fields:  fields,
-	})
+	s.logWithLevel(logLevel, fmt.Sprintf("run %s finished", runID), finishArgs...)
 
 	if createdFlag != nil {
-		flagFields := map[string]any{
-			"flag": flagValue,
+		flagArgs := []any{
+			slog.String("run_id", runID),
+			slog.String("flag_id", createdFlag.ID),
+			slog.String("flag", flagValue),
 		}
 		if flagSource != "" {
-			flagFields["source"] = flagSource
+			flagArgs = append(flagArgs, slog.String("source", flagSource))
 		}
-		flagFields["flagId"] = createdFlag.ID
-		_ = s.repository.AppendLog(ctx, domain.LogEntry{
-			Level:   "info",
-			Source:  "runner",
-			Message: fmt.Sprintf("run %s flag", runID),
-			RunID:   runID,
-			FlagID:  createdFlag.ID,
-			Fields:  flagFields,
-		})
+		s.logger.Info(fmt.Sprintf("run %s captured flag", runID), flagArgs...)
 	}
 
 	if strings.TrimSpace(req.Stdout) != "" {
-		_ = s.repository.AppendLog(ctx, domain.LogEntry{
-			Level:   "debug",
-			Source:  "runner",
-			Message: fmt.Sprintf("run %s stdout", runID),
-			RunID:   runID,
-			Fields: map[string]any{
-				"output": s.truncateLogOutput(req.Stdout),
-			},
-		})
+		trimmed := s.truncateLogOutput(req.Stdout)
+		s.logger.Debug(fmt.Sprintf("run %s stdout", runID),
+			slog.String("run_id", runID),
+			slog.String("output", trimmed))
 	}
 
 	if strings.TrimSpace(req.Stderr) != "" {
-		_ = s.repository.AppendLog(ctx, domain.LogEntry{
-			Level:   "debug",
-			Source:  "runner",
-			Message: fmt.Sprintf("run %s stderr", runID),
-			RunID:   runID,
-			Fields: map[string]any{
-				"output": s.truncateLogOutput(req.Stderr),
-			},
-		})
+		trimmed := s.truncateLogOutput(req.Stderr)
+		s.logger.Debug(fmt.Sprintf("run %s stderr", runID),
+			slog.String("run_id", runID),
+			slog.String("output", trimmed))
 	}
 
 	if createdFlag != nil {
@@ -1838,22 +1806,15 @@ func (s *Server) cancelRunInternal(ctx context.Context, run domain.Run, reason s
 		return run, err
 	}
 
-	logFields := map[string]any{
-		"status": string(run.Status),
-		"reason": reason,
+	warnArgs := []any{
+		slog.String("run_id", run.ID),
+		slog.String("status", string(run.Status)),
+		slog.String("reason", reason),
 	}
 	if strings.TrimSpace(run.RunnerID) != "" {
-		logFields["runnerId"] = run.RunnerID
+		warnArgs = append(warnArgs, slog.String("runner_id", run.RunnerID))
 	}
-	if err := s.repository.AppendLog(ctx, domain.LogEntry{
-		Level:   "warn",
-		Source:  "control-panel",
-		Message: fmt.Sprintf("run %s canceled", run.ID),
-		RunID:   run.ID,
-		Fields:  logFields,
-	}); err != nil {
-		s.logger.Warn("append cancel log failed", slog.Any("err", err), slog.String("run_id", run.ID))
-	}
+	s.logger.Warn(fmt.Sprintf("run %s canceled", run.ID), warnArgs...)
 	return run, nil
 }
 
@@ -1872,21 +1833,14 @@ func (s *Server) cancelFlag(ctx context.Context, flagID string, reason string) (
 	if err := s.repository.UpdateFlag(ctx, &flag); err != nil {
 		return domain.Flag{}, err
 	}
-	logFields := map[string]any{
-		"status": flag.Status,
+	warnArgs := []any{
+		slog.String("flag_id", flag.ID),
+		slog.String("status", string(flag.Status)),
 	}
 	if strings.TrimSpace(reason) != "" {
-		logFields["reason"] = reason
+		warnArgs = append(warnArgs, slog.String("reason", reason))
 	}
-	if err := s.repository.AppendLog(ctx, domain.LogEntry{
-		Level:   "warn",
-		Source:  "control-panel",
-		Message: fmt.Sprintf("flag %s dropped", flag.ID),
-		FlagID:  flag.ID,
-		Fields:  logFields,
-	}); err != nil {
-		s.logger.Warn("append flag cancel log failed", slog.Any("err", err), slog.String("flag_id", flag.ID))
-	}
+	s.logger.Warn(fmt.Sprintf("flag %s dropped", flag.ID), warnArgs...)
 	return flag, nil
 }
 
@@ -1915,16 +1869,10 @@ func (s *Server) enqueueFlag(ctx context.Context, flag domain.Flag) {
 	if queued {
 		message = "flag queued"
 	}
-	_ = s.repository.AppendLog(ctx, domain.LogEntry{
-		Level:   "info",
-		Source:  "control-panel",
-		Message: fmt.Sprintf("%s %s", message, flag.ID),
-		FlagID:  flag.ID,
-		Fields: map[string]any{
-			"challengeId": flag.ChallengeID,
-			"targetId":    flag.TargetID,
-		},
-	})
+	s.logger.Info(fmt.Sprintf("%s %s", message, flag.ID),
+		slog.String("flag_id", flag.ID),
+		slog.String("challenge_id", flag.ChallengeID),
+		slog.String("target_id", flag.TargetID))
 }
 
 func (s *Server) truncateLogOutput(value string) string {
@@ -1948,6 +1896,19 @@ func (s *Server) truncateLogOutput(value string) string {
 		return "…"
 	}
 	return string(truncated) + "…"
+}
+
+func (s *Server) logWithLevel(level string, message string, args ...any) {
+	switch level {
+	case "debug":
+		s.logger.Debug(message, args...)
+	case "warn":
+		s.logger.Warn(message, args...)
+	case "error":
+		s.logger.Error(message, args...)
+	default:
+		s.logger.Info(message, args...)
+	}
 }
 
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {

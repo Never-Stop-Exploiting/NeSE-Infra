@@ -6,7 +6,7 @@
 
 - **模块化服务**：Control Panel、Scheduler、Dispatcher、Runner、Flag Submitter、Vue 运维面板全部开箱即用，可按需横向扩展。
 - **标签感知分发**：Scheduler 只需写入主 Run Stream，由 Dispatcher 读取并依据 Runner tags/并发压力路由到各 Runner 专属 Stream，彻底消除误抢任务导致的 Nack。
-- **可观测与管控**：Control Panel 暴露 `/api/v1` REST 接口与 Web 面板，支持 Run/Flag/日志/Runner 可视化、执行记录下载、Flag 重试及目标覆盖矩阵维护。
+- **可观测与管控**：Control Panel 暴露 `/api/v1` REST 接口与 Web 面板，支持 Run/Flag/Runner 可视化、执行记录下载、Flag 重试及目标覆盖矩阵维护；结构化日志统一输出到 stdout，可直接通过 `docker compose logs` 观测。
 - **安全执行**：Runner 在 chroot 工作区拉起 exploit，支持 artifact 缓存、run.sh 自动补全、Flag 文件/正则回退及远程取消；进程组会在超时或取消时被整组 `SIGKILL` 并由 PID 1 reaper 收尸。
 - **流量治理**：Flag Submitter 通过 Redis Streams 消费队列并根据插件策略限速重试；Control Panel 负责 run 超时/runner 离线回收并定期 `XTRIM` 主/子 Stream，避免 Redis 无限膨胀。
 
@@ -14,12 +14,12 @@
 
 | 组件 | 说明 |
 | --- | --- |
-| **Control Panel (`cmd/control-panel`)** | 提供 `/api/v1` REST API、Runner/Submitter 心跳注册、Run/Flag/日志查询、Scheduler 设置、Target×Exploit Override 管理，并驱动队列 reclaim 与 stream trim。|
+| **Control Panel (`cmd/control-panel`)** | 提供 `/api/v1` REST API、Runner/Submitter 心跳注册、Run/Flag 查询、Scheduler 设置、Target×Exploit Override 管理，并驱动队列 reclaim 与 stream trim；运行日志直接写 stdout。|
 | **Scheduler (`cmd/scheduler`)** | 从 Postgres 读取 runnable work（目标状态、并发限制、Runner Tags、Overrides），按照 Interval/Continuous 策略打包 `jobs.JobPayload` 写入主 Run Stream。|
 | **Dispatcher (`cmd/dispatcher`)** | 消费主 Run Stream，根据 Runner tag 集与实时负载挑选合适 Runner，并把 payload 转发到该 Runner 的专属 Stream + consumer group。|
-| **Runner (`cmd/runner`)** | 在 chroot 工作区执行 exploit，支持 artifact 缓存、Flag 文件/正则提取、远程取消、完整日志回传，并将捕获 flag 写入 Flag Stream；最新版本会为每次 run 创建独立进程组，并在容器 PID1 场景下主动 Wait4 清理僵尸进程。|
+| **Runner (`cmd/runner`)** | 在 chroot 工作区执行 exploit，支持 artifact 缓存、Flag 文件/正则提取、远程取消，并将 stdout/stderr 通过 Control Panel 打到 stdout，同时把捕获 flag 写入 Flag Stream；最新版本会为每次 run 创建独立进程组，并在容器 PID1 场景下主动 Wait4 清理僵尸进程。|
 | **Flag Submitter (`cmd/flag-submitter`)** | 消费 Flag Stream，调用内置或自定义插件提交旗帜，并回传 `/flags/{id}/submit/start|finish`，失败时按 backoff 再排队。|
-| **Web UI (`web/`)** | Vue3 + Vite + Pinia + Tailwind。提供 Dashboard、Targets、Exploits、Runs、Flags、Logs、Runners、Scheduler 视图；访问需提供 `CONTROL_PANEL_TOKEN`（浏览器本地缓存）。|
+| **Web UI (`web/`)** | Vue3 + Vite + Pinia + Tailwind。提供 Dashboard、Targets、Exploits、Runs、Flags、Runners、Scheduler 视图；访问需提供 `CONTROL_PANEL_TOKEN`（浏览器本地缓存）。|
 
 ```
                    ┌────────────┐           ┌─────────────┐
@@ -166,7 +166,7 @@
 
 ### 日志
 
-- `GET /api/v1/logs?level=info&runId=...`：按 level/source/runId/flagId 筛选结构化日志。
+结构化日志不再落库/展示在 Web UI，Control Panel 与 Runner/Submitter 会直接把事件写到 stdout，建议通过 `docker compose logs control-panel`、`docker compose logs runner` 等方式查看。`GET /api/v1/logs?level=info&runId=...` 接口仅为兼容旧脚本而保留，默认返回空列表。
 
 ## 开发与测试
 

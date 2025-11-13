@@ -168,17 +168,6 @@ export interface SubmitterInfo {
   processedCount?: number;
 }
 
-export interface LogEntry {
-  id: string;
-  timestamp: string;
-  level: "debug" | "info" | "warn" | "error";
-  source: string;
-  message: string;
-  runId?: string;
-  flagId?: string;
-  fields?: Record<string, unknown>;
-}
-
 export interface SchedulerSettings {
   roundIntervalSeconds: number;
   roundIntervalMinutes: number;
