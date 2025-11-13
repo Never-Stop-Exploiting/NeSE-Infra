@@ -86,13 +86,15 @@ type heartbeatRequest struct {
 }
 
 type runStartRequest struct {
-	Secret   string `json:"secret"`
-	RunnerID string `json:"runnerId"`
+	Secret     string `json:"secret"`
+	RunnerID   string `json:"runnerId"`
+	InstanceID string `json:"instanceId,omitempty"`
 }
 
 type runFinishRequest struct {
 	Secret     string `json:"secret"`
 	RunnerID   string `json:"runnerId"`
+	InstanceID string `json:"instanceId,omitempty"`
 	Status     string `json:"status"`
 	Error      string `json:"error,omitempty"`
 	FlagValue  string `json:"flagValue,omitempty"`
@@ -116,23 +118,25 @@ func (c *ControlPanelClient) Heartbeat(ctx context.Context, req heartbeatRequest
 	return c.post(ctx, "/api/v1/runners/heartbeat", req)
 }
 
-func (c *ControlPanelClient) MarkRunStarted(ctx context.Context, runID string, runnerID string) error {
+func (c *ControlPanelClient) MarkRunStarted(ctx context.Context, runID string, runnerID string, instanceID string) error {
 	if c.baseURL == nil {
 		return fmt.Errorf("control panel client not configured")
 	}
 	req := runStartRequest{
-		RunnerID: runnerID,
-		Secret:   c.secret,
+		RunnerID:   runnerID,
+		InstanceID: instanceID,
+		Secret:     c.secret,
 	}
 	return c.post(ctx, fmt.Sprintf("/api/v1/runs/%s/start", strings.TrimSpace(runID)), req)
 }
 
-func (c *ControlPanelClient) CompleteRun(ctx context.Context, runID string, runnerID string, result RunResult) error {
+func (c *ControlPanelClient) CompleteRun(ctx context.Context, runID string, runnerID string, instanceID string, result RunResult) error {
 	if c.baseURL == nil {
 		return fmt.Errorf("control panel client not configured")
 	}
 	req := runFinishRequest{
 		RunnerID:   runnerID,
+		InstanceID: instanceID,
 		Status:     result.Status,
 		Error:      result.Error,
 		FlagValue:  result.FlagValue,

@@ -574,7 +574,7 @@ func (a *Agent) reportRunStart(ctx context.Context, payload jobs.JobPayload, run
 	}
 	startCtx, cancel := context.WithTimeout(ctx, time.Second*5)
 	defer cancel()
-	if err := a.controlClient.MarkRunStarted(startCtx, payload.RunID, runnerID); err != nil {
+	if err := a.controlClient.MarkRunStarted(startCtx, payload.RunID, runnerID, a.currentInstanceID()); err != nil {
 		return err
 	}
 	return nil
@@ -586,7 +586,7 @@ func (a *Agent) reportRunCompletion(ctx context.Context, payload jobs.JobPayload
 	}
 	finishCtx, cancel := context.WithTimeout(ctx, time.Second*5)
 	defer cancel()
-	return a.controlClient.CompleteRun(finishCtx, payload.RunID, runnerID, result)
+	return a.controlClient.CompleteRun(finishCtx, payload.RunID, runnerID, a.currentInstanceID(), result)
 }
 
 func (a *Agent) monitorRunCancellation(ctx context.Context, runID string, cancel context.CancelFunc, canceled *atomic.Bool) {

@@ -25,6 +25,7 @@ type Config struct {
 	RunnerSecret      string
 	SubmitterSecret   string
 	AllowedRunnerTags []string
+	RunnerEventStream string
 }
 
 type PostgresConfig struct {
@@ -121,6 +122,7 @@ func Load() (Config, error) {
 		RunnerSecret:      getenv("RUNNER_SECRET", "dev-runner-secret"),
 		SubmitterSecret:   getenv("SUBMITTER_SECRET", "dev-submitter-secret"),
 		AllowedRunnerTags: splitAndTrim(getenv("ALLOWED_RUNNER_TAGS", "")),
+		RunnerEventStream: getenv("RUNNER_EVENT_STREAM", "runner:events"),
 	}
 
 	if cfg.RunnerSecret == "" {

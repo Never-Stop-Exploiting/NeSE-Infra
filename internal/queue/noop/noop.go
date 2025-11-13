@@ -44,3 +44,7 @@ func (b *Broker) Trim(ctx context.Context, stream string, strategy queue.TrimStr
 func (b *Broker) PendingMinID(ctx context.Context, stream string, group string) (string, error) {
 	return "", ctx.Err()
 }
+
+func (b *Broker) DeleteStream(ctx context.Context, stream string) error {
+	return ctx.Err()
+}

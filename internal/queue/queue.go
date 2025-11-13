@@ -24,6 +24,7 @@ type Broker interface {
 	Reclaim(ctx context.Context, stream string, group string, consumer string, minIdle time.Duration, count int) ([]Message, error)
 	Trim(ctx context.Context, stream string, strategy TrimStrategy) error
 	PendingMinID(ctx context.Context, stream string, group string) (string, error)
+	DeleteStream(ctx context.Context, stream string) error
 }
 
 // ErrNoMessages indicates that the queue has no messages available within the configured timeout.

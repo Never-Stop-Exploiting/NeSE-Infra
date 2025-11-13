@@ -1150,6 +1150,43 @@ func (r *Repository) ListRunnerActiveRuns(ctx context.Context, runnerID string) 
 	return runs, ctx.Err()
 }
 
+func (r *Repository) AssignRunToRunner(ctx context.Context, runID, runnerID, instanceID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	run, ok := r.runs[strings.TrimSpace(runID)]
+	if !ok {
+		return errors.New("run not found")
+	}
+	if run.Status != domain.RunStatusPending && run.Status != domain.RunStatusRunning {
+		return errors.New("run not assignable")
+	}
+	run.RunnerID = strings.TrimSpace(runnerID)
+	run.RunnerInstanceID = strings.TrimSpace(instanceID)
+	r.runs[run.ID] = run
+	return ctx.Err()
+}
+
+func (r *Repository) ListRunsByRunnerInstance(ctx context.Context, runnerID, instanceID string) ([]domain.Run, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var runs []domain.Run
+	targetRunner := strings.TrimSpace(runnerID)
+	targetInstance := strings.TrimSpace(instanceID)
+	for _, run := range r.runs {
+		if strings.TrimSpace(run.RunnerID) != targetRunner {
+			continue
+		}
+		if strings.TrimSpace(run.RunnerInstanceID) != targetInstance {
+			continue
+		}
+		if run.Status != domain.RunStatusPending && run.Status != domain.RunStatusRunning {
+			continue
+		}
+		runs = append(runs, run)
+	}
+	return runs, ctx.Err()
+}
+
 func (r *Repository) ListLogs(ctx context.Context, filter domain.LogFilter) ([]domain.LogEntry, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

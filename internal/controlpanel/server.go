@@ -20,6 +20,7 @@ import (
 
 	"awdinfra/internal/config"
 	"awdinfra/internal/domain"
+	"awdinfra/internal/events"
 	"awdinfra/internal/jobs"
 	"awdinfra/internal/queue"
 	"awdinfra/internal/scheduler"
@@ -916,6 +917,39 @@ func (s *Server) handleExploitTestRun(w http.ResponseWriter, r *http.Request, ex
 	})
 }
 
+func (s *Server) createRunForTarget(ctx context.Context, exploit domain.Exploit, target domain.Target) (domain.Run, error) {
+	if s.broker == nil {
+		return domain.Run{}, errors.New("run queue unavailable")
+	}
+	artifact, err := s.repository.LatestExploitArtifact(ctx, exploit.ID)
+	if err != nil {
+		return domain.Run{}, fmt.Errorf("package exploit %s: %w", exploit.ID, err)
+	}
+	flagRegex, flagFile, timeout := jobs.HintsFromMetadata(exploit.Metadata)
+	run := domain.Run{
+		ExploitID: exploit.ID,
+		TargetID:  target.ID,
+		Status:    domain.RunStatusPending,
+		QueuedAt:  time.Now().UTC(),
+	}
+	if err := s.repository.CreateRun(ctx, &run); err != nil {
+		return domain.Run{}, fmt.Errorf("create run: %w", err)
+	}
+	item := domain.RunWorkItem{
+		RunID:     run.ID,
+		Exploit:   exploit,
+		Target:    target,
+		Artifact:  artifact,
+		FlagRegex: flagRegex,
+		FlagFile:  flagFile,
+		Timeout:   timeout,
+	}
+	if err := scheduler.EnqueueRun(ctx, s.cfg, s.broker, item); err != nil {
+		return domain.Run{}, err
+	}
+	return run, nil
+}
+
 func (s *Server) handleFlags(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -1478,8 +1512,9 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request, runID st
 		return
 	}
 	var req struct {
-		Secret   string `json:"secret"`
-		RunnerID string `json:"runnerId"`
+		Secret     string `json:"secret"`
+		RunnerID   string `json:"runnerId"`
+		InstanceID string `json:"instanceId"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid payload")
@@ -1508,6 +1543,9 @@ func (s *Server) handleRunStart(w http.ResponseWriter, r *http.Request, runID st
 	if id := strings.TrimSpace(req.RunnerID); id != "" {
 		run.RunnerID = id
 	}
+	if instance := strings.TrimSpace(req.InstanceID); instance != "" {
+		run.RunnerInstanceID = instance
+	}
 	if run.QueuedAt.IsZero() {
 		run.QueuedAt = now
 	}
@@ -1534,6 +1572,7 @@ func (s *Server) handleRunFinish(w http.ResponseWriter, r *http.Request, runID s
 	var req struct {
 		Secret     string `json:"secret"`
 		RunnerID   string `json:"runnerId"`
+		InstanceID string `json:"instanceId"`
 		Status     string `json:"status"`
 		Error      string `json:"error"`
 		FlagValue  string `json:"flagValue"`
@@ -1579,6 +1618,9 @@ func (s *Server) handleRunFinish(w http.ResponseWriter, r *http.Request, runID s
 	run.Status = status
 	if id := strings.TrimSpace(req.RunnerID); id != "" {
 		run.RunnerID = id
+	}
+	if instance := strings.TrimSpace(req.InstanceID); instance != "" {
+		run.RunnerInstanceID = instance
 	}
 	if run.StartedAt.IsZero() {
 		run.StartedAt = now
@@ -1880,6 +1922,54 @@ func (s *Server) enqueueFlag(ctx context.Context, flag domain.Flag) {
 		slog.String("flag_id", flag.ID),
 		slog.String("challenge_id", flag.ChallengeID),
 		slog.String("target_id", flag.TargetID))
+}
+
+func (s *Server) emitRunnerStatusEvent(ctx context.Context, runner domain.Runner, reason string, forceDrain bool) {
+	if strings.TrimSpace(runner.ID) == "" {
+		return
+	}
+	evt := events.RunnerEvent{}
+	evt.Type = events.RunnerEventTypeStatus
+	evt.RunnerID = runner.ID
+	evt.InstanceID = runner.InstanceID
+	evt.Status = runner.Status
+	evt.Reason = reason
+	evt.ForceDrain = forceDrain
+	evt.Timestamp = time.Now().UTC()
+	s.publishRunnerEvent(ctx, evt)
+}
+
+func (s *Server) emitRunnerInstanceEvent(ctx context.Context, runner domain.Runner, reason string) {
+	if strings.TrimSpace(runner.ID) == "" || strings.TrimSpace(runner.InstanceID) == "" {
+		return
+	}
+	evt := events.RunnerEvent{}
+	evt.Type = events.RunnerEventTypeInstance
+	evt.RunnerID = runner.ID
+	evt.InstanceID = runner.InstanceID
+	evt.Status = runner.Status
+	evt.Reason = reason
+	evt.ForceDrain = true
+	evt.Timestamp = time.Now().UTC()
+	s.publishRunnerEvent(ctx, evt)
+}
+
+func (s *Server) publishRunnerEvent(ctx context.Context, evt events.RunnerEvent) {
+	if s.broker == nil || strings.TrimSpace(s.cfg.RunnerEventStream) == "" {
+		return
+	}
+	data, err := events.Encode(evt)
+	if err != nil {
+		s.logger.Warn("encode runner event failed", slog.Any("err", err))
+		return
+	}
+	if _, err := s.broker.Publish(ctx, s.cfg.RunnerEventStream, data); err != nil && ctx.Err() == nil {
+		s.logger.Warn("publish runner event failed",
+			slog.Any("err", err),
+			slog.String("runner_id", evt.RunnerID),
+			slog.String("instance_id", evt.InstanceID),
+			slog.String("type", evt.Type))
+	}
 }
 
 func (s *Server) truncateLogOutput(value string) string {
@@ -2369,6 +2459,8 @@ func (s *Server) handleRunnerHeartbeat(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to update runner")
 			return
 		}
+		s.emitRunnerStatusEvent(ctx, runner, "registered", false)
+		s.emitRunnerInstanceEvent(ctx, runner, "registered")
 		writeJSON(w, http.StatusOK, map[string]any{"runner": marshalRunner(runner)})
 		if err := s.sweepStaleRunners(ctx); err != nil {
 			s.logger.Warn("runner sweep failed", slog.Any("err", err))
@@ -2392,6 +2484,8 @@ func (s *Server) handleRunnerHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	runner := existing
+	oldInstance := strings.TrimSpace(existing.InstanceID)
+	instanceChanged := oldInstance != "" && oldInstance != instanceID
 	runner.InstanceID = instanceID
 	if strings.TrimSpace(req.Type) != "" {
 		runner.Type = strings.TrimSpace(req.Type)
@@ -2431,10 +2525,18 @@ func (s *Server) handleRunnerHeartbeat(w http.ResponseWriter, r *http.Request) {
 	runner.LastHeartbeat = now
 	runner.LastIP = clientIP(r)
 
+	statusChanged := strings.ToLower(strings.TrimSpace(existing.Status)) != strings.ToLower(strings.TrimSpace(runner.Status))
 	if err := s.repository.UpsertRunner(ctx, runner); err != nil {
 		s.logger.Error("runner heartbeat failed", slog.Any("err", err), slog.String("runner_id", req.ID))
 		writeError(w, http.StatusInternalServerError, "failed to update runner")
 		return
+	}
+	if statusChanged {
+		force := strings.EqualFold(runner.Status, "offline") || strings.EqualFold(runner.Status, "restoring")
+		s.emitRunnerStatusEvent(ctx, runner, "heartbeat", force)
+	}
+	if instanceChanged {
+		s.emitRunnerInstanceEvent(ctx, runner, "instance-changed")
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"runner": marshalRunner(runner)})
 	if err := s.sweepStaleRunners(ctx); err != nil {
@@ -3053,17 +3155,18 @@ func marshalLog(entry domain.LogEntry) map[string]any {
 
 func marshalRunSummary(run domain.Run, exploitName, targetLabel string) map[string]any {
 	return map[string]any{
-		"id":           run.ID,
-		"exploitId":    run.ExploitID,
-		"exploitName":  exploitName,
-		"targetId":     run.TargetID,
-		"targetLabel":  targetLabel,
-		"runnerId":     run.RunnerID,
-		"status":       run.Status,
-		"queuedAt":     run.QueuedAt,
-		"startedAt":    run.StartedAt,
-		"finishedAt":   run.FinishedAt,
-		"errorMessage": run.ErrorMessage,
+		"id":               run.ID,
+		"exploitId":        run.ExploitID,
+		"exploitName":      exploitName,
+		"targetId":         run.TargetID,
+		"targetLabel":      targetLabel,
+		"runnerId":         run.RunnerID,
+		"runnerInstanceId": run.RunnerInstanceID,
+		"status":           run.Status,
+		"queuedAt":         run.QueuedAt,
+		"startedAt":        run.StartedAt,
+		"finishedAt":       run.FinishedAt,
+		"errorMessage":     run.ErrorMessage,
 	}
 }
 
@@ -3293,88 +3396,7 @@ func (s *Server) handleRunnerOutage(ctx context.Context, runner domain.Runner, r
 	if strings.TrimSpace(reason) == "" {
 		reason = "runner unavailable"
 	}
-	runs, err := s.repository.ListRunnerActiveRuns(ctx, runnerID)
-	if err != nil {
-		s.logger.Warn("list active runs for runner failed",
-			slog.Any("err", err),
-			slog.String("runner_id", runnerID))
-		return
-	}
-	if len(runs) == 0 {
-		return
-	}
-	for _, run := range runs {
-		if err := s.cancelRunAndReschedule(ctx, run, reason); err != nil {
-			s.logger.Warn("failed to recycle run for offline runner",
-				slog.Any("err", err),
-				slog.String("runner_id", runnerID),
-				slog.String("run_id", run.ID))
-		}
-	}
-}
-
-func (s *Server) cancelRunAndReschedule(ctx context.Context, run domain.Run, reason string) error {
-	updated, err := s.cancelRunInternal(ctx, run, reason)
-	if err != nil {
-		return err
-	}
-	if err := s.rescheduleRun(ctx, updated); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (s *Server) createRunForTarget(ctx context.Context, exploit domain.Exploit, target domain.Target) (domain.Run, error) {
-	if s.broker == nil {
-		return domain.Run{}, errors.New("run queue unavailable")
-	}
-	artifact, err := s.repository.LatestExploitArtifact(ctx, exploit.ID)
-	if err != nil {
-		return domain.Run{}, fmt.Errorf("package exploit %s: %w", exploit.ID, err)
-	}
-	flagRegex, flagFile, timeout := jobs.HintsFromMetadata(exploit.Metadata)
-	run := domain.Run{
-		ExploitID: exploit.ID,
-		TargetID:  target.ID,
-		Status:    domain.RunStatusPending,
-		QueuedAt:  time.Now().UTC(),
-	}
-	if err := s.repository.CreateRun(ctx, &run); err != nil {
-		return domain.Run{}, fmt.Errorf("create run: %w", err)
-	}
-	item := domain.RunWorkItem{
-		RunID:     run.ID,
-		Exploit:   exploit,
-		Target:    target,
-		Artifact:  artifact,
-		FlagRegex: flagRegex,
-		FlagFile:  flagFile,
-		Timeout:   timeout,
-	}
-	if err := scheduler.EnqueueRun(ctx, s.cfg, s.broker, item); err != nil {
-		return domain.Run{}, err
-	}
-	return run, nil
-}
-
-func (s *Server) rescheduleRun(ctx context.Context, previous domain.Run) error {
-	exploitID := strings.TrimSpace(previous.ExploitID)
-	targetID := strings.TrimSpace(previous.TargetID)
-	if exploitID == "" || targetID == "" {
-		return fmt.Errorf("run %s missing exploit/target for reschedule", previous.ID)
-	}
-	exploit, err := s.repository.GetExploit(ctx, exploitID)
-	if err != nil {
-		return fmt.Errorf("load exploit %s: %w", exploitID, err)
-	}
-	target, err := s.repository.GetTarget(ctx, targetID)
-	if err != nil {
-		return fmt.Errorf("load target %s: %w", targetID, err)
-	}
-	if _, err := s.createRunForTarget(ctx, exploit, target); err != nil {
-		return fmt.Errorf("create replacement run: %w", err)
-	}
-	return nil
+	s.emitRunnerStatusEvent(ctx, runner, reason, true)
 }
 
 func (s *Server) reclaimStalledRuns(ctx context.Context) ([]domain.Runner, error) {
@@ -3388,6 +3410,14 @@ func (s *Server) reclaimStalledRuns(ctx context.Context) ([]domain.Runner, error
 		return nil, err
 	}
 	for _, runner := range runners {
+		status := strings.ToLower(strings.TrimSpace(runner.Status))
+		if status != "online" {
+			continue
+		}
+		instanceID := strings.TrimSpace(runner.InstanceID)
+		if instanceID == "" {
+			continue
+		}
 		queueName := queue.RunnerQueueName(s.cfg.RunQueue.RunnerPrefix, runner.ID, runner.InstanceID)
 		group := runnerGroupName(runner.Type)
 		messages, err := s.broker.Reclaim(ctx, queueName, group, reclaimerConsumerName(group), visibility, 64)
@@ -3482,6 +3512,14 @@ func (s *Server) trimRunQueues(ctx context.Context, runners []domain.Runner) {
 			slog.String("stream", s.cfg.RunQueue.Name))
 	}
 	for _, runner := range runners {
+		status := strings.ToLower(strings.TrimSpace(runner.Status))
+		if status != "online" {
+			continue
+		}
+		instanceID := strings.TrimSpace(runner.InstanceID)
+		if instanceID == "" {
+			continue
+		}
 		stream := queue.RunnerQueueName(s.cfg.RunQueue.RunnerPrefix, runner.ID, runner.InstanceID)
 		strategy := queue.TrimStrategy{MaxLen: maxLen}
 		group := runnerGroupName(runner.Type)
@@ -3500,6 +3538,26 @@ func (s *Server) trimRunQueues(ctx context.Context, runners []domain.Runner) {
 				slog.String("stream", stream))
 		}
 	}
+}
+
+func (s *Server) rescheduleRun(ctx context.Context, previous domain.Run) error {
+	exploitID := strings.TrimSpace(previous.ExploitID)
+	targetID := strings.TrimSpace(previous.TargetID)
+	if exploitID == "" || targetID == "" {
+		return fmt.Errorf("run %s missing exploit/target for reschedule", previous.ID)
+	}
+	exploit, err := s.repository.GetExploit(ctx, exploitID)
+	if err != nil {
+		return fmt.Errorf("load exploit %s: %w", exploitID, err)
+	}
+	target, err := s.repository.GetTarget(ctx, targetID)
+	if err != nil {
+		return fmt.Errorf("load target %s: %w", targetID, err)
+	}
+	if _, err := s.createRunForTarget(ctx, exploit, target); err != nil {
+		return fmt.Errorf("create replacement run: %w", err)
+	}
+	return nil
 }
 
 func runnerGroupName(runnerType string) string {

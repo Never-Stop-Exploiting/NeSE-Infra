@@ -224,14 +224,21 @@ class FlagSubmitter:
                 time.sleep(1)
 
     def consume_once(self, consumer: str) -> None:
-        messages = self.redis_call(
-            "xreadgroup",
-            self.group,
-            consumer,
-            {self.stream: ">"},
-            count=1,
-            block=self.block_ms,
-        )
+        try:
+            messages = self.redis_call(
+                "xreadgroup",
+                self.group,
+                consumer,
+                {self.stream: ">"},
+                count=1,
+                block=self.block_ms,
+            )
+        except ResponseError as exc:
+            if "NOGROUP" in str(exc).upper():
+                logging.warning("redis group missing, recreating stream=%s group=%s", self.stream, self.group)
+                self.ensure_group()
+                return
+            raise
         if not messages:
             return
         for _, entries in messages:

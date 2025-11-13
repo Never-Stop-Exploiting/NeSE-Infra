@@ -101,22 +101,23 @@ type Submitter struct {
 
 // Run links an exploit revision to a target execution attempt.
 type Run struct {
-	ID              string
-	ExploitID       string
-	ExploitRevision string
-	TargetID        string
-	RunnerID        string
-	Status          RunStatus
-	QueuedAt        time.Time
-	StartedAt       time.Time
-	FinishedAt      time.Time
-	LogURI          string
-	FlagID          string
-	ErrorMessage    string
-	Stdout          string
-	Stderr          string
-	FlagValue       string
-	FlagSource      string
+	ID               string
+	ExploitID        string
+	ExploitRevision  string
+	TargetID         string
+	RunnerID         string
+	RunnerInstanceID string
+	Status           RunStatus
+	QueuedAt         time.Time
+	StartedAt        time.Time
+	FinishedAt       time.Time
+	LogURI           string
+	FlagID           string
+	ErrorMessage     string
+	Stdout           string
+	Stderr           string
+	FlagValue        string
+	FlagSource       string
 }
 
 // RunFilter captures query parameters for run listing.

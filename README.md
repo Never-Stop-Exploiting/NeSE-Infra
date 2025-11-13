@@ -14,7 +14,7 @@
 
 | 组件 | 说明 |
 | --- | --- |
-| **Control Panel (`cmd/control-panel`)** | 提供 `/api/v1` REST API、Runner/Submitter 心跳注册、Run/Flag 查询、Scheduler 设置、Target×Exploit Override 管理，并驱动队列 reclaim 与 stream trim；运行日志直接写 stdout。|
+| **Control Panel (`cmd/control-panel`)** | 提供 `/api/v1` REST API、Runner/Submitter 心跳注册、Run/Flag 查询、Scheduler 设置、Target×Exploit Override 管理，推送 Runner 状态事件，并负责主队列 `XTRIM`；运行日志直接写 stdout。|
 | **Scheduler (`cmd/scheduler`)** | 从 Postgres 读取 runnable work（目标状态、并发限制、Runner Tags、Overrides），按照 Interval/Continuous 策略打包 `jobs.JobPayload` 写入主 Run Stream。|
 | **Dispatcher (`cmd/dispatcher`)** | 消费主 Run Stream，根据 Runner tag 集与实时负载挑选合适 Runner，并把 payload 转发到该 Runner 的专属 Stream + consumer group。|
 | **Runner (`cmd/runner`)** | 在 chroot 工作区执行 exploit，支持 artifact 缓存、Flag 文件/正则提取、远程取消，并将 stdout/stderr 通过 Control Panel 打到 stdout，同时把捕获 flag 写入 Flag Stream；进程组按 run 隔离且由 PID1 Wait4 收尸。Runner 启动会生成短 `instanceId` 并注册为独立 stream（`exp:pending:runner:<runnerId>:<instanceId>`），若心跳超时会被标记为 `offline → restoring`，新的 heartbeat 必须携带全新的 instanceId 才能恢复。|
@@ -83,6 +83,7 @@
 | `RUN_QUEUE_RETRY_DELAY` | Dispatcher/Runner `NACK` 再排队延迟 | `5s` |
 | `RUN_QUEUE_RUNNER_PREFIX` | 生成 per-runner stream 的前缀 | `<RUN_QUEUE_NAME>:runner` |
 | `RUN_QUEUE_TRIM_MAXLEN` | Stream 保留的最大条目数；超出会 `XTRIM` | `50000` |
+| `RUNNER_EVENT_STREAM` | Runner 状态事件 stream 名称 | `runner:events` |
 | `FLAG_QUEUE_VISIBILITY` / `FLAG_QUEUE_RETRY_DELAY` | Flag Stream 可见性/重试间隔 | `30s` / `10s` |
 
 ### Scheduler

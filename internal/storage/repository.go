@@ -64,6 +64,8 @@ type Repository interface {
 	ListRuns(ctx context.Context, filter domain.RunFilter, limit int, cursor string) ([]domain.Run, string, error)
 	GetRun(ctx context.Context, id string) (domain.Run, error)
 	ListRunnerActiveRuns(ctx context.Context, runnerID string) ([]domain.Run, error)
+	AssignRunToRunner(ctx context.Context, runID, runnerID, instanceID string) error
+	ListRunsByRunnerInstance(ctx context.Context, runnerID, instanceID string) ([]domain.Run, error)
 	ListLogs(ctx context.Context, filter domain.LogFilter) ([]domain.LogEntry, error)
 	AppendLog(ctx context.Context, entry domain.LogEntry) error
 	DashboardStats(ctx context.Context) (domain.DashboardStats, error)

@@ -172,7 +172,7 @@ func (b *Broker) Reclaim(ctx context.Context, stream, group, consumer string, mi
 	if count <= 0 {
 		count = 10
 	}
-	if minIdle <= 0 {
+	if minIdle < 0 {
 		minIdle = time.Second
 	}
 	if err := b.ensureGroup(ctx, stream, group); err != nil {
@@ -274,4 +274,12 @@ func (b *Broker) PendingMinID(ctx context.Context, stream, group string) (string
 		return "", nil
 	}
 	return entries[0].ID, nil
+}
+
+// DeleteStream removes the entire stream key.
+func (b *Broker) DeleteStream(ctx context.Context, stream string) error {
+	if stream == "" {
+		return errors.New("stream required")
+	}
+	return b.client.Del(ctx, stream).Err()
 }
