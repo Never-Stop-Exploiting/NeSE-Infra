@@ -61,6 +61,7 @@ type RunnerConfig struct {
 	ControlPanelURL       string
 	ControlPanelTimeout   time.Duration
 	MaxParallelJobs       int
+	LogOutputLimit        int
 	LogFlushInterval      time.Duration
 	HeartbeatInterval     time.Duration
 	ChrootPath            string
@@ -179,6 +180,7 @@ func loadRunner() RunnerConfig {
 		ControlPanelURL:       getenv("CONTROL_PANEL_URL", ""),
 		ControlPanelTimeout:   getenvDuration("RUNNER_CONTROL_PANEL_TIMEOUT", time.Minute),
 		MaxParallelJobs:       getenvInt("RUNNER_MAX_PARALLEL", 2),
+		LogOutputLimit:        getenvInt("RUNNER_LOG_OUTPUT_LIMIT", 4096),
 		LogFlushInterval:      getenvDuration("RUNNER_LOG_FLUSH_INTERVAL", time.Second*2),
 		HeartbeatInterval:     getenvDuration("RUNNER_HEARTBEAT_INTERVAL", time.Second*10),
 		ChrootPath:            getenv("RUNNER_CHROOT_PATH", "/env"),

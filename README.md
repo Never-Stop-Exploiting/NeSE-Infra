@@ -109,6 +109,7 @@
 | `RUNNER_TYPE` | Redis consumer group 名（`runner-<type>`） | `default` |
 | `RUNNER_TAGS` | 逗号分隔标签，Dispatcher 会基于此路由 | - |
 | `RUNNER_MAX_PARALLEL` | 并发 slot 数量 | `2` |
+| `RUNNER_LOG_OUTPUT_LIMIT` | Runner 上报 stdout/stderr 的最大字节数 | `4096` |
 | `RUNNER_WORKSPACE_ROOT` / `RUNNER_CHROOT_PATH` | 临时目录与 chroot 根 | `/env/tmp` / `/env` |
 | `CONTROL_PANEL_URL` | 控制面地址（下载 artifact / 心跳） | - |
 | `RUNNER_FLAG_FILE` / `RUNNER_FLAG_REGEX` | Flag 文件名 / 正则 | `flag` / `flag\{[a-zA-Z0-9_\-]+\}` |

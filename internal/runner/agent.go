@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"awdinfra/internal/config"
 	"awdinfra/internal/jobs"
@@ -287,7 +288,7 @@ func (a *Agent) handleMessage(ctx context.Context, msg queue.Message) error {
 	if len(stderr) > 0 {
 		a.log.Debug("stderr output",
 			slog.String("run_id", runID),
-			slog.String("stderr", trimOutputString(stderr)))
+			slog.String("stderr", a.trimOutputString(stderr)))
 	}
 
 	status := "succeeded"
@@ -316,8 +317,8 @@ func (a *Agent) handleMessage(ctx context.Context, msg queue.Message) error {
 		Error:      errorMessage,
 		FlagValue:  flagValue,
 		FlagSource: flagSource,
-		Stdout:     trimOutputString(stdout),
-		Stderr:     trimOutputString(stderr),
+		Stdout:     a.trimOutputString(stdout),
+		Stderr:     a.trimOutputString(stderr),
 	}
 
 	if remoteCanceled.Load() {
@@ -580,17 +581,27 @@ func (a *Agent) fetchRunInfo(ctx context.Context, runID string) (RunInfo, error)
 	return a.controlClient.GetRun(requestCtx, runID)
 }
 
-func trimOutputString(data []byte) string {
+func (a *Agent) trimOutputString(data []byte) string {
 	text := strings.TrimSpace(string(data))
 	if text == "" {
 		return ""
 	}
-	const limit = 2048
-	runes := []rune(text)
-	if len(runes) <= limit {
+	limit := a.cfg.Runner.LogOutputLimit
+	if limit <= 0 {
+		limit = 4096
+	}
+	raw := []byte(text)
+	if len(raw) <= limit {
 		return text
 	}
-	return string(runes[:limit]) + "…"
+	truncated := raw[:limit]
+	for len(truncated) > 0 && !utf8.Valid(truncated) {
+		truncated = truncated[:len(truncated)-1]
+	}
+	if len(truncated) == 0 {
+		return "…"
+	}
+	return string(truncated) + "…"
 }
 
 func (a *Agent) publishFlagDirect(ctx context.Context, payload jobs.JobPayload, flagValue string) {
@@ -658,6 +669,9 @@ func (a *Agent) heartbeatConfig() map[string]string {
 	}
 	if flush := a.cfg.Runner.LogFlushInterval; flush > 0 {
 		add("RUNNER_LOG_FLUSH_INTERVAL", flush.String())
+	}
+	if limit := a.cfg.Runner.LogOutputLimit; limit > 0 {
+		add("RUNNER_LOG_OUTPUT_LIMIT", strconv.Itoa(limit))
 	}
 	if timeout := a.cfg.Runner.DefaultTimeout; timeout > 0 {
 		add("RUNNER_DEFAULT_TIMEOUT", timeout.String())
