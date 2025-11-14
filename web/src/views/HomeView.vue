@@ -90,20 +90,24 @@
             <div class="matrix-row matrix-header-row" :style="matrixColumnStyle">
               <div class="matrix-cell team-header">队伍 / 题目</div>
               <div
-                class="matrix-cell challenge-header"
+                class="matrix-cell challenge-header clickable"
                 v-for="challenge in matrixChallenges"
                 :key="challenge.id"
+                @click="handleChallengeHeaderClick(challenge.id)"
               >
                 {{ challenge.name }}
               </div>
             </div>
             <div class="matrix-row" v-for="row in matrixRows" :key="row.team" :style="matrixColumnStyle">
-              <div class="matrix-cell team-label">{{ row.team }}</div>
+              <div class="matrix-cell team-label clickable" @click="handleTeamClick(row.team)">
+                {{ row.team }}
+              </div>
               <div
-                class="matrix-cell status-cell"
+                class="matrix-cell status-cell clickable"
                 v-for="cell in row.cells"
                 :key="row.team + '-' + cell.challengeId"
                 :data-status="cell.status"
+                @click="handleMatrixCellClick(row.team, cell.challengeId)"
               >
                 <div v-if="tooltipItems(cell).length" class="matrix-tooltip">
                   <strong>{{ tooltipLabel(cell) }}</strong>
@@ -123,13 +127,20 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
+import { useRouter } from "vue-router";
 import { fetchOverviewStats, fetchOverviewMatrix } from "@/api/overview";
-import type { OverviewStats, OverviewMatrix, OverviewMatrixCell, OverviewMatrixStatus } from "@/types";
+import type {
+  OverviewStats,
+  OverviewMatrix,
+  OverviewMatrixCell,
+  OverviewMatrixStatus
+} from "@/types";
 import { useExploitStore } from "@/stores/exploits";
 import { useTargetStore } from "@/stores/targets";
-import { useRunStore } from "@/stores/runs";
+import { useRunStore, type RunFilters } from "@/stores/runs";
 import { useRunnerStore } from "@/stores/runners";
 
+const router = useRouter();
 const exploitStore = useExploitStore();
 const targetStore = useTargetStore();
 const runStore = useRunStore();
@@ -263,6 +274,35 @@ function tooltipLabel(cell: OverviewMatrixCell): string {
     return "失败 EXP";
   }
   return "";
+}
+
+function goToRunsWithFilters(filters: RunFilters) {
+  runStore.primeFilters(filters);
+  router.push({ name: "runs" });
+}
+
+function handleChallengeHeaderClick(challengeId: string) {
+  if (!challengeId) {
+    return;
+  }
+  goToRunsWithFilters({ challengeId });
+}
+
+function handleTeamClick(teamName: string) {
+  if (!teamName) {
+    return;
+  }
+  goToRunsWithFilters({ targetName: teamName });
+}
+
+function handleMatrixCellClick(teamName: string, challengeId: string) {
+  if (!teamName && !challengeId) {
+    return;
+  }
+  goToRunsWithFilters({
+    targetName: teamName || undefined,
+    challengeId: challengeId || undefined
+  });
 }
 
 async function loadOverviewStats() {
@@ -578,6 +618,15 @@ article li div {
   text-align: center;
   font-size: 0.85rem;
   background: rgba(15, 23, 42, 0.4);
+}
+
+.matrix-cell.clickable {
+  cursor: pointer;
+  transition: background 0.15s ease, opacity 0.15s ease;
+}
+
+.matrix-cell.clickable:active {
+  opacity: 0.85;
 }
 
 .team-header,

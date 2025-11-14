@@ -1619,6 +1619,12 @@ func matchesRunFilter(run domain.Run, filter domain.RunFilter, repo *Repository)
 	if value := strings.TrimSpace(filter.TargetID); value != "" && !strings.EqualFold(value, run.TargetID) {
 		return false
 	}
+	if value := strings.TrimSpace(filter.ChallengeID); value != "" {
+		target, ok := repo.targets[run.TargetID]
+		if !ok || !strings.EqualFold(target.ChallengeID, value) {
+			return false
+		}
+	}
 	if value := strings.TrimSpace(filter.ExploitName); value != "" {
 		name := ""
 		if exploit, ok := repo.exploits[run.ExploitID]; ok {

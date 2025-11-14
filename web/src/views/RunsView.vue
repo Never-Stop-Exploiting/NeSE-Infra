@@ -19,6 +19,19 @@
             </select>
           </div>
           <div class="filter-group">
+            <label>Challenge</label>
+            <select v-model="filterDraft.challengeId">
+              <option value="">All</option>
+              <option
+                v-for="challenge in challengeStore.challenges"
+                :key="challenge.id"
+                :value="challenge.id"
+              >
+                {{ challenge.name }}
+              </option>
+            </select>
+          </div>
+          <div class="filter-group">
             <label>Exploit</label>
             <input v-model.trim="filterDraft.exploitName" type="text" placeholder="Exploit name" />
           </div>
@@ -241,11 +254,13 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { useRunStore, type RunFilters } from "@/stores/runs";
+import { useChallengeStore } from "@/stores/challenges";
 import type { FlagRecord } from "@/types";
 import { fetchFlagDetail, retryFlag as apiRetryFlag } from "@/api/flags";
 import { formatUtcTimestamp } from "@/utils/time";
 
 const runStore = useRunStore();
+const challengeStore = useChallengeStore();
 const canceling = ref(false);
 const detailRefreshing = ref(false);
 const bulkCanceling = ref(false);
@@ -298,7 +313,7 @@ const flagAttempts = computed(() => flagDetail.value?.attempts ?? []);
 
 const hasActiveFilters = computed(() => {
   const value = runStore.filters as RunFilters;
-  return Boolean(value.status || value.exploitName || value.targetName);
+  return Boolean(value.status || value.exploitName || value.targetName || value.challengeId);
 });
 
 const filterDirty = computed(
@@ -379,7 +394,7 @@ async function applyFilters() {
 }
 
 async function resetFilters() {
-  filterDraft.value = { status: "", exploitName: "", targetName: "" };
+  filterDraft.value = { status: "", exploitName: "", targetName: "", challengeId: "" };
   await runStore.setFilters({});
   selectedRuns.value = new Set();
 }
@@ -484,7 +499,8 @@ function cloneFilters(source?: RunFilters): RunFilters {
   return {
     status: source?.status ?? "",
     exploitName: source?.exploitName ?? "",
-    targetName: source?.targetName ?? ""
+    targetName: source?.targetName ?? "",
+    challengeId: source?.challengeId ?? ""
   };
 }
 
@@ -499,6 +515,9 @@ function normalizeFilter(source: RunFilters): RunFilters {
   if (source.targetName?.trim()) {
     target.targetName = source.targetName.trim();
   }
+  if (source.challengeId?.trim()) {
+    target.challengeId = source.challengeId.trim();
+  }
   return target;
 }
 
@@ -508,11 +527,13 @@ function filtersEqual(a: RunFilters, b: RunFilters) {
   return (
     (left.status ?? "") === (right.status ?? "") &&
     (left.exploitName ?? "") === (right.exploitName ?? "") &&
-    (left.targetName ?? "") === (right.targetName ?? "")
+    (left.targetName ?? "") === (right.targetName ?? "") &&
+    (left.challengeId ?? "") === (right.challengeId ?? "")
   );
 }
 
 onMounted(() => {
+  challengeStore.load();
   runStore.refresh();
 });
 </script>

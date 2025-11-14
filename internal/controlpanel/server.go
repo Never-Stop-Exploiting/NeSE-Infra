@@ -1429,6 +1429,7 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 		Status:      strings.TrimSpace(query.Get("status")),
 		ExploitID:   strings.TrimSpace(query.Get("exploitId")),
 		TargetID:    strings.TrimSpace(query.Get("targetId")),
+		ChallengeID: strings.TrimSpace(query.Get("challengeId")),
 		ExploitName: strings.TrimSpace(query.Get("exploitName")),
 		TargetName:  strings.TrimSpace(query.Get("targetName")),
 	}

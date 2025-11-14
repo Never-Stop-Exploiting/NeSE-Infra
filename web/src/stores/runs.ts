@@ -13,6 +13,7 @@ export interface RunFilters {
   status?: string;
   exploitName?: string;
   targetName?: string;
+  challengeId?: string;
 }
 
 export const useRunStore = defineStore("runs", () => {
@@ -43,6 +44,9 @@ export const useRunStore = defineStore("runs", () => {
     }
     if (filters.value.targetName) {
       params.targetName = filters.value.targetName;
+    }
+    if (filters.value.challengeId) {
+      params.challengeId = filters.value.challengeId;
     }
     return params;
   }
@@ -156,11 +160,18 @@ export const useRunStore = defineStore("runs", () => {
     if (input.targetName?.trim()) {
       result.targetName = input.targetName.trim();
     }
+    if (input.challengeId?.trim()) {
+      result.challengeId = input.challengeId.trim();
+    }
     return result;
   }
 
-  async function setFilters(next: RunFilters) {
+  function primeFilters(next: RunFilters) {
     filters.value = normalizeFilters(next);
+  }
+
+  async function setFilters(next: RunFilters) {
+    primeFilters(next);
     await refresh();
   }
 
@@ -176,6 +187,7 @@ export const useRunStore = defineStore("runs", () => {
     clearSelected,
     cancelRun,
     cancelRunsBulk,
+    primeFilters,
     setFilters
   };
 });

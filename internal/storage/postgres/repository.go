@@ -2201,9 +2201,20 @@ func buildRunFilterClause(filter domain.RunFilter, startIdx int) (string, []any)
 		args = append(args, "%"+strings.ToLower(value)+"%")
 	}
 
+	addClause := func(value string, clause string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		position := startIdx + len(args)
+		clauses = append(clauses, fmt.Sprintf(clause, position))
+		args = append(args, value)
+	}
+
 	addEquality(filter.Status, "status")
 	addEquality(filter.ExploitID, "exploit_id")
 	addEquality(filter.TargetID, "target_id")
+	addClause(filter.ChallengeID, "runs.target_id IN (SELECT id FROM targets WHERE challenge_id = $%d)")
 	addLike(filter.ExploitName, "runs.exploit_id IN (SELECT id FROM exploits WHERE LOWER(name) LIKE $%d)")
 	addLike(filter.TargetName, "runs.target_id IN (SELECT id FROM targets WHERE LOWER(team_name) LIKE $%d)")
 

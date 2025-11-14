@@ -125,6 +125,7 @@ type RunFilter struct {
 	Status      string
 	ExploitID   string
 	TargetID    string
+	ChallengeID string
 	ExploitName string
 	TargetName  string
 }
