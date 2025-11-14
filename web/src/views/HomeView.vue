@@ -50,11 +50,11 @@
       <div class="matrix-header">
         <div>
           <h3>Attack Coverage Matrix</h3>
-          <small class="hint">窗口：{{ matrixWindowLabel }}</small>
+          <small class="hint">Window: {{ matrixWindowLabel }}</small>
         </div>
         <div class="matrix-controls">
           <label>
-            范围
+            Range
             <select v-model.number="rangeMinutes">
               <option v-for="option in matrixRangeOptions" :key="option" :value="option">
                 {{ option }}m
@@ -69,15 +69,15 @@
 
       <div class="matrix-custom">
         <div class="custom-field">
-          <span>开始</span>
+          <span>Start</span>
           <input type="datetime-local" v-model="customStart" />
         </div>
         <div class="custom-field">
-          <span>结束</span>
+          <span>End</span>
           <input type="datetime-local" v-model="customEnd" />
         </div>
         <button class="control primary" @click="applyCustomWindow" :disabled="matrixLoading">
-          应用窗口
+          Apply Window
         </button>
       </div>
       <p v-if="matrixInputError" class="error-text matrix-error">{{ matrixInputError }}</p>
@@ -88,7 +88,7 @@
         <template v-else>
           <div v-if="matrixRows.length && matrixChallenges.length" class="matrix-grid">
             <div class="matrix-row matrix-header-row" :style="matrixColumnStyle">
-              <div class="matrix-cell team-header">队伍 / 题目</div>
+              <div class="matrix-cell team-header">Team / Challenge</div>
               <div
                 class="matrix-cell challenge-header clickable"
                 v-for="challenge in matrixChallenges"
@@ -268,10 +268,10 @@ function tooltipItems(cell: OverviewMatrixCell): string[] {
 
 function tooltipLabel(cell: OverviewMatrixCell): string {
   if (cell.successExploits?.length) {
-    return "成功 EXP";
+    return "Successful EXP";
   }
   if (cell.failedExploits?.length) {
-    return "失败 EXP";
+    return "Failed EXP";
   }
   return "";
 }
@@ -343,11 +343,11 @@ function applyCustomWindow() {
   const parsedStart = parseInputDate(customStart.value);
   const parsedEnd = parseInputDate(customEnd.value);
   if (!parsedStart || !parsedEnd) {
-    matrixInputError.value = "请输入有效的开始和结束时间";
+    matrixInputError.value = "Please provide a valid start and end time";
     return;
   }
   if (parsedEnd.getTime() <= parsedStart.getTime()) {
-    matrixInputError.value = "结束时间必须晚于开始时间";
+    matrixInputError.value = "End time must be later than start time";
     return;
   }
   startTime.value = parsedStart;

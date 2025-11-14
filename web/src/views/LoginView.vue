@@ -1,11 +1,11 @@
 <template>
   <div class="login-page">
     <form class="login-card" @submit.prevent="handleSubmit">
-      <h2>控制面 Token</h2>
+      <h2>Control Panel Token</h2>
       <p>
-        请输入运维下发的
+        Enter the operations-provided
         <code>CONTROL_PANEL_TOKEN</code>
-        ，后端将用它进行单点鉴权。
+        used by the backend for SSO verification.
       </p>
       <label for="token-input">Token</label>
       <input
@@ -15,7 +15,7 @@
         placeholder="Paste CONTROL_PANEL_TOKEN"
         required
       />
-      <button type="submit">保存并继续</button>
+      <button type="submit">Save & Continue</button>
     </form>
   </div>
 </template>

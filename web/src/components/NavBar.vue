@@ -12,8 +12,8 @@
       <RouterLink to="/runners">Runners</RouterLink>
     </nav>
     <div class="actions">
-      <span class="token-status">Token 已加载</span>
-      <button type="button" @click="handleLogout">注销</button>
+      <span class="token-status">Token Loaded</span>
+      <button type="button" @click="handleLogout">Log Out</button>
     </div>
   </header>
 </template>
