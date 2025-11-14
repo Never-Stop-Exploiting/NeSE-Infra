@@ -152,25 +152,17 @@ func (d *Dispatcher) handleRunnerEvent(ctx context.Context, evt events.RunnerEve
 	switch evt.Type {
 	case events.RunnerEventTypeStatus:
 		status := strings.ToLower(strings.TrimSpace(evt.Status))
-		immediate := evt.ForceDrain
-		if status == "offline" || status == "restoring" {
-			immediate = true
-		}
-		if immediate {
-			go d.drainRunnerStream(context.Background(), evt.RunnerID, evt.InstanceID, evt.Reason, immediate)
+		if evt.ForceDrain || status == "offline" || status == "restoring" {
+			go d.drainRunnerStream(context.Background(), evt.RunnerID, evt.InstanceID, evt.Reason)
 		}
 	case events.RunnerEventTypeInstance:
 		if strings.TrimSpace(evt.InstanceID) != "" {
-			immediate := evt.ForceDrain
-			if !immediate {
-				immediate = true
-			}
-			go d.drainRunnerStream(context.Background(), evt.RunnerID, evt.InstanceID, evt.Reason, immediate)
+			go d.drainRunnerStream(context.Background(), evt.RunnerID, evt.InstanceID, evt.Reason)
 		}
 	}
 }
 
-func (d *Dispatcher) drainRunnerStream(ctx context.Context, runnerID string, instanceID string, reason string, immediate bool) {
+func (d *Dispatcher) drainRunnerStream(ctx context.Context, runnerID string, instanceID string, reason string) {
 	if d.broker == nil {
 		return
 	}
@@ -179,27 +171,9 @@ func (d *Dispatcher) drainRunnerStream(ctx context.Context, runnerID string, ins
 	if cleanID == "" || cleanInstance == "" {
 		return
 	}
-	runner, err := d.repo.GetRunner(ctx, cleanID)
-	runnerType := runner.Type
-	if err != nil {
-		runnerType = ""
-	}
 	stream := queue.RunnerQueueName(d.cfg.RunQueue.RunnerPrefix, cleanID, cleanInstance)
 	start := time.Now()
 	d.log.Info("draining runner stream", slog.String("runner_id", cleanID), slog.String("instance_id", cleanInstance), slog.String("stream", stream), slog.String("reason", reason))
-	group := runnerGroupName(runnerType)
-	visibility := d.cfg.RunQueue.Visibility
-	if visibility <= 0 {
-		visibility = 30 * time.Second
-	}
-	processed := 0
-	attempt := 0
-	minIdle := visibility
-	if immediate {
-		minIdle = 0
-	} else if minIdle <= 0 {
-		minIdle = time.Second
-	}
 
 	assignedRuns, err := d.repo.ListRunsByRunnerInstance(ctx, cleanID, cleanInstance)
 	if err != nil && ctx.Err() == nil {
@@ -230,111 +204,13 @@ func (d *Dispatcher) drainRunnerStream(ctx context.Context, runnerID string, ins
 		}
 	}
 
-	for {
-		attempt++
-		foundWork := false
-		reclaimed, err := d.broker.Reclaim(ctx, stream, group, reclaimerConsumerName(group), minIdle, 64)
-		if err != nil {
-			d.log.Warn("drain runner stream reclaim failed",
-				slog.Any("err", err),
-				slog.String("stream", stream),
-				slog.String("group", group))
-			break
-		}
-		if len(reclaimed) > 0 {
-			foundWork = true
-			d.log.Debug("drain runner stream reclaimed messages",
-				slog.String("runner_id", cleanID),
-				slog.String("instance_id", cleanInstance),
-				slog.Int("attempt", attempt),
-				slog.Int("messages", len(reclaimed)))
-			for _, message := range reclaimed {
-				if err := d.handleStaleRunnerMessage(ctx, stream, group, visibility, message); err != nil && ctx.Err() == nil {
-					d.log.Warn("drain runner stream message failed",
-						slog.Any("err", err),
-						slog.String("stream", stream),
-						slog.String("message_id", message.ID))
-				}
-				processed++
-			}
-		}
-		if ctx.Err() != nil {
-			break
-		}
-		if processed%64 == 0 {
-			d.log.Debug("drain runner stream progress",
-				slog.String("runner_id", cleanID),
-				slog.String("instance_id", cleanInstance),
-				slog.Int("processed", processed))
-		}
-		if !foundWork {
-			d.log.Debug("drain runner stream idle",
-				slog.String("runner_id", cleanID),
-				slog.String("instance_id", cleanInstance),
-				slog.Int("attempt", attempt))
-			break
-		}
-	}
-	if ctx.Err() != nil {
-		d.log.Warn("drain runner stream interrupted",
-			slog.String("runner_id", cleanID),
-			slog.String("instance_id", cleanInstance),
-			slog.String("reason", ctx.Err().Error()))
-	}
 	if err := d.broker.DeleteStream(ctx, stream); err != nil && ctx.Err() == nil {
 		d.log.Debug("delete runner stream failed", slog.Any("err", err), slog.String("stream", stream))
 	}
-	d.log.Info("runner stream drained", slog.String("runner_id", cleanID), slog.String("instance_id", cleanInstance), slog.Duration("duration", time.Since(start)))
-}
-
-func (d *Dispatcher) handleStaleRunnerMessage(ctx context.Context, stream string, group string, visibility time.Duration, message queue.Message) error {
-	payload, err := jobs.DecodeJobPayload(message.Body)
-	if err != nil {
-		if ackErr := d.broker.Ack(ctx, stream, group, message.ID); ackErr != nil {
-			return fmt.Errorf("ack malformed job: %w", ackErr)
-		}
-		return nil
-	}
-	run, err := d.repo.GetRun(ctx, payload.RunID)
-	if err != nil {
-		if ackErr := d.broker.Ack(ctx, stream, group, message.ID); ackErr != nil {
-			return ackErr
-		}
-		return nil
-	}
-	switch run.Status {
-	case domain.RunStatusPending, domain.RunStatusRunning:
-		timeout := payload.Timeout(d.cfg.Runner.DefaultTimeout)
-		createdAt := payload.CreationTime()
-		if createdAt.IsZero() {
-			createdAt = run.QueuedAt
-		}
-		expired := false
-		if !createdAt.IsZero() && timeout > 0 {
-			if now := time.Now(); now.After(createdAt.Add(timeout)) {
-				expired = true
-			}
-		}
-		reason := fmt.Sprintf("visibility timeout after %s", visibility)
-		if expired {
-			reason = fmt.Sprintf("run timeout after %s", timeout)
-		}
-		updated, cancelErr := d.cancelRunInternal(ctx, run, reason)
-		if cancelErr != nil {
-			return cancelErr
-		}
-		if err := d.rescheduleRun(ctx, updated); err != nil {
-			d.log.Warn("failed to enqueue replacement run",
-				slog.Any("err", err),
-				slog.String("run_id", run.ID))
-		}
-	default:
-		// no-op
-	}
-	if err := d.broker.Ack(ctx, stream, group, message.ID); err != nil {
-		return err
-	}
-	return nil
+	d.log.Info("runner stream drained",
+		slog.String("runner_id", cleanID),
+		slog.String("instance_id", cleanInstance),
+		slog.Duration("duration", time.Since(start)))
 }
 
 func (d *Dispatcher) runEventLoop(ctx context.Context) {
