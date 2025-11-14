@@ -120,6 +120,9 @@ func (s *Server) maintenanceLoop(ctx context.Context) error {
 			if err := s.sweepStaleSubmitters(ctx); err != nil && ctx.Err() == nil {
 				s.logger.Warn("submitter sweep failed", slog.Any("err", err))
 			}
+			if err := s.expireTimedOutRuns(ctx); err != nil && ctx.Err() == nil {
+				s.logger.Warn("expire timed out runs failed", slog.Any("err", err))
+			}
 		case <-reclaimTicker.C:
 			runners, err := s.reclaimStalledRuns(ctx)
 			if err != nil && ctx.Err() == nil {
@@ -3386,6 +3389,86 @@ func (s *Server) sweepStaleSubmitters(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (s *Server) expireTimedOutRuns(ctx context.Context) error {
+	runs, err := s.repository.ListActiveRuns(ctx)
+	if err != nil {
+		return err
+	}
+	if len(runs) == 0 {
+		return nil
+	}
+	timeoutCache := make(map[string]time.Duration)
+	now := time.Now().UTC()
+	for _, run := range runs {
+		timeout := s.runTimeoutForExploit(ctx, timeoutCache, run.ExploitID)
+		if timeout <= 0 {
+			continue
+		}
+		var anchor time.Time
+		switch run.Status {
+		case domain.RunStatusRunning:
+			anchor = run.StartedAt
+		case domain.RunStatusPending:
+			anchor = run.QueuedAt
+		default:
+			continue
+		}
+		if anchor.IsZero() && !run.QueuedAt.IsZero() {
+			anchor = run.QueuedAt
+		}
+		if anchor.IsZero() {
+			continue
+		}
+		if now.Before(anchor.Add(timeout)) {
+			continue
+		}
+		reason := fmt.Sprintf("run timeout after %s", timeout)
+		updated, cancelErr := s.cancelRunInternal(ctx, run, reason)
+		if cancelErr != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			s.logger.Warn("cancel timed out run failed",
+				slog.Any("err", cancelErr),
+				slog.String("run_id", run.ID))
+			continue
+		}
+		if err := s.rescheduleRun(ctx, updated); err != nil && ctx.Err() == nil {
+			s.logger.Warn("failed to enqueue replacement run",
+				slog.Any("err", err),
+				slog.String("run_id", run.ID))
+		}
+	}
+	return nil
+}
+
+func (s *Server) runTimeoutForExploit(ctx context.Context, cache map[string]time.Duration, exploitID string) time.Duration {
+	defaultTimeout := s.cfg.Runner.DefaultTimeout
+	key := strings.TrimSpace(exploitID)
+	if key == "" {
+		return defaultTimeout
+	}
+	if value, ok := cache[key]; ok {
+		return value
+	}
+	timeout := defaultTimeout
+	exploit, err := s.repository.GetExploit(ctx, key)
+	if err == nil {
+		_, _, hintTimeout := jobs.HintsFromMetadata(exploit.Metadata)
+		if hintTimeout > 0 {
+			timeout = hintTimeout
+		}
+	} else if ctx.Err() != nil {
+		return 0
+	} else {
+		s.logger.Debug("load exploit for timeout failed",
+			slog.Any("err", err),
+			slog.String("exploit_id", key))
+	}
+	cache[key] = timeout
+	return timeout
 }
 
 func (s *Server) handleRunnerOutage(ctx context.Context, runner domain.Runner, reason string) {

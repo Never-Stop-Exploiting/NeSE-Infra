@@ -2538,6 +2538,98 @@ func (r *Repository) ListRunnerActiveRuns(ctx context.Context, runnerID string) 
 	return runs, nil
 }
 
+func (r *Repository) ListActiveRuns(ctx context.Context) ([]domain.Run, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, exploit_id, exploit_revision, target_id, runner_id, runner_instance_id, status, queued_at, started_at, finished_at, log_uri, flag_id, error_message, stdout, stderr, flag_value, flag_source
+		FROM runs
+		WHERE status IN ('pending','running')`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var runs []domain.Run
+	for rows.Next() {
+		var run domain.Run
+		var exploitID, exploitRevision, targetID, runnerID, runnerInstance, logURI, flagID, errorMessage sql.NullString
+		var stdout, stderr, flagValue, flagSource sql.NullString
+		var queued, started, finished sql.NullTime
+		var status string
+		if scanErr := rows.Scan(
+			&run.ID,
+			&exploitID,
+			&exploitRevision,
+			&targetID,
+			&runnerID,
+			&runnerInstance,
+			&status,
+			&queued,
+			&started,
+			&finished,
+			&logURI,
+			&flagID,
+			&errorMessage,
+			&stdout,
+			&stderr,
+			&flagValue,
+			&flagSource,
+		); scanErr != nil {
+			return nil, scanErr
+		}
+		if exploitID.Valid {
+			run.ExploitID = exploitID.String
+		}
+		if exploitRevision.Valid {
+			run.ExploitRevision = exploitRevision.String
+		}
+		if targetID.Valid {
+			run.TargetID = targetID.String
+		}
+		if runnerID.Valid {
+			run.RunnerID = runnerID.String
+		}
+		if runnerInstance.Valid {
+			run.RunnerInstanceID = runnerInstance.String
+		}
+		if logURI.Valid {
+			run.LogURI = logURI.String
+		}
+		if flagID.Valid {
+			run.FlagID = flagID.String
+		}
+		if errorMessage.Valid {
+			run.ErrorMessage = errorMessage.String
+		}
+		if queued.Valid {
+			run.QueuedAt = queued.Time
+		}
+		if started.Valid {
+			run.StartedAt = started.Time
+		}
+		if finished.Valid {
+			run.FinishedAt = finished.Time
+		}
+		if stdout.Valid {
+			run.Stdout = stdout.String
+		}
+		if stderr.Valid {
+			run.Stderr = stderr.String
+		}
+		if flagValue.Valid {
+			run.FlagValue = flagValue.String
+		}
+		if flagSource.Valid {
+			run.FlagSource = flagSource.String
+		}
+		run.Status = domain.RunStatus(status)
+		runs = append(runs, run)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return runs, nil
+}
+
 func (r *Repository) AssignRunToRunner(ctx context.Context, runID, runnerID, instanceID string) error {
 	res, err := r.db.ExecContext(ctx, `
 		UPDATE runs

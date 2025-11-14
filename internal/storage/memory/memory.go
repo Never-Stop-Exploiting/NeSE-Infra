@@ -1150,6 +1150,18 @@ func (r *Repository) ListRunnerActiveRuns(ctx context.Context, runnerID string) 
 	return runs, ctx.Err()
 }
 
+func (r *Repository) ListActiveRuns(ctx context.Context) ([]domain.Run, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var runs []domain.Run
+	for _, run := range r.runs {
+		if run.Status == domain.RunStatusPending || run.Status == domain.RunStatusRunning {
+			runs = append(runs, run)
+		}
+	}
+	return runs, ctx.Err()
+}
+
 func (r *Repository) AssignRunToRunner(ctx context.Context, runID, runnerID, instanceID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
