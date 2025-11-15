@@ -97,6 +97,7 @@ type Submitter struct {
 	WindowSeconds     float64
 	LatencySumSeconds float64
 	ProcessedCount    int
+	PluginVersion     string
 }
 
 // Run links an exploit revision to a target execution attempt.

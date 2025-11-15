@@ -10,7 +10,7 @@
 - **REST API**：`/api/v1` 下实现 targets、exploits、flags、runs、logs、runners 等 CRUD/操作端点（含导入 targets、上传 exploit revision、flag 重试等）。
 - **Web UI**：基于 Vue3 + Vite（pnpm 管理），包含总览、Targets、Exploits、Flags、Runs、Runners 页面，支持上传/开启/调整 Exploit、批量导入目标、查看 flag/run 状态等；提供 dev/prod 反向代理配置。
 - **Exploit 运行约定增强**：Control Panel 支持记录 entrypoint / run script，Runner 若缺失 `run.sh` 会自动生成，满足“文件 a + 默认 run.sh” 的约定，stdout/stderr 会回传并写到 Control Panel stdout。
-- **Flag Submitter**：基于 Redis 队列 + HTTP 提交（默认对接测试 flagserver），记录 SubmissionAttempt 并把状态写到 stdout，Control Panel requeue 会立即入队。
+- **Flag Submitter**：基于 Redis 队列 + Submitter 包执行（`submit.sh` + 附件），Control Panel 提供文件管理/同步 API，Supervisor chroot `/env` 执行并解析 stdout JSON。
 - **Docker 化**：各服务 Dockerfile、docker-compose 编排，以及 Web 前端生产 Nginx 镜像。
 - **测试**：新增 jobs payload、Runner workspace/flag 提取等单元测试可在 Go 1.21 容器中运行。
 
@@ -29,11 +29,10 @@
 ## 待办 / 下一步
 1. **持久化实现**：将内存仓库替换为 PostgreSQL/Redis 版本，实现 targets/exploits/runs/flags 等真实读写，并可选扩展日志落地。 
 2. **Scheduler/Runner 集成**：在 Redis 队列上实现完整任务生命周期（重试、超时、死信等），完善 RunWorkItem 生成、并发调度与结果回写。
-3. **Flag Submitter 插件**：实现提交插件加载机制（Go plugin / gRPC / HTTP），补全 Flag 提交状态流转。
-4. **日志/指标收集**：接入 Loki/Prometheus/OpenTelemetry，完善日志落地与指标暴露。
-5. **认证授权**：在 Control Panel/API/Web UI 引入身份验证、角色权限与审计。
-6. **测试覆盖**：增加后端 handler、仓储、调度逻辑单测；提供 e2e 测试验证 Frontend ↔ API ↔ Runner 全链路。
-7. **运行器注册协议**：实现 Runner WebSocket 注册、心跳、容量更新与下线处理。
-8. **Artifact 存储**：引入对象存储服务（MinIO/S3）保存 exploit revision 以及可选的 stdout/stderr artifact，并通过 Control Panel 提供下载。
-9. **前端实时性**：通过 WebSocket/SSE 实时刷新 runs、flags 等关键视图；优化 UI 表格/筛选、支持导出。
-10. **部署完善**：提供 Kubernetes manifests/Helm chart、CI/CD 流水线、环境配置文档等。
+3. **日志/指标收集**：接入 Loki/Prometheus/OpenTelemetry，完善日志落地与指标暴露。
+4. **认证授权**：在 Control Panel/API/Web UI 引入身份验证、角色权限与审计。
+5. **测试覆盖**：增加后端 handler、仓储、调度逻辑单测；提供 e2e 测试验证 Frontend ↔ API ↔ Runner 全链路。
+6. **运行器注册协议**：实现 Runner WebSocket 注册、心跳、容量更新与下线处理。
+7. **Artifact 存储**：引入对象存储服务（MinIO/S3）保存 exploit revision 以及可选的 stdout/stderr artifact，并通过 Control Panel 提供下载。
+8. **前端实时性**：通过 WebSocket/SSE 实时刷新 runs、flags 等关键视图；优化 UI 表格/筛选、支持导出。
+9. **部署完善**：提供 Kubernetes manifests/Helm chart、CI/CD 流水线、环境配置文档等。

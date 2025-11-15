@@ -46,6 +46,11 @@ const routes = [
     path: "/runs",
     name: "runs",
     component: () => import("@/views/RunsView.vue")
+  },
+  {
+    path: "/submitter",
+    name: "submitter",
+    component: () => import("@/views/SubmitterPackageView.vue")
   }
 ];
 

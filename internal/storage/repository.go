@@ -79,4 +79,11 @@ type Repository interface {
 	UpsertSubmitter(ctx context.Context, submitter domain.Submitter) error
 	GetSubmitter(ctx context.Context, id string) (domain.Submitter, error)
 	DeleteSubmitter(ctx context.Context, id string) error
+	ListSubmitterFiles(ctx context.Context) ([]ExploitFile, error)
+	SaveSubmitterFile(ctx context.Context, name string, data []byte) error
+	DeleteSubmitterFile(ctx context.Context, name string) error
+	ReadSubmitterFile(ctx context.Context, name string) ([]byte, error)
+	GetSubmitterScript(ctx context.Context) (string, error)
+	SaveSubmitterScript(ctx context.Context, script string) error
+	SubmitterArtifact(ctx context.Context) ([]byte, string, error)
 }

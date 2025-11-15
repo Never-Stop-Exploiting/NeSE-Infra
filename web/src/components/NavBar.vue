@@ -10,6 +10,7 @@
       <RouterLink to="/flags">Flags</RouterLink>
       <RouterLink to="/runs">Runs</RouterLink>
       <RouterLink to="/runners">Runners</RouterLink>
+      <RouterLink to="/submitter">Submitter</RouterLink>
     </nav>
     <div class="actions">
       <span class="token-status">Token Loaded</span>

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/md5"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -21,7 +22,14 @@ import (
 	"awdinfra/internal/storage"
 )
 
-const runScriptName = "run.sh"
+const (
+	runScriptName       = "run.sh"
+	submitterScriptName = "submit.sh"
+)
+
+func defaultSubmitScript() string {
+	return "#!/bin/sh\nset -euo pipefail\npython submit.py \"$1\"\n"
+}
 
 type memoryFile struct {
 	Data    []byte
@@ -33,35 +41,37 @@ var _ storage.Repository = (*Repository)(nil)
 
 // Repository offers a development-grade in-memory store.
 type Repository struct {
-	mu           sync.RWMutex
-	challenges   map[string]domain.Challenge
-	runs         map[string]domain.Run
-	flags        map[string]domain.Flag
-	targets      map[string]domain.Target
-	exploits     map[string]domain.Exploit
-	flagLogs     map[string][]string
-	flagAttempts map[string][]domain.SubmissionAttempt
-	exploitFiles map[string]map[string]memoryFile
-	logs         []domain.LogEntry
-	runners      map[string]domain.Runner
-	submitters   map[string]domain.Submitter
-	scheduler    domain.SchedulerSettings
-	overrides    map[string]map[string]domain.TargetExploitOverride
+	mu             sync.RWMutex
+	challenges     map[string]domain.Challenge
+	runs           map[string]domain.Run
+	flags          map[string]domain.Flag
+	targets        map[string]domain.Target
+	exploits       map[string]domain.Exploit
+	flagLogs       map[string][]string
+	flagAttempts   map[string][]domain.SubmissionAttempt
+	exploitFiles   map[string]map[string]memoryFile
+	submitterFiles map[string]memoryFile
+	logs           []domain.LogEntry
+	runners        map[string]domain.Runner
+	submitters     map[string]domain.Submitter
+	scheduler      domain.SchedulerSettings
+	overrides      map[string]map[string]domain.TargetExploitOverride
 }
 
 // New creates an empty repository.
 func New() *Repository {
 	repo := &Repository{
-		challenges:   make(map[string]domain.Challenge),
-		runs:         make(map[string]domain.Run),
-		flags:        make(map[string]domain.Flag),
-		targets:      make(map[string]domain.Target),
-		exploits:     make(map[string]domain.Exploit),
-		flagLogs:     make(map[string][]string),
-		flagAttempts: make(map[string][]domain.SubmissionAttempt),
-		exploitFiles: make(map[string]map[string]memoryFile),
-		runners:      make(map[string]domain.Runner),
-		submitters:   make(map[string]domain.Submitter),
+		challenges:     make(map[string]domain.Challenge),
+		runs:           make(map[string]domain.Run),
+		flags:          make(map[string]domain.Flag),
+		targets:        make(map[string]domain.Target),
+		exploits:       make(map[string]domain.Exploit),
+		flagLogs:       make(map[string][]string),
+		flagAttempts:   make(map[string][]domain.SubmissionAttempt),
+		exploitFiles:   make(map[string]map[string]memoryFile),
+		submitterFiles: make(map[string]memoryFile),
+		runners:        make(map[string]domain.Runner),
+		submitters:     make(map[string]domain.Submitter),
 		scheduler: domain.SchedulerSettings{
 			Strategy:         domain.SchedulerStrategyInterval,
 			RoundInterval:    time.Minute * 5,
@@ -1336,7 +1346,7 @@ func (r *Repository) GetSubmitter(ctx context.Context, id string) (domain.Submit
 	defer r.mu.RUnlock()
 	submitter, ok := r.submitters[id]
 	if !ok {
-		return domain.Submitter{}, errors.New("submitter not found")
+		return domain.Submitter{}, sql.ErrNoRows
 	}
 	return submitter, ctx.Err()
 }
@@ -1394,6 +1404,119 @@ func (r *Repository) DeleteSubmitter(ctx context.Context, id string) error {
 	return ctx.Err()
 }
 
+func (r *Repository) ListSubmitterFiles(ctx context.Context) ([]storage.ExploitFile, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, err := r.ensureSubmitterScriptLocked(); err != nil {
+		return nil, err
+	}
+	files := r.ensureSubmitterFilesLocked()
+	result := make([]storage.ExploitFile, 0, len(files))
+	for name, file := range files {
+		hash := md5.Sum(file.Data)
+		result = append(result, storage.ExploitFile{
+			Name:    name,
+			Size:    int64(len(file.Data)),
+			MD5:     fmt.Sprintf("%x", hash[:]),
+			ModTime: file.ModTime,
+		})
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Name == submitterScriptName {
+			return true
+		}
+		if result[j].Name == submitterScriptName {
+			return false
+		}
+		return result[i].Name < result[j].Name
+	})
+	return result, ctx.Err()
+}
+
+func (r *Repository) SaveSubmitterFile(ctx context.Context, name string, data []byte) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if strings.TrimSpace(name) == "" {
+		return errors.New("file name required")
+	}
+	name = filepath.Base(name)
+	if name == "" {
+		return errors.New("invalid file name")
+	}
+	files := r.ensureSubmitterFilesLocked()
+	if name == submitterScriptName {
+		return r.SaveSubmitterScript(ctx, string(data))
+	}
+	files[name] = memoryFile{
+		Data:    append([]byte(nil), data...),
+		ModTime: time.Now().UTC(),
+	}
+	return ctx.Err()
+}
+
+func (r *Repository) DeleteSubmitterFile(ctx context.Context, name string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	name = filepath.Base(name)
+	if name == "" {
+		return errors.New("file name required")
+	}
+	if name == submitterScriptName {
+		return errors.New("submit.sh cannot be deleted")
+	}
+	delete(r.submitterFiles, name)
+	return ctx.Err()
+}
+
+func (r *Repository) ReadSubmitterFile(ctx context.Context, name string) ([]byte, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	name = filepath.Base(name)
+	if name == "" {
+		return nil, errors.New("file name required")
+	}
+	file, ok := r.submitterFiles[name]
+	if !ok {
+		return nil, errors.New("file not found")
+	}
+	return append([]byte(nil), file.Data...), ctx.Err()
+}
+
+func (r *Repository) GetSubmitterScript(ctx context.Context) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	script, err := r.ensureSubmitterScriptLocked()
+	return script, errors.Join(err, ctx.Err())
+}
+
+func (r *Repository) SaveSubmitterScript(ctx context.Context, script string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if strings.TrimSpace(script) == "" {
+		return errors.New("submit.sh cannot be empty")
+	}
+	r.submitterFiles[submitterScriptName] = memoryFile{
+		Data:    []byte(script),
+		ModTime: time.Now().UTC(),
+	}
+	return ctx.Err()
+}
+
+func (r *Repository) SubmitterArtifact(ctx context.Context) ([]byte, string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, err := r.ensureSubmitterScriptLocked(); err != nil {
+		return nil, "", err
+	}
+	files := r.ensureSubmitterFilesLocked()
+	data, err := createZipFromFilesLocked(files)
+	if err != nil {
+		return nil, "", err
+	}
+	sum := md5.Sum(data)
+	return data, fmt.Sprintf("%x", sum[:]), ctx.Err()
+}
+
 func (r *Repository) ensureExploitFilesLocked(exploitID string) map[string]memoryFile {
 	files, ok := r.exploitFiles[exploitID]
 	if !ok {
@@ -1421,6 +1544,28 @@ func (r *Repository) ensureRunScriptLocked(exploitID string, entrypoint string) 
 	}
 	script := defaultRunScript(entrypoint)
 	files[runScriptName] = memoryFile{
+		Data:    []byte(script),
+		ModTime: time.Now().UTC(),
+	}
+	return script, nil
+}
+
+func (r *Repository) ensureSubmitterFilesLocked() map[string]memoryFile {
+	files := r.submitterFiles
+	if files == nil {
+		files = make(map[string]memoryFile)
+		r.submitterFiles = files
+	}
+	return files
+}
+
+func (r *Repository) ensureSubmitterScriptLocked() (string, error) {
+	files := r.ensureSubmitterFilesLocked()
+	if file, ok := files[submitterScriptName]; ok && len(file.Data) > 0 {
+		return string(file.Data), nil
+	}
+	script := defaultSubmitScript()
+	files[submitterScriptName] = memoryFile{
 		Data:    []byte(script),
 		ModTime: time.Now().UTC(),
 	}

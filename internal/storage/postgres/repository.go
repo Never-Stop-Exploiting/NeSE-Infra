@@ -285,7 +285,18 @@ func ensureSchema(ctx context.Context, db *sql.DB) error {
 			labels JSONB,
 			config JSONB,
 			last_heartbeat TIMESTAMPTZ,
-			registered_at TIMESTAMPTZ
+			registered_at TIMESTAMPTZ,
+			plugin_version TEXT
+		);`,
+		`CREATE TABLE IF NOT EXISTS flag_plugins (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			version TEXT NOT NULL,
+			filename TEXT NOT NULL,
+			filepath TEXT NOT NULL,
+			size BIGINT NOT NULL,
+			checksum TEXT NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL
 		);`,
 		`ALTER TABLE runners ADD COLUMN IF NOT EXISTS tags JSONB;`,
 		`ALTER TABLE runners ADD COLUMN IF NOT EXISTS config JSONB;`,
@@ -294,6 +305,8 @@ func ensureSchema(ctx context.Context, db *sql.DB) error {
 		`ALTER TABLE submitters ADD COLUMN IF NOT EXISTS window_seconds DOUBLE PRECISION NOT NULL DEFAULT 60;`,
 		`ALTER TABLE submitters ADD COLUMN IF NOT EXISTS latency_sum_seconds DOUBLE PRECISION NOT NULL DEFAULT 0;`,
 		`ALTER TABLE submitters ADD COLUMN IF NOT EXISTS processed_count INTEGER NOT NULL DEFAULT 0;`,
+		`ALTER TABLE submitters ADD COLUMN IF NOT EXISTS plugin_version TEXT;`,
+		`CREATE INDEX IF NOT EXISTS idx_flag_plugins_version ON flag_plugins(version);`,
 		`ALTER TABLE runs ADD COLUMN IF NOT EXISTS runner_instance_id TEXT;`,
 		`CREATE INDEX IF NOT EXISTS idx_submitters_status ON submitters(status);`,
 	}
@@ -3093,7 +3106,7 @@ func (r *Repository) ListSubmitters(ctx context.Context) ([]domain.Submitter, er
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id, type, hostname, status, concurrency, in_flight, pending, recent_throughput,
 		       avg_latency_ms, pressure, window_seconds, latency_sum_seconds, processed_count,
-		       labels, config, last_heartbeat, registered_at
+		       labels, config, last_heartbeat, registered_at, plugin_version
 		FROM submitters
 		ORDER BY hostname ASC`)
 	if err != nil {
@@ -3104,7 +3117,7 @@ func (r *Repository) ListSubmitters(ctx context.Context) ([]domain.Submitter, er
 	var submitters []domain.Submitter
 	for rows.Next() {
 		var item domain.Submitter
-		var typ, hostname, status sql.NullString
+		var typ, hostname, status, pluginVersion sql.NullString
 		var labelsData, configData []byte
 		var lastHeartbeat sql.NullTime
 		if err := rows.Scan(
@@ -3125,6 +3138,7 @@ func (r *Repository) ListSubmitters(ctx context.Context) ([]domain.Submitter, er
 			&configData,
 			&lastHeartbeat,
 			&item.RegisteredAt,
+			&pluginVersion,
 		); err != nil {
 			return nil, err
 		}
@@ -3154,6 +3168,9 @@ func (r *Repository) ListSubmitters(ctx context.Context) ([]domain.Submitter, er
 			}
 			item.Config = data
 		}
+		if pluginVersion.Valid {
+			item.PluginVersion = pluginVersion.String
+		}
 		submitters = append(submitters, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -3164,13 +3181,13 @@ func (r *Repository) ListSubmitters(ctx context.Context) ([]domain.Submitter, er
 
 func (r *Repository) GetSubmitter(ctx context.Context, id string) (domain.Submitter, error) {
 	var item domain.Submitter
-	var typ, hostname, status sql.NullString
+	var typ, hostname, status, pluginVersion sql.NullString
 	var labelsData, configData []byte
 	var lastHeartbeat sql.NullTime
 	err := r.db.QueryRowContext(ctx, `
 		SELECT id, type, hostname, status, concurrency, in_flight, pending, recent_throughput,
 		       avg_latency_ms, pressure, window_seconds, latency_sum_seconds, processed_count,
-		       labels, config, last_heartbeat, registered_at
+		       labels, config, last_heartbeat, registered_at, plugin_version
 		FROM submitters
 		WHERE id = $1`, id,
 	).Scan(
@@ -3191,9 +3208,10 @@ func (r *Repository) GetSubmitter(ctx context.Context, id string) (domain.Submit
 		&configData,
 		&lastHeartbeat,
 		&item.RegisteredAt,
+		&pluginVersion,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
-		return domain.Submitter{}, errors.New("submitter not found")
+		return domain.Submitter{}, sql.ErrNoRows
 	}
 	if err != nil {
 		return domain.Submitter{}, err
@@ -3224,6 +3242,9 @@ func (r *Repository) GetSubmitter(ctx context.Context, id string) (domain.Submit
 		}
 		item.Config = data
 	}
+	if pluginVersion.Valid {
+		item.PluginVersion = pluginVersion.String
+	}
 	return item, nil
 }
 
@@ -3242,8 +3263,8 @@ func (r *Repository) UpsertSubmitter(ctx context.Context, submitter domain.Submi
 	_, err = r.db.ExecContext(ctx, `
 		INSERT INTO submitters (id, type, hostname, status, concurrency, in_flight, pending, recent_throughput,
 		                        avg_latency_ms, pressure, window_seconds, latency_sum_seconds, processed_count,
-		                        labels, config, last_heartbeat, registered_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+		                        labels, config, last_heartbeat, registered_at, plugin_version)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
 		ON CONFLICT (id) DO UPDATE
 		SET type = EXCLUDED.type,
 		    hostname = EXCLUDED.hostname,
@@ -3260,7 +3281,8 @@ func (r *Repository) UpsertSubmitter(ctx context.Context, submitter domain.Submi
 		    labels = EXCLUDED.labels,
 		    config = EXCLUDED.config,
 		    last_heartbeat = EXCLUDED.last_heartbeat,
-		    registered_at = EXCLUDED.registered_at`,
+		    registered_at = EXCLUDED.registered_at,
+		    plugin_version = EXCLUDED.plugin_version`,
 		submitter.ID,
 		nullString(submitter.Type),
 		nullString(submitter.Hostname),
@@ -3278,6 +3300,7 @@ func (r *Repository) UpsertSubmitter(ctx context.Context, submitter domain.Submi
 		configData,
 		nullTime(submitter.LastHeartbeat),
 		submitter.RegisteredAt,
+		nullString(submitter.PluginVersion),
 	)
 	return err
 }

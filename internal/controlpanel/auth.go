@@ -6,9 +6,12 @@ import (
 	"strings"
 )
 
-const runnerSecretHeader = "X-Runner-Secret"
+const (
+	runnerSecretHeader    = "X-Runner-Secret"
+	submitterSecretHeader = "X-Submitter-Secret"
+)
 
-func authMiddleware(next http.Handler, adminToken string, runnerSecret string) http.Handler {
+func authMiddleware(next http.Handler, adminToken string, runnerSecret string, submitterSecret string) http.Handler {
 	if strings.TrimSpace(adminToken) == "" {
 		return next
 	}
@@ -18,6 +21,10 @@ func authMiddleware(next http.Handler, adminToken string, runnerSecret string) h
 			return
 		}
 		if allowRunnerSecret(r, runnerSecret) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if allowSubmitterSecret(r, submitterSecret) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -59,6 +66,31 @@ func allowRunnerSecret(r *http.Request, runnerSecret string) bool {
 		strings.HasPrefix(r.URL.Path, "/api/v1/exploits/") &&
 		strings.HasSuffix(r.URL.Path, "/artifact") {
 		return true
+	}
+	return false
+}
+
+func allowSubmitterSecret(r *http.Request, submitterSecret string) bool {
+	if strings.TrimSpace(submitterSecret) == "" {
+		return false
+	}
+	header := strings.TrimSpace(r.Header.Get(submitterSecretHeader))
+	if header == "" {
+		return false
+	}
+	if subtle.ConstantTimeCompare([]byte(header), []byte(submitterSecret)) != 1 {
+		return false
+	}
+	if r.Method == http.MethodGet &&
+		strings.HasPrefix(r.URL.Path, "/api/v1/submitters/") &&
+		strings.HasSuffix(r.URL.Path, "/plugin") {
+		return true
+	}
+	if r.Method == http.MethodGet &&
+		strings.HasPrefix(r.URL.Path, "/api/v1/submitter/package/") {
+		if strings.HasSuffix(r.URL.Path, "/artifact") || strings.HasSuffix(r.URL.Path, "/version") {
+			return true
+		}
 	}
 	return false
 }

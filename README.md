@@ -8,7 +8,7 @@
 - **标签感知分发**：Scheduler 只需写入主 Run Stream，由 Dispatcher 读取并依据 Runner tags/并发压力路由到各 Runner 专属 Stream，彻底消除误抢任务导致的 Nack。
 - **可观测与管控**：Control Panel 暴露 `/api/v1` REST 接口与 Web 面板，支持 Run/Flag/Runner 可视化、执行记录下载、Flag 重试及目标覆盖矩阵维护；结构化日志统一输出到 stdout，可直接通过 `docker compose logs` 观测。
 - **安全执行**：Runner 在 chroot 工作区拉起 exploit，支持 artifact 缓存、run.sh 自动补全、Flag 文件/正则回退及远程取消；进程组会在超时或取消时被整组 `SIGKILL` 并由 PID 1 reaper 收尸。每次启动都会生成独立 `instanceId` 并使用专属 stream，心跳超时后控制面会要求 Runner 旋转 instanceId，旧 stream 立刻清理，避免“僵尸”实例误消费。
-- **流量治理**：Flag Submitter 通过 Redis Streams 消费队列并根据插件策略限速重试；Control Panel 负责 run 超时/runner 离线回收并定期 `XTRIM` 主/子 Stream，避免 Redis 无限膨胀。
+- **流量治理**：Flag Submitter 通过 Redis Streams 消费队列、按 `submit.sh` 包 chroot 执行并重试；Control Panel 负责 run 超时/runner 离线回收并定期 `XTRIM` 主/子 Stream，避免 Redis 无限膨胀。
 
 ## 核心组件
 
@@ -18,7 +18,7 @@
 | **Scheduler (`cmd/scheduler`)** | 从 Postgres 读取 runnable work（目标状态、并发限制、Runner Tags、Overrides），按照 Interval/Continuous 策略打包 `jobs.JobPayload` 写入主 Run Stream。|
 | **Dispatcher (`cmd/dispatcher`)** | 消费主 Run Stream，根据 Runner tag 集与实时负载挑选合适 Runner，并把 payload 转发到该 Runner 的专属 Stream + consumer group。|
 | **Runner (`cmd/runner`)** | 在 chroot 工作区执行 exploit，支持 artifact 缓存、Flag 文件/正则提取、远程取消，并将 stdout/stderr 通过 Control Panel 打到 stdout，同时把捕获 flag 写入 Flag Stream；进程组按 run 隔离且由 PID1 Wait4 收尸。Runner 启动会生成短 `instanceId` 并注册为独立 stream（`exp:pending:runner:<runnerId>:<instanceId>`），若心跳超时会被标记为 `offline → restoring`，新的 heartbeat 必须携带全新的 instanceId 才能恢复。|
-| **Flag Submitter (`cmd/flag-submitter`)** | 消费 Flag Stream，调用内置或自定义插件提交旗帜，并回传 `/flags/{id}/submit/start|finish`，失败时按 backoff 再排队。|
+| **Flag Submitter (`cmd/flag-submitter`)** | 消费 Flag Stream，下载最新 `submit.sh` 包并 chroot `/env` 执行脚本，解析 stdout JSON 更新 `/flags/{id}/submit/start|finish`，失败时按 backoff 重试。|
 | **Web UI (`web/`)** | Vue3 + Vite + Pinia + Tailwind。提供 Dashboard、Targets、Exploits、Runs、Flags、Runners、Scheduler 视图；访问需提供 `CONTROL_PANEL_TOKEN`（浏览器本地缓存）。|
 
 ```
@@ -121,10 +121,13 @@
 
 | 变量 | 说明 | 默认值 |
 | --- | --- | --- |
-| `FLAG_SUBMIT_URL` / `FLAG_SUBMIT_TIMEOUT` | HTTP 提交端点与超时 | `http://flagserver:5000/upload_flag` / `5s` |
+| `FLAG_SUBMIT_TIMEOUT` | `submit.sh` 执行超时时间 | `10s` |
 | `FLAG_SUBMIT_GLOBAL_RATE` / `FLAG_SUBMIT_PER_CHALLENGE` | 限速 | `10` / `5` |
 | `FLAG_SUBMIT_MAX_ATTEMPTS` / `FLAG_SUBMIT_RETRY_BACKOFF` | 重试次数与退避 | `5` / `30s` |
-| `FLAG_SUBMIT_CONCURRENCY` | Submitter 并发 | `1` |
+| `FLAG_SUBMIT_CONCURRENCY` | Submitter 并发 worker 数量 | `1` |
+| `FLAG_SUBMITTER_PACKAGE_CHANNEL` | submitter 包广播使用的 Redis PUB/SUB channel | `submitter:package:update` |
+| `SUBMITTER_PACKAGE_PATH` | `submit.sh` 在 chroot 内的存放路径（会解压到 `/env/tmp/submitter`） | `/tmp/submitter` |
+| `SUBMITTER_CHROOT_PATH` | Supervisor chroot 根目录 | `/env` |
 
 ## API 速览
 
@@ -160,6 +163,11 @@
 - `GET /api/v1/runners`：展示所有注册 Runner，包括 tags、心跳时间、活跃 job、`RUN_QUEUE_NAME` 等。
 - `DELETE /api/v1/runners/{id}`：删除 offline Runner 记录。
 - `GET /api/v1/submitters`、`DELETE /api/v1/submitters/{id}`。
+- `GET /api/v1/submitter/package/files`、`POST .../files`、`DELETE .../files/{name}`：管理提交器附件。
+- `GET /api/v1/submitter/package/script` / `POST .../script`：读取或保存 `submit.sh`。
+- `GET /api/v1/submitter/package/artifact`：下载 ZIP（需 `X-Submitter-Secret`）。
+- `POST /api/v1/submitter/package/sync`：计算版本并广播，所有 Submitter 将自动同步。
+- `GET /api/v1/submitter/package/version`：查看最新版本号。
 
 Runner 状态包括 `online`、`offline`、`restoring`。当心跳连续缺失被判定为 offline 后，Control Panel 会返回 `restoring` 并要求 Runner 旋转新的 `instanceId`；只有携带新的 `instanceId` 重新注册/心跳后才会恢复为 `online`。
 
@@ -195,7 +203,7 @@ Runner 状态包括 `online`、`offline`、`restoring`。当心跳连续缺失�
 ## 相关文档
 
 - `design.md`：总体架构、队列模型与未来规划。
-- `docs/flag-submitters.md`：自定义 Flag Submitter 插件协议。
+- `docs/flag-submitters.md`：Submitter 包管理与 `submit.sh` JSON 协议说明。
 - `TODO.md`：待办与长期优化清单。
 
 欢迎在 Issue/PR 中讨论新的调度策略、Runner 沙箱、更加细粒度的指标与观测方案。

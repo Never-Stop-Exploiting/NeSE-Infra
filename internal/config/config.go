@@ -82,12 +82,14 @@ type FlagSubmitterConfig struct {
 	PerChallengeLimit int
 	RetryBackoff      time.Duration
 	MaxAttempts       int
-	Endpoint          string
 	RequestTimeout    time.Duration
 	Concurrency       int
 	ID                string
 	ControlPanelURL   string
 	HeartbeatInterval time.Duration
+	PackageChannel    string
+	PackagePath       string
+	ChrootPath        string
 }
 
 type QueueConfig struct {
@@ -205,12 +207,14 @@ func loadFlagSubmitter() FlagSubmitterConfig {
 		PerChallengeLimit: getenvInt("FLAG_SUBMIT_PER_CHALLENGE", 5),
 		RetryBackoff:      getenvDuration("FLAG_SUBMIT_RETRY_BACKOFF", time.Second*30),
 		MaxAttempts:       getenvInt("FLAG_SUBMIT_MAX_ATTEMPTS", 5),
-		Endpoint:          getenv("FLAG_SUBMIT_URL", "http://flagserver:5000/upload_flag"),
 		RequestTimeout:    getenvDuration("FLAG_SUBMIT_TIMEOUT", time.Second*5),
 		Concurrency:       getenvInt("FLAG_SUBMIT_CONCURRENCY", 1),
 		ID:                getenv("SUBMITTER_ID", ""),
 		ControlPanelURL:   getenv("SUBMITTER_CONTROL_PANEL_URL", getenv("CONTROL_PANEL_URL", "")),
 		HeartbeatInterval: getenvDuration("SUBMITTER_HEARTBEAT_INTERVAL", time.Second*10),
+		PackageChannel:    getenv("FLAG_SUBMITTER_PACKAGE_CHANNEL", "submitter:package:update"),
+		PackagePath:       getenv("SUBMITTER_PACKAGE_PATH", "/tmp/submitter"),
+		ChrootPath:        getenv("SUBMITTER_CHROOT_PATH", "/env"),
 	}
 }
 

@@ -2,6 +2,7 @@ package controlpanel
 
 import (
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -26,6 +28,8 @@ import (
 	"awdinfra/internal/scheduler"
 	"awdinfra/internal/storage"
 	"awdinfra/internal/submitter"
+
+	"github.com/redis/go-redis/v9"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -36,6 +40,7 @@ type Server struct {
 	repository storage.Repository
 	broker     queue.Broker
 	httpServer *http.Server
+	publisher  redis.UniversalClient
 }
 
 var errFlagCancelNotAllowed = errors.New("flag cannot be canceled")
@@ -43,7 +48,7 @@ var errFlagCancelNotAllowed = errors.New("flag cannot be canceled")
 // New returns a configured control panel server.
 func New(cfg config.Config, logger *slog.Logger, repository storage.Repository, broker queue.Broker) *Server {
 	mux := http.NewServeMux()
-	protectedMux := authMiddleware(mux, cfg.ControlPanel.AdminToken, cfg.RunnerSecret)
+	protectedMux := authMiddleware(mux, cfg.ControlPanel.AdminToken, cfg.RunnerSecret, cfg.SubmitterSecret)
 	server := &Server{
 		cfg:        cfg,
 		logger:     logger,
@@ -55,6 +60,7 @@ func New(cfg config.Config, logger *slog.Logger, repository storage.Repository, 
 			Handler:           protectedMux,
 		},
 	}
+	server.publisher = newRedisPublisher(cfg, logger)
 
 	server.registerRoutes(mux)
 	return server
@@ -162,6 +168,8 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/scheduler/settings", s.handleSchedulerSettings)
 	mux.HandleFunc("/api/v1/scheduler/targets", s.handleSchedulerTargets)
 	mux.HandleFunc("/api/v1/scheduler/targets/", s.handleSchedulerTargetDetail)
+	mux.HandleFunc("/api/v1/submitter/package", s.handleSubmitterPackage)
+	mux.HandleFunc("/api/v1/submitter/package/", s.handleSubmitterPackage)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -2141,14 +2149,15 @@ func (s *Server) handleSubmitterRegister(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var req struct {
-		ID          string            `json:"id"`
-		Type        string            `json:"type"`
-		Hostname    string            `json:"hostname"`
-		Secret      string            `json:"secret"`
-		Concurrency int               `json:"concurrency"`
-		Labels      map[string]string `json:"labels"`
-		Config      map[string]string `json:"config"`
-		Status      string            `json:"status"`
+		ID            string            `json:"id"`
+		Type          string            `json:"type"`
+		Hostname      string            `json:"hostname"`
+		Secret        string            `json:"secret"`
+		Concurrency   int               `json:"concurrency"`
+		Labels        map[string]string `json:"labels"`
+		Config        map[string]string `json:"config"`
+		Status        string            `json:"status"`
+		PluginVersion string            `json:"pluginVersion"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid payload")
@@ -2180,6 +2189,7 @@ func (s *Server) handleSubmitterRegister(w http.ResponseWriter, r *http.Request)
 		Config:        req.Config,
 		LastHeartbeat: now,
 		RegisteredAt:  now,
+		PluginVersion: strings.TrimSpace(req.PluginVersion),
 	}
 	if err := s.repository.UpsertSubmitter(r.Context(), submitter); err != nil {
 		s.logger.Error("submitter register failed", slog.Any("err", err), slog.String("submitter_id", req.ID))
@@ -2211,6 +2221,7 @@ func (s *Server) handleSubmitterHeartbeat(w http.ResponseWriter, r *http.Request
 		ProcessedCount    int               `json:"processedCount"`
 		Labels            map[string]string `json:"labels"`
 		Config            map[string]string `json:"config"`
+		PluginVersion     string            `json:"pluginVersion"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid payload")
@@ -2259,6 +2270,7 @@ func (s *Server) handleSubmitterHeartbeat(w http.ResponseWriter, r *http.Request
 		Config:            req.Config,
 		LastHeartbeat:     now,
 		RegisteredAt:      existing.RegisteredAt,
+		PluginVersion:     strings.TrimSpace(req.PluginVersion),
 	}
 	if submitter.RegisteredAt.IsZero() {
 		submitter.RegisteredAt = now
@@ -2276,6 +2288,180 @@ func (s *Server) handleSubmitterHeartbeat(w http.ResponseWriter, r *http.Request
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"submitter": marshalSubmitter(submitter)})
 }
+
+func (s *Server) handleSubmitterPackage(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/submitter/package")
+	path = strings.Trim(path, "/")
+	if path == "" || path == "files" {
+		switch r.Method {
+		case http.MethodGet:
+			files, err := s.repository.ListSubmitterFiles(r.Context())
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to list files")
+				return
+			}
+			result := make([]map[string]any, 0, len(files))
+			for _, file := range files {
+				result = append(result, marshalExploitFile(file))
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"files": result})
+		case http.MethodPost:
+			name, data, err := readExploitFilePayload(r)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			if err := s.repository.SaveSubmitterFile(r.Context(), name, data); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to save file")
+				return
+			}
+			files, err := s.repository.ListSubmitterFiles(r.Context())
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to list files")
+				return
+			}
+			var saved storage.ExploitFile
+			for _, f := range files {
+				if f.Name == filepath.Base(name) {
+					saved = f
+					break
+				}
+			}
+			writeJSON(w, http.StatusCreated, map[string]any{"file": marshalExploitFile(saved)})
+		default:
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		}
+		return
+	}
+
+	parts := strings.Split(path, "/")
+	switch parts[0] {
+	case "files":
+		if len(parts) < 2 {
+			writeError(w, http.StatusBadRequest, "file name required")
+			return
+		}
+		name, err := url.PathUnescape(strings.Join(parts[1:], "/"))
+		if err != nil || strings.TrimSpace(name) == "" {
+			writeError(w, http.StatusBadRequest, "invalid file name")
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			data, err := s.repository.ReadSubmitterFile(r.Context(), name)
+			if err != nil {
+				writeError(w, http.StatusNotFound, "file not found")
+				return
+			}
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(name)))
+			if _, err := w.Write(data); err != nil {
+				s.logger.Warn("stream submitter file failed", slog.Any("err", err), slog.String("file", name))
+			}
+		case http.MethodDelete:
+			if err := s.repository.DeleteSubmitterFile(r.Context(), name); err != nil {
+				writeError(w, http.StatusNotFound, err.Error())
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		}
+	case "script":
+		switch r.Method {
+		case http.MethodGet:
+			script, err := s.repository.GetSubmitterScript(r.Context())
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to load script")
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"script": script})
+		case http.MethodPost:
+			var req struct {
+				Script string `json:"script"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeError(w, http.StatusBadRequest, "invalid payload")
+				return
+			}
+			if strings.TrimSpace(req.Script) == "" {
+				writeError(w, http.StatusBadRequest, "script cannot be empty")
+				return
+			}
+			if err := s.repository.SaveSubmitterScript(r.Context(), req.Script); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to save script")
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"script": req.Script})
+		default:
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		}
+	case "artifact":
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		data, version, err := s.repository.SubmitterArtifact(r.Context())
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		w.Header().Set("Content-Type", "application/zip")
+		w.Header().Set("Content-Disposition", "attachment; filename=\"submitter-package.zip\"")
+		w.Header().Set("X-Submitter-Version", version)
+		if _, err := w.Write(data); err != nil {
+			s.logger.Warn("stream submitter artifact failed", slog.Any("err", err))
+		}
+	case "sync":
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		_, version, err := s.repository.SubmitterArtifact(r.Context())
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		s.broadcastSubmitterPackage(version)
+		writeJSON(w, http.StatusOK, map[string]any{"version": version})
+	case "version":
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		_, version, err := s.repository.SubmitterArtifact(r.Context())
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"version": version})
+	default:
+		writeError(w, http.StatusNotFound, "unknown submitter package action")
+	}
+}
+
+func (s *Server) broadcastSubmitterPackage(version string) {
+	channel := strings.TrimSpace(s.cfg.FlagSubmitter.PackageChannel)
+	if s.publisher == nil || channel == "" {
+		return
+	}
+	payload := map[string]any{
+		"type":      "submitter-package",
+		"version":   strings.TrimSpace(version),
+		"timestamp": time.Now().UTC(),
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		s.logger.Warn("encode submitter package update failed", slog.Any("err", err))
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*3)
+	defer cancel()
+	if err := s.publisher.Publish(ctx, channel, data).Err(); err != nil {
+		s.logger.Warn("broadcast submitter package failed", slog.Any("err", err))
+	}
+}
+
 func (s *Server) populateRunOutput(ctx context.Context, run domain.Run) domain.Run {
 	if run.Stdout != "" || run.Stderr != "" || run.FlagValue != "" || run.FlagSource != "" {
 		return run
@@ -3221,7 +3407,31 @@ func marshalSubmitter(sub domain.Submitter) map[string]any {
 		"windowSeconds":     sub.WindowSeconds,
 		"latencySumSeconds": sub.LatencySumSeconds,
 		"processedCount":    sub.ProcessedCount,
+		"pluginVersion":     sub.PluginVersion,
 	}
+}
+
+func newRedisPublisher(cfg config.Config, logger *slog.Logger) redis.UniversalClient {
+	channel := strings.TrimSpace(cfg.FlagSubmitter.PackageChannel)
+	if channel == "" {
+		return nil
+	}
+	opts := &redis.Options{
+		Addr:     cfg.Redis.Addr,
+		Password: cfg.Redis.Password,
+		DB:       cfg.Redis.DB,
+	}
+	if cfg.Redis.TLSEnabled {
+		opts.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+	client := redis.NewClient(opts)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+	defer cancel()
+	if err := client.Ping(ctx).Err(); err != nil {
+		logger.Warn("plugin broadcaster disabled", slog.Any("err", err))
+		return nil
+	}
+	return client
 }
 
 func clientIP(r *http.Request) string {

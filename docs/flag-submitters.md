@@ -1,72 +1,60 @@
-# Flag Submitter Extension Contract
+# Submitter Packages & Workflow
 
-Flag submitters are pluggable adapters that translate generic flag events into platform-specific API calls. Submitters authenticate to the Control Panel using `SUBMITTER_SECRET`, register/heartbeat via REST, and call `/api/v1/flags/{id}/submit/start|finish` for each flag. The default Go service ships with an HTTP plugin, but you can implement your own adapters as long as they respect the protocol described below.
+Flag submitters execute the user-provided `submit.sh` inside `/env` and report the JSON result back to the Control Panel. Packages are managed centrally and pushed to every submitter instance.
 
-## Control Panel Contract
+## Package Lifecycle
 
-1. **Register**: `POST /api/v1/submitters/register` with payload `{id,type,hostname,secret,concurrency}`. Control Panel persists the submitter record.
-2. **Heartbeat**: `POST /api/v1/submitters/heartbeat` every ~10s，附带 `recentThroughput`、`avgLatencyMs`、`pressure`、`inFlight`、`pending` 等指标，便于 UI 展示和超时清理。
-3. **Heartbeat metrics**：payload 需额外上报 `recentThroughput`、`avgLatencyMs`、`pressure`、`windowSeconds`（采样窗口，秒）、`latencySumSeconds`（窗口内提交耗时总和）以及 `processedCount`。Control Panel 会基于这些数据计算单实例与整体压力。
-4. **Flag lifecycle**:
-   - `POST /api/v1/flags/{id}/submit/start`，Body `{secret, submitterId}`。成功时返回 flag 元数据（value、challengeId、targetId、runId）。若 flag 已完成或不存在则返回 404/409，submitter 应 Ack 并跳过。
-   - `POST /api/v1/flags/{id}/submit/finish`，Body `{secret, submitterId, status, statusCode, message, latencyMs, retryAfterSeconds, payload}`，Control Panel 根据 status 更新 `flags`、追加 `submission_attempts`，并把结果写到 stdout，随后返回 `{flag:{...}, retry:bool}`。当 `retry=true` 时 submitter 应 `Nack` 当前队列消息并按 `retryAfterSeconds`（或本地策略）延迟重试。
+1. **Edit & Upload**
+   - Use the **Submitter** page in the web UI (UI mirrors the Exploit file manager) to upload helper files and edit `submit.sh`.
+   - Files live under `/tmp/submitter` inside the chroot. `submit.sh` is executable and receives the flag value as its first argument.
 
-所有 HTTP 请求都以 JSON 传输，`secret` 必须与 `SUBMITTER_SECRET` 一致。
+2. **Sync**
+   - Click **Sync Submitters** to compute the package hash, broadcast an update via `FLAG_SUBMITTER_PACKAGE_CHANNEL` (default `submitter:package:update`), and expose the ZIP at `/api/v1/submitter/package/artifact`.
+   - Submitters subscribe to the channel; when an event arrives they download the ZIP, extract it into `/env/tmp/submitter`, and use it for subsequent submissions. No in-process hot reload is required.
 
-## Go 插件接口
+3. **Execution contract**
+   - At runtime the supervisor executes:
 
-Submitter binaries are loaded at runtime by the `flag-submitter` service and must implement the following Go interface:
+     ```sh
+     chroot /env /tmp/submitter/submit.sh "$FLAG"
+     ```
 
-```go
-type Submitter interface {
-    // ID returns a stable identifier (e.g. "ctfzone-http") that matches Control Panel configuration.
-    ID() string
+   - Environment variables:
+     - `FLAG_VALUE`, `FLAG_ID`
+     - `TARGET_ID`, `CHALLENGE_ID`
+     - `SUBMIT_META_<KEY>` for every metadata item passed by the Control Panel
+   - `stdout` **must** be a single JSON object:
 
-    // Submit executes a single submission attempt. The provided context carries
-    // cancellation, deadlines, and tracing metadata. The flag value and the originating
-    // run metadata are supplied through the payload.
-    Submit(ctx context.Context, payload SubmissionRequest) (SubmissionResult, error)
-}
-```
+     ```json
+     {
+       "status": "accepted|failed|duplicated|unknown",
+       "statusCode": 200,
+       "message": "optional text",
+       "retryAfter": 30
+     }
+     ```
 
-where:
+     `stderr` is treated as log output and forwarded to the supervisor logs.
 
-```go
-type SubmissionRequest struct {
-    Flag       string
-    Challenge  string
-    Target     string
-    RunID      string
-    Metadata   map[string]any // control-panel supplied (tokens, cookies, etc.)
-}
+## REST API
 
-type SubmissionResult struct {
-    Status   SubmissionStatus
-    Message  string        // free-form text, surfaced in UI/logs
-    NextTry  time.Duration // optional override for retry backoff
-}
+- `GET /api/v1/submitter/package/files` – list current files.
+- `POST /api/v1/submitter/package/files` – upload (multipart or JSON base64). `submit.sh` uploads overwrite the script.
+- `GET /api/v1/submitter/package/files/{name}` – download a file.
+- `DELETE /api/v1/submitter/package/files/{name}` – delete a file (except `submit.sh`).
+- `GET /api/v1/submitter/package/script` / `POST .../script` – read or update `submit.sh`.
+- `GET /api/v1/submitter/package/artifact` – download the ZIP (requires `X-Submitter-Secret` header); response contains `X-Submitter-Version`.
+- `POST /api/v1/submitter/package/sync` – broadcast to all submitters; response includes the new version hash.
+- `GET /api/v1/submitter/package/version` – return the latest computed version hash.
 
-type SubmissionStatus string
+Submitters authenticate artifact/version requests with the `X-Submitter-Secret` header (same secret used for heartbeat/register).
 
-const (
-    SubmissionStatusAccepted   SubmissionStatus = "accepted"
-    SubmissionStatusFailed     SubmissionStatus = "failed"      // permanent failure (invalid payload, etc.)
-    SubmissionStatusDuplicated SubmissionStatus = "duplicated"  // duplicated flag submission
-    SubmissionStatusUnknown    SubmissionStatus = "unknown"     // transient error; scheduler will retry
-)
-```
+## Submitter Supervisor Behavior
 
-### Return Semantics
+- Maintains a persistent workspace (default `/env/tmp/submitter`).
+- Subscribes to `FLAG_SUBMITTER_PACKAGE_CHANNEL` via Redis PUB/SUB; messages use `{"type":"submitter-package","version":"...","timestamp":"..."}`.
+- Downloads the ZIP from the Control Panel and atomically replaces the workspace.
+- Spawns `submit.sh` per flag inside the chroot and parses the JSON result.
+- Aggregates stderr into logs; stdout must be valid JSON.
 
-- `Accepted`: the flag has been confirmed by the remote platform; it will be marked as accepted and removed from retry queues.
-- `Failed`: the remote platform definitively refused the flag (invalid payload, already expired, etc.). No further retries will be scheduled unless an operator manually requeues it.
-- `Duplicated`: the remote platform accepted the request but reports the flag was already submitted. The flag will be marked failed and no further retries scheduled.
-- `Unknown`: the submission failed for a recoverable reason (network, rate limit). The scheduler will schedule another attempt after the default backoff or the optional `NextTry` delay.
-
-Returning an error from `Submit` is equivalent to `Unknown`; the framework records the error text and applies exponential backoff.
-
-### Packaging Guidance
-
-- Compile submitters as Go plugins (`.so`) or expose them over gRPC/HTTP; register them via configuration.
-- Each submitter is loaded with Control Panel supplied credentials; avoid embedding secrets inside the artifact.
-- Ensure implementations are idempotent—duplicate invocation may occur due to retries after partial failures.
+This design keeps the supervisor thin, isolates user scripts inside `/env`, and allows the Control Panel to manage package contents centrally with a single click.***

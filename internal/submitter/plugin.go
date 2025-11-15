@@ -1,13 +1,5 @@
 package submitter
 
-import "context"
-
-// Plugin represents a pluggable flag submission strategy.
-type Plugin interface {
-	ID() string
-	Submit(ctx context.Context, request SubmissionRequest) SubmissionResult
-}
-
 // SubmissionRequest captures data needed by plugins.
 type SubmissionRequest struct {
 	FlagID      string

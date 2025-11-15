@@ -25,6 +25,8 @@ type ControlPanelClient struct {
 	log     *slog.Logger
 }
 
+const submitterSecretHeader = "X-Submitter-Secret"
+
 // NewControlPanelClient initializes a client using submitter configuration.
 func NewControlPanelClient(cfg config.Config, log *slog.Logger) (*ControlPanelClient, error) {
 	baseURL := cfg.FlagSubmitter.ControlPanelURL
@@ -115,6 +117,11 @@ type submitFinishResponse struct {
 	Retry bool `json:"retry"`
 }
 
+type SubmitterPackage struct {
+	Version string
+	Data    []byte
+}
+
 // APIError captures control panel HTTP errors.
 type APIError struct {
 	StatusCode int
@@ -157,6 +164,45 @@ func (c *ControlPanelClient) SubmitFinish(ctx context.Context, flagID string, pa
 	var resp submitFinishResponse
 	err := c.post(ctx, fmt.Sprintf("/api/v1/flags/%s/submit/finish", strings.TrimSpace(flagID)), payload, &resp)
 	return resp, err
+}
+
+func (c *ControlPanelClient) DownloadSubmitterPackage(ctx context.Context) (SubmitterPackage, error) {
+	var pkg SubmitterPackage
+	if c.baseURL == nil {
+		return pkg, fmt.Errorf("control panel client not configured")
+	}
+	u := *c.baseURL
+	rel := strings.TrimPrefix("/api/v1/submitter/package/artifact", "/")
+	u.Path = path.Join(c.baseURL.Path, rel)
+	if !strings.HasPrefix(u.Path, "/") {
+		u.Path = "/" + u.Path
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return pkg, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set(submitterSecretHeader, c.secret)
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return pkg, fmt.Errorf("perform request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		msg := strings.TrimSpace(string(body))
+		if msg == "" {
+			msg = http.StatusText(resp.StatusCode)
+		}
+		return pkg, &APIError{StatusCode: resp.StatusCode, Message: msg}
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return pkg, fmt.Errorf("read artifact: %w", err)
+	}
+	pkg.Data = data
+	pkg.Version = strings.TrimSpace(resp.Header.Get("X-Submitter-Version"))
+	return pkg, nil
 }
 
 func (c *ControlPanelClient) post(ctx context.Context, endpoint string, payload any, dest any) error {
