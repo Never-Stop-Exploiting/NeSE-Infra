@@ -54,6 +54,7 @@ class Challenge(TypedDict):
     category: NotRequired[str | None]
     serviceType: NotRequired[str | None]
     description: NotRequired[str | None]
+    flagRegex: NotRequired[str | None]
     metadata: NotRequired[dict[str, Any] | None]
     createdAt: NotRequired[str]
     updatedAt: NotRequired[str]
@@ -461,6 +462,7 @@ class ControlPanelAPI:
         category: str | None = None,
         service_type: str | None = None,
         description: str | None = None,
+        flag_regex: str | None = None,
         metadata: Mapping[str, Any] | None = None,
     ) -> Challenge:
         body = {
@@ -468,13 +470,34 @@ class ControlPanelAPI:
             "category": category,
             "serviceType": service_type,
             "description": description,
+            "flagRegex": flag_regex,
             "metadata": dict(metadata) if metadata else None,
         }
         payload = self.post("challenges", json_body=body)
         return payload.get("challenge", {})
 
-    def update_challenge(self, challenge_id: str, **fields: Any) -> Challenge:
-        payload = self.patch(f"challenges/{challenge_id}", json_body=fields)
+    def update_challenge(
+        self,
+        challenge_id: str,
+        *,
+        name: str | None = None,
+        category: str | None = None,
+        service_type: str | None = None,
+        description: str | None = None,
+        flag_regex: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        **extra: Any,
+    ) -> Challenge:
+        body = {
+            "name": name,
+            "category": category,
+            "serviceType": service_type,
+            "description": description,
+            "flagRegex": flag_regex,
+            "metadata": dict(metadata) if metadata else None,
+        }
+        body.update({k: v for k, v in extra.items() if v is not None})
+        payload = self.patch(f"challenges/{challenge_id}", json_body=body)
         return payload.get("challenge", {})
 
     def delete_challenge(self, challenge_id: str) -> None:
@@ -644,6 +667,9 @@ class ControlPanelAPI:
         target_id: str | None = None,
         exploit_name: str | None = None,
         target_name: str | None = None,
+        challenge_id: str | None = None,
+        start: str | None = None,
+        end: str | None = None,
     ) -> RunsResponse:
         params = {
             "limit": limit,
@@ -653,6 +679,9 @@ class ControlPanelAPI:
             "targetId": target_id,
             "exploitName": exploit_name,
             "targetName": target_name,
+            "challengeId": challenge_id,
+            "start": start,
+            "end": end,
         }
         params = {k: v for k, v in params.items() if v not in (None, "")}
         return self.get("runs", params=params)
