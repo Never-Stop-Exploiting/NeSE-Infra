@@ -623,7 +623,7 @@ func (s *Server) handleExploits(w http.ResponseWriter, r *http.Request) {
 			ChallengeID:    req.ChallengeID,
 			Name:           req.Name,
 			Description:    req.Description,
-			Enabled:        true,
+			Enabled:        false,
 			RunnerTags:     req.RunnerTags,
 			ScheduleWeight: req.ScheduleWeight,
 			Metadata:       metadata,
