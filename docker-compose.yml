@@ -3,19 +3,15 @@ services:
     image: postgres:15
     restart: unless-stopped
     environment:
-      POSTGRES_DB: awd
-      POSTGRES_USER: awd
-      POSTGRES_PASSWORD: awd
-    ports:
-      - "5432:5432"
+      POSTGRES_DB: ${POSTGRES_DB:-awd}
+      POSTGRES_USER: ${POSTGRES_USER:-awd}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-awd}
     volumes:
       - postgres-data:/var/lib/postgresql/data
 
   redis:
     image: redis:7
     restart: unless-stopped
-    env_file:
-      - .env.example
     command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-dev-redis-password}"]
     ports:
       - "6379:6379"
@@ -24,8 +20,17 @@ services:
     build:
       context: .
       dockerfile: docker/control-panel.Dockerfile
-    env_file:
-      - .env.example
+    environment:
+      APP_NAME: ${APP_NAME:-awd-infra}
+      LOG_LEVEL: ${LOG_LEVEL:-debug}
+      POSTGRES_DSN: ${POSTGRES_DSN:-postgres://awd:awd@postgres:5432/awd?sslmode=disable}
+      POSTGRES_ARTIFACT_DIR: ${POSTGRES_ARTIFACT_DIR:-/var/lib/awd/artifacts}
+      REDIS_ADDR: ${REDIS_ADDR:-redis:6379}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-dev-redis-password}
+      CONTROL_PANEL_LOG_OUTPUT_LIMIT: ${CONTROL_PANEL_LOG_OUTPUT_LIMIT:-4096}
+      CONTROL_PANEL_TOKEN: ${CONTROL_PANEL_TOKEN:-dev-admin-token}
+      RUNNER_SECRET: ${RUNNER_SECRET:-dev-runner-secret}
+      SUBMITTER_SECRET: ${SUBMITTER_SECRET:-dev-submitter-secret}
     volumes:
       - awd-uploads:/var/lib/awd
     depends_on:
@@ -38,8 +43,15 @@ services:
     build:
       context: .
       dockerfile: docker/scheduler.Dockerfile
-    env_file:
-      - .env.example
+    environment:
+      APP_NAME: ${APP_NAME:-awd-infra}
+      LOG_LEVEL: ${LOG_LEVEL:-debug}
+      POSTGRES_DSN: ${POSTGRES_DSN:-postgres://awd:awd@postgres:5432/awd?sslmode=disable}
+      REDIS_ADDR: ${REDIS_ADDR:-redis:6379}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-dev-redis-password}
+      CONTROL_PANEL_TOKEN: ${CONTROL_PANEL_TOKEN:-dev-admin-token}
+      SCHEDULER_POLL_INTERVAL: ${SCHEDULER_POLL_INTERVAL:-5s}
+      SCHEDULER_MAX_BATCH: ${SCHEDULER_MAX_BATCH:-50}
     volumes:
       - awd-uploads:/var/lib/awd
     depends_on:
@@ -49,35 +61,15 @@ services:
     build:
       context: .
       dockerfile: docker/dispatcher.Dockerfile
-    env_file:
-      - .env.example
+    environment:
+      APP_NAME: ${APP_NAME:-awd-infra}
+      LOG_LEVEL: ${LOG_LEVEL:-debug}
+      POSTGRES_DSN: ${POSTGRES_DSN:-postgres://awd:awd@postgres:5432/awd?sslmode=disable}
+      REDIS_ADDR: ${REDIS_ADDR:-redis:6379}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-dev-redis-password}
+      CONTROL_PANEL_TOKEN: ${CONTROL_PANEL_TOKEN:-dev-admin-token}
     depends_on:
       - scheduler
-
-#  flag-submitter:
-#    build:
-#      context: .
-#      dockerfile: docker/flag-submitter.Dockerfile
-#    env_file:
-#      - .env.example
-#    depends_on:
-#      - redis
-
-  # runner:
-  #   build:
-  #     context: .
-  #     dockerfile: docker/runner.Dockerfile
-  #   image: infra-runner:latest
-  #   pull_policy: never
-  #   env_file:
-  #     - .env.example
-  #   environment:
-  #     RUNNER_SECRET: ${RUNNER_SECRET:-dev-runner-secret}
-  #     CONTROL_PANEL_URL: ${CONTROL_PANEL_URL:-http://control-panel:8080}
-  #     RUNNER_TAGS: ${RUNNER_TAGS:-python,pwntools}
-  #   depends_on:
-  #     - scheduler
-
   web:
     build:
       context: .
