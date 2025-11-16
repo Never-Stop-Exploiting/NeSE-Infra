@@ -1,34 +1,35 @@
 <template>
   <section class="settings">
     <header class="settings__header">
-      <div>
+      <div class="header-left">
         <p class="eyebrow">Control Panel</p>
         <h2>Submitter Package</h2>
         <p class="subtitle">Manage submit.sh and its attachments. Sync to push updates to all submitter instances.</p>
-      </div>
-      <div class="header-actions">
-        <span class="version">Version: {{ version || "unknown" }}</span>
-        <button type="button" class="ghost" :disabled="syncing" @click="handleSync">
-          {{ syncing ? "Syncing..." : "Sync Submitters" }}
-        </button>
+        <div class="header-actions">
+          <button type="button" class="ghost" :disabled="syncing" @click="handleSync">
+            {{ syncing ? "Syncing..." : "Sync Submitters" }}
+          </button>
+          <span class="version">Version: {{ version || "unknown" }}</span>
+        </div>
       </div>
     </header>
 
     <div class="grid">
-      <section class="card">
+      <section
+        class="card card--files"
+        :class="{ 'card--dragging': isDragging }"
+        @dragenter.prevent="handleDragEnter"
+        @dragover.prevent="handleDragOver"
+        @dragleave.prevent="handleDragLeave"
+        @drop.prevent="handleDrop"
+      >
         <h3>Files</h3>
         <p class="subtitle">Upload any helper files required by submit.sh. Default script lives at /tmp/submitter/submit.sh inside chroot.</p>
 
-        <div
-          class="upload"
-          :class="{ 'upload--dragging': isDragging }"
-          @dragover.prevent="handleDragOver"
-          @dragleave.prevent="handleDragLeave"
-          @drop.prevent="handleDrop"
-        >
+        <div class="upload">
           <input ref="fileInput" class="file-input" type="file" @change="handleFileChange" />
           <button type="button" @click="triggerUpload">Choose File</button>
-          <span>{{ isDragging ? "Drop file to upload" : selectedFileName }}</span>
+          <span>{{ isDragging ? "Drop file anywhere in this panel" : selectedFileName }}</span>
         </div>
         <p v-if="fileFeedback" class="feedback" :class="fileFeedbackType">{{ fileFeedback }}</p>
 
@@ -71,6 +72,39 @@
         <p v-if="scriptFeedback" class="feedback" :class="scriptFeedbackType">{{ scriptFeedback }}</p>
       </section>
     </div>
+
+    <section class="card submitter-status">
+      <h3>Submitter Sync Status</h3>
+      <p class="subtitle">Track each submitter’s reported package version after a sync.</p>
+      <div v-if="loadingSubmitters" class="empty">Loading submitters...</div>
+      <div v-else-if="!submitters.length" class="empty">No submitters registered yet.</div>
+      <table v-else class="table">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Hostname</th>
+            <th>Status</th>
+            <th>Concurrency</th>
+            <th>Package Version</th>
+            <th>Sync State</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="submitter in submitters" :key="submitter.id">
+            <td>{{ submitter.id }}</td>
+            <td>{{ submitter.hostname || "-" }}</td>
+            <td>{{ submitter.status }}</td>
+            <td>{{ submitter.concurrency }}</td>
+            <td>{{ submitterVersion(submitter) || "pending" }}</td>
+            <td>
+              <span :class="['badge', isSubmitterUpToDate(submitter) ? 'badge--ok' : 'badge--warn']">
+                {{ isSubmitterUpToDate(submitter) ? "Up to date" : "Outdated" }}
+              </span>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
   </section>
 </template>
 
@@ -87,6 +121,8 @@ import {
   fetchSubmitterVersion
 } from "@/api/submitterPackage";
 import type { SubmitterFile } from "@/api/submitterPackage";
+import type { SubmitterInfo } from "@/types";
+import { fetchSubmitters } from "@/api/runners";
 
 const files = ref<SubmitterFile[]>([]);
 const script = ref("");
@@ -99,9 +135,11 @@ const selectedFileName = ref("No file selected");
 const fileFeedback = ref<string | null>(null);
 const fileFeedbackType = ref<"success" | "error">("success");
 const isDragging = ref(false);
-let dragCounter = 0;
 const scriptFeedback = ref<string | null>(null);
 const scriptFeedbackType = ref<"success" | "error">("success");
+const submitters = ref<SubmitterInfo[]>([]);
+const loadingSubmitters = ref(false);
+let dragCounter = 0;
 
 async function loadFiles() {
   loadingFiles.value = true;
@@ -128,6 +166,31 @@ async function loadVersion() {
   } catch (error) {
     console.error("Failed to load version", error);
   }
+}
+
+async function loadSubmitters() {
+  loadingSubmitters.value = true;
+  try {
+    const payload = await fetchSubmitters();
+    submitters.value = payload.items;
+  } catch (error) {
+    console.error("Failed to load submitters", error);
+  } finally {
+    loadingSubmitters.value = false;
+  }
+}
+
+function submitterVersion(submitter: SubmitterInfo): string {
+  return submitter.config?.packageVersion ?? "";
+}
+
+function isSubmitterUpToDate(submitter: SubmitterInfo): boolean {
+  const current = version.value;
+  const reported = submitterVersion(submitter);
+  if (!current || !reported) {
+    return false;
+  }
+  return current === reported;
 }
 
 function triggerUpload() {
@@ -196,13 +259,20 @@ async function handleDownload(file: SubmitterFile) {
   }
 }
 
-function handleDragOver(event: DragEvent) {
+function handleDragEnter(event: DragEvent) {
   event.preventDefault();
   if (event.dataTransfer) {
     event.dataTransfer.dropEffect = "copy";
   }
   dragCounter += 1;
   isDragging.value = true;
+}
+
+function handleDragOver(event: DragEvent) {
+  event.preventDefault();
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = "copy";
+  }
 }
 
 function handleDragLeave() {
@@ -243,6 +313,7 @@ async function handleSync() {
   syncing.value = true;
   try {
     version.value = await syncSubmitterPackage();
+    await loadSubmitters();
   } catch (error) {
     console.error("Sync failed", error);
   } finally {
@@ -268,6 +339,7 @@ function formatTime(value?: string): string {
 
 onMounted(async () => {
   await Promise.all([loadFiles(), loadScript(), loadVersion()]);
+  await loadSubmitters();
 });
 </script>
 
@@ -303,6 +375,12 @@ onMounted(async () => {
   gap: 1.5rem;
 }
 
+.header-left {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
 .card {
   background: rgba(15, 23, 42, 0.6);
   border: 1px solid rgba(148, 163, 184, 0.2);
@@ -311,20 +389,20 @@ onMounted(async () => {
   box-shadow: 0 20px 45px rgba(2, 6, 23, 0.5);
 }
 
+.card--files {
+  transition: border-color 0.2s ease, background 0.2s ease;
+}
+
+.card--dragging {
+  border-color: #38bdf8;
+  background: rgba(56, 189, 248, 0.06);
+}
+
 .upload {
   display: flex;
   align-items: center;
   gap: 0.75rem;
   margin-bottom: 0.75rem;
-  padding: 0.9rem;
-  border: 1px dashed rgba(148, 163, 184, 0.4);
-  border-radius: 10px;
-  transition: border-color 0.2s ease, background 0.2s ease;
-}
-
-.upload--dragging {
-  border-color: #38bdf8;
-  background: rgba(56, 189, 248, 0.08);
 }
 
 .file-input {
@@ -403,6 +481,42 @@ button:disabled {
   cursor: not-allowed;
 }
 
+.badge {
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.badge::before {
+  content: "";
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.badge--ok {
+  color: #22c55e;
+  background: rgba(34, 197, 94, 0.15);
+}
+
+.badge--ok::before {
+  background: #22c55e;
+}
+
+.badge--warn {
+  color: #f97316;
+  background: rgba(249, 115, 22, 0.15);
+}
+
+.badge--warn::before {
+  background: #f97316;
+}
+
 .empty {
   margin-top: 1rem;
   color: #94a3b8;
@@ -426,6 +540,8 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 0.75rem;
+  margin-top: 0.5rem;
+  flex-wrap: wrap;
 }
 
 .version {

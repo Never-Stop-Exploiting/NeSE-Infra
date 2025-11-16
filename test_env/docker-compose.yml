@@ -61,3 +61,13 @@ services:
     container_name: flag-submitter
     env_file:
       - .env.submitter
+  
+  flag-submitter2:
+    build:
+      context: ..
+      dockerfile: ./test_env/submitter/Dockerfile.tmp_build
+    container_name: flag-submitter2
+    env_file:
+      - .env.submitter
+    environment:
+      - SUBMITTER_ID=dev-submitter2
