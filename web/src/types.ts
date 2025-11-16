@@ -3,6 +3,9 @@ export interface Challenge {
   name: string;
   category?: string;
   serviceType?: string;
+  description?: string;
+  flagRegex?: string;
+  metadata?: Record<string, unknown>;
 }
 
 export interface Target {

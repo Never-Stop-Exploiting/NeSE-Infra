@@ -272,6 +272,7 @@ func (s *Server) handleChallenges(w http.ResponseWriter, r *http.Request) {
 			Category    string         `json:"category"`
 			ServiceType string         `json:"serviceType"`
 			Description string         `json:"description"`
+			FlagRegex   *string        `json:"flagRegex"`
 			Metadata    map[string]any `json:"metadata"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -282,11 +283,13 @@ func (s *Server) handleChallenges(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "name is required")
 			return
 		}
+		flagRegex := s.defaultFlagRegex(req.FlagRegex)
 		created, err := s.repository.CreateChallenge(r.Context(), domain.Challenge{
 			Name:        req.Name,
 			Category:    req.Category,
 			ServiceType: req.ServiceType,
 			Description: req.Description,
+			FlagRegex:   flagRegex,
 			Metadata:    req.Metadata,
 		})
 		if err != nil {
@@ -320,11 +323,16 @@ func (s *Server) handleChallengeDetail(w http.ResponseWriter, r *http.Request) {
 			Category    string         `json:"category"`
 			ServiceType string         `json:"serviceType"`
 			Description string         `json:"description"`
+			FlagRegex   *string        `json:"flagRegex"`
 			Metadata    map[string]any `json:"metadata"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid payload")
 			return
+		}
+		flagRegex := ""
+		if req.FlagRegex != nil {
+			flagRegex = s.defaultFlagRegex(req.FlagRegex)
 		}
 		updated, err := s.repository.UpdateChallenge(r.Context(), domain.Challenge{
 			ID:          id,
@@ -332,6 +340,7 @@ func (s *Server) handleChallengeDetail(w http.ResponseWriter, r *http.Request) {
 			Category:    req.Category,
 			ServiceType: req.ServiceType,
 			Description: req.Description,
+			FlagRegex:   flagRegex,
 			Metadata:    req.Metadata,
 		})
 		if err != nil {
@@ -348,6 +357,13 @@ func (s *Server) handleChallengeDetail(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
+}
+
+func (s *Server) defaultFlagRegex(input *string) string {
+	if input != nil {
+		return domain.ResolveFlagRegex(*input, s.cfg.Runner.DefaultFlagRegex)
+	}
+	return domain.ResolveFlagRegex(s.cfg.Runner.DefaultFlagRegex)
 }
 
 func (s *Server) handleImportTargets(w http.ResponseWriter, r *http.Request) {
@@ -932,11 +948,16 @@ func (s *Server) createRunForTarget(ctx context.Context, exploit domain.Exploit,
 	if s.broker == nil {
 		return domain.Run{}, errors.New("run queue unavailable")
 	}
+	challenge, err := s.repository.GetChallenge(ctx, target.ChallengeID)
+	if err != nil {
+		return domain.Run{}, fmt.Errorf("load challenge %s: %w", target.ChallengeID, err)
+	}
 	artifact, err := s.repository.LatestExploitArtifact(ctx, exploit.ID)
 	if err != nil {
 		return domain.Run{}, fmt.Errorf("package exploit %s: %w", exploit.ID, err)
 	}
 	flagRegex, flagFile, timeout := jobs.HintsFromMetadata(exploit.Metadata)
+	flagRegex = domain.ResolveFlagRegex(flagRegex, challenge.FlagRegex, s.cfg.Runner.DefaultFlagRegex)
 	run := domain.Run{
 		ExploitID: exploit.ID,
 		TargetID:  target.ID,
@@ -3248,6 +3269,7 @@ func marshalChallenge(ch domain.Challenge) map[string]any {
 		"category":    ch.Category,
 		"serviceType": ch.ServiceType,
 		"description": ch.Description,
+		"flagRegex":   ch.FlagRegex,
 		"metadata":    ch.Metadata,
 		"createdAt":   ch.CreatedAt,
 		"updatedAt":   ch.UpdatedAt,

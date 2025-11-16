@@ -11,6 +11,7 @@ type Challenge struct {
 	Category    string
 	ServiceType string
 	Description string
+	FlagRegex   string
 	Metadata    map[string]any
 	CreatedAt   time.Time
 	UpdatedAt   time.Time

@@ -12,6 +12,7 @@ export async function createChallenge(payload: {
   category?: string;
   serviceType?: string;
   description?: string;
+  flagRegex?: string;
   metadata?: Record<string, unknown>;
 }): Promise<Challenge> {
   const res = await api.post<{ challenge: Challenge }>(base, payload);
@@ -25,6 +26,7 @@ export async function updateChallenge(
     category?: string;
     serviceType?: string;
     description?: string;
+    flagRegex?: string;
     metadata?: Record<string, unknown>;
   }
 ): Promise<Challenge> {

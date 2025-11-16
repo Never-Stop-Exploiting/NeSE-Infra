@@ -118,6 +118,9 @@ func (r *Repository) UpdateChallenge(ctx context.Context, challenge domain.Chall
 	if challenge.Description != "" {
 		existing.Description = challenge.Description
 	}
+	if strings.TrimSpace(challenge.FlagRegex) != "" {
+		existing.FlagRegex = challenge.FlagRegex
+	}
 	if challenge.Metadata != nil {
 		existing.Metadata = challenge.Metadata
 	}
@@ -207,6 +210,10 @@ func (r *Repository) RunnableWork(ctx context.Context, limit int, settings domai
 	exploitCopies := make([]domain.Exploit, 0, len(r.exploits))
 	for _, exploit := range r.exploits {
 		exploitCopies = append(exploitCopies, exploit)
+	}
+	challengeCopies := make(map[string]domain.Challenge, len(r.challenges))
+	for id, challenge := range r.challenges {
+		challengeCopies[id] = challenge
 	}
 	overrideCopies := make(map[string]map[string]domain.TargetExploitOverride, len(r.overrides))
 	for targetID, overrides := range r.overrides {
@@ -331,6 +338,8 @@ func (r *Repository) RunnableWork(ctx context.Context, limit int, settings domai
 			}
 
 			flagRegex, flagFile, timeout := jobs.HintsFromMetadata(exploit.Metadata)
+			challenge := challengeCopies[target.ChallengeID]
+			flagRegex = domain.ResolveFlagRegex(flagRegex, challenge.FlagRegex)
 
 			work = append(work, domain.RunWorkItem{
 				RunID:     run.ID,

@@ -6,6 +6,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/flag-submitter ./cmd/flag-submitter
 
 FROM alpine:3.19
+LABEL org.opencontainers.image.source=https://github.com/Never-Stop-Exploiting/NeSE-Infra
 RUN apk add --no-cache bash coreutils busybox-extras ca-certificates \
     && mkdir -p /env/tmp/submitter \
     && chmod 755 /env

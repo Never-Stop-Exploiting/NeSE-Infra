@@ -389,7 +389,12 @@ func (d *Dispatcher) createRunForTarget(ctx context.Context, exploit domain.Expl
 	if err != nil {
 		return domain.Run{}, fmt.Errorf("package exploit %s: %w", exploit.ID, err)
 	}
+	challenge, err := d.repo.GetChallenge(ctx, target.ChallengeID)
+	if err != nil {
+		return domain.Run{}, fmt.Errorf("load challenge %s: %w", target.ChallengeID, err)
+	}
 	flagRegex, flagFile, timeout := jobs.HintsFromMetadata(exploit.Metadata)
+	flagRegex = domain.ResolveFlagRegex(flagRegex, challenge.FlagRegex, d.cfg.Runner.DefaultFlagRegex)
 	run := domain.Run{
 		ExploitID: exploit.ID,
 		TargetID:  target.ID,

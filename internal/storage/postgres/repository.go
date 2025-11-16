@@ -123,10 +123,12 @@ func ensureSchema(ctx context.Context, db *sql.DB) error {
 			category TEXT,
 			service_type TEXT,
 			description TEXT,
+			flag_regex TEXT,
 			metadata JSONB,
 			created_at TIMESTAMPTZ NOT NULL,
 			updated_at TIMESTAMPTZ NOT NULL
 		);`,
+		`ALTER TABLE challenges ADD COLUMN IF NOT EXISTS flag_regex TEXT;`,
 		`CREATE TABLE IF NOT EXISTS targets (
 			id TEXT PRIMARY KEY,
 			challenge_id TEXT REFERENCES challenges(id) ON DELETE CASCADE,
@@ -317,6 +319,15 @@ func ensureSchema(ctx context.Context, db *sql.DB) error {
 		}
 	}
 
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE challenges
+		SET flag_regex = $1
+		WHERE flag_regex IS NULL OR flag_regex = ''`,
+		domain.DefaultFlagRegex,
+	); err != nil {
+		return fmt.Errorf("ensure challenge flag regex: %w", err)
+	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit schema transaction: %w", err)
 	}
@@ -325,7 +336,7 @@ func ensureSchema(ctx context.Context, db *sql.DB) error {
 
 func (r *Repository) Challenges(ctx context.Context) ([]domain.Challenge, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT id, name, category, service_type, description, metadata, created_at, updated_at
+		SELECT id, name, category, service_type, description, flag_regex, metadata, created_at, updated_at
 		FROM challenges
 		ORDER BY created_at ASC`)
 	if err != nil {
@@ -337,13 +348,14 @@ func (r *Repository) Challenges(ctx context.Context) ([]domain.Challenge, error)
 	for rows.Next() {
 		var challenge domain.Challenge
 		var metadata []byte
-		var category, serviceType, description sql.NullString
+		var category, serviceType, description, flagRegex sql.NullString
 		if err := rows.Scan(
 			&challenge.ID,
 			&challenge.Name,
 			&category,
 			&serviceType,
 			&description,
+			&flagRegex,
 			&metadata,
 			&challenge.CreatedAt,
 			&challenge.UpdatedAt,
@@ -358,6 +370,9 @@ func (r *Repository) Challenges(ctx context.Context) ([]domain.Challenge, error)
 		}
 		if description.Valid {
 			challenge.Description = description.String
+		}
+		if flagRegex.Valid {
+			challenge.FlagRegex = flagRegex.String
 		}
 		if len(metadata) > 0 {
 			meta, err := unmarshalMap(metadata)
@@ -377,9 +392,9 @@ func (r *Repository) Challenges(ctx context.Context) ([]domain.Challenge, error)
 func (r *Repository) GetChallenge(ctx context.Context, id string) (domain.Challenge, error) {
 	var challenge domain.Challenge
 	var metadata []byte
-	var category, serviceType, description sql.NullString
+	var category, serviceType, description, flagRegex sql.NullString
 	err := r.db.QueryRowContext(ctx, `
-		SELECT id, name, category, service_type, description, metadata, created_at, updated_at
+		SELECT id, name, category, service_type, description, flag_regex, metadata, created_at, updated_at
 		FROM challenges
 		WHERE id = $1`, id).Scan(
 		&challenge.ID,
@@ -387,6 +402,7 @@ func (r *Repository) GetChallenge(ctx context.Context, id string) (domain.Challe
 		&category,
 		&serviceType,
 		&description,
+		&flagRegex,
 		&metadata,
 		&challenge.CreatedAt,
 		&challenge.UpdatedAt,
@@ -405,6 +421,9 @@ func (r *Repository) GetChallenge(ctx context.Context, id string) (domain.Challe
 	}
 	if description.Valid {
 		challenge.Description = description.String
+	}
+	if flagRegex.Valid {
+		challenge.FlagRegex = flagRegex.String
 	}
 	if len(metadata) > 0 {
 		meta, err := unmarshalMap(metadata)
@@ -433,13 +452,14 @@ func (r *Repository) CreateChallenge(ctx context.Context, challenge domain.Chall
 	}
 
 	_, err = r.db.ExecContext(ctx, `
-		INSERT INTO challenges (id, name, category, service_type, description, metadata, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		INSERT INTO challenges (id, name, category, service_type, description, flag_regex, metadata, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
 		challenge.ID,
 		challenge.Name,
 		nullString(challenge.Category),
 		nullString(challenge.ServiceType),
 		nullString(challenge.Description),
+		nullString(challenge.FlagRegex),
 		metadata,
 		challenge.CreatedAt,
 		challenge.UpdatedAt,
@@ -471,6 +491,9 @@ func (r *Repository) UpdateChallenge(ctx context.Context, challenge domain.Chall
 	if challenge.Description != "" {
 		existing.Description = challenge.Description
 	}
+	if strings.TrimSpace(challenge.FlagRegex) != "" {
+		existing.FlagRegex = challenge.FlagRegex
+	}
 	if challenge.Metadata != nil {
 		existing.Metadata = challenge.Metadata
 	}
@@ -483,12 +506,13 @@ func (r *Repository) UpdateChallenge(ctx context.Context, challenge domain.Chall
 
 	res, err := r.db.ExecContext(ctx, `
 		UPDATE challenges
-		SET name=$1, category=$2, service_type=$3, description=$4, metadata=$5, updated_at=$6
-		WHERE id=$7`,
+		SET name=$1, category=$2, service_type=$3, description=$4, flag_regex=$5, metadata=$6, updated_at=$7
+		WHERE id=$8`,
 		existing.Name,
 		nullString(existing.Category),
 		nullString(existing.ServiceType),
 		nullString(existing.Description),
+		nullString(existing.FlagRegex),
 		metadata,
 		existing.UpdatedAt,
 		existing.ID,
@@ -603,6 +627,15 @@ func (r *Repository) RunnableWork(ctx context.Context, limit int, settings domai
 	}
 	if len(exploits) == 0 {
 		return nil, nil
+	}
+
+	challenges, err := r.Challenges(ctx)
+	if err != nil {
+		return nil, err
+	}
+	challengeIndex := make(map[string]domain.Challenge, len(challenges))
+	for _, challenge := range challenges {
+		challengeIndex[challenge.ID] = challenge
 	}
 
 	overrides, err := r.ListTargetExploitOverrides(ctx)
@@ -777,6 +810,8 @@ func (r *Repository) RunnableWork(ctx context.Context, limit int, settings domai
 			}
 
 			flagRegex, flagFile, timeout := jobs.HintsFromMetadata(exploit.Metadata)
+			challenge := challengeIndex[target.ChallengeID]
+			flagRegex = domain.ResolveFlagRegex(flagRegex, challenge.FlagRegex)
 
 			item := domain.RunWorkItem{
 				RunID:     run.ID,

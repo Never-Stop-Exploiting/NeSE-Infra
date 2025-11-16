@@ -6,6 +6,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/runner ./cmd/runner
 
 FROM alpine:3.19
+LABEL org.opencontainers.image.source=https://github.com/Never-Stop-Exploiting/NeSE-Infra
 WORKDIR /app
 COPY --from=builder /out/runner /usr/local/bin/runner
 ENV APP_NAME=runner \

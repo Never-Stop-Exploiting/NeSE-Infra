@@ -32,6 +32,7 @@ export const useChallengeStore = defineStore("challenges", () => {
     category?: string;
     serviceType?: string;
     description?: string;
+    flagRegex?: string;
     metadata?: Record<string, unknown>;
   }): Promise<Challenge> {
     const challenge = await apiCreateChallenge(payload);
@@ -46,6 +47,7 @@ export const useChallengeStore = defineStore("challenges", () => {
       category?: string;
       serviceType?: string;
       description?: string;
+      flagRegex?: string;
       metadata?: Record<string, unknown>;
     }
   ): Promise<Challenge> {

@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"awdinfra/internal/domain"
 )
 
 // Config captures runtime configuration consumed by services.
@@ -192,7 +194,7 @@ func loadRunner() RunnerConfig {
 		ChrootPath:            getenv("RUNNER_CHROOT_PATH", "/env"),
 		WorkspaceRoot:         workspaceRoot,
 		FlagFileName:          getenv("RUNNER_FLAG_FILE", "flag"),
-		DefaultFlagRegex:      getenv("RUNNER_FLAG_REGEX", `flag\{[a-zA-Z0-9_\-]+\}`),
+		DefaultFlagRegex:      getenv("RUNNER_FLAG_REGEX", domain.DefaultFlagRegex),
 		DefaultTimeout:        getenvDuration("RUNNER_DEFAULT_TIMEOUT", time.Second*120),
 		Tags:                  splitAndTrim(getenv("RUNNER_TAGS", "")),
 		ArtifactCacheTTL:      getenvDuration("RUNNER_ARTIFACT_CACHE_TTL", time.Minute*30),

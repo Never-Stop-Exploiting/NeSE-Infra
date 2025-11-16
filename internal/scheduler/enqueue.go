@@ -19,6 +19,7 @@ func EnqueueRun(ctx context.Context, cfg config.Config, broker queue.Broker, ite
 		return fmt.Errorf("empty artifact for run %s", item.RunID)
 	}
 
+	flagRegex := domain.ResolveFlagRegex(item.FlagRegex, cfg.Runner.DefaultFlagRegex)
 	payload := jobs.JobPayload{
 		RunID:       item.RunID,
 		ExploitID:   item.Exploit.ID,
@@ -26,7 +27,7 @@ func EnqueueRun(ctx context.Context, cfg config.Config, broker queue.Broker, ite
 		TargetID:    item.Target.ID,
 		TargetIP:    item.Target.IP,
 		TargetPort:  item.Target.Port,
-		FlagRegex:   item.FlagRegex,
+		FlagRegex:   flagRegex,
 		FlagFile:    item.FlagFile,
 		CreatedAt:   time.Now().UTC(),
 	}
