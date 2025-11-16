@@ -259,7 +259,7 @@ onMounted(() => {
 .grid {
   display: grid;
   gap: 1.5rem;
-  grid-template-columns: minmax(320px, 420px) minmax(0, 1fr);
+  grid-template-columns: minmax(360px, 520px) minmax(0, 1fr);
   align-items: start;
 }
 
@@ -342,6 +342,10 @@ onMounted(() => {
   .form-grid .span-2 {
     grid-column: 1 / -1;
   }
+}
+
+.form-grid .span-2 {
+  grid-column: span 2;
 }
 
 .form button {
