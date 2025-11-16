@@ -26,7 +26,7 @@ services:
       dockerfile: ./test_env/exp/Dockerfile
     container_name: runner-exp
     env_file:
-      - .env.runner
+      - .env.runner.tmp
     environment:
       RUNNER_ID: requests-exp
       RUNNER_MAX_PARALLEL: 30
@@ -37,7 +37,7 @@ services:
   #     dockerfile: ./test_env/exp/Dockerfile
   #   container_name: runner-exp2
   #   env_file:
-  #     - .env.runner
+  #     - .env.runner.tmp
   #   environment:
   #     RUNNER_ID: requests-exp2
   #     RUNNER_ARTIFACT_CACHE_TTL: 3s
@@ -47,7 +47,7 @@ services:
       dockerfile: ./test_env/exp/Dockerfile.pwntools
     container_name: runner-pwntools-exp
     env_file:
-      - .env.runner
+      - .env.runner.tmp
     environment:
       RUNNER_ID: pwntools-exp
       RUNNER_MAX_PARALLEL: 30
@@ -60,7 +60,7 @@ services:
       dockerfile: ./test_env/submitter/Dockerfile
     container_name: flag-submitter
     env_file:
-      - .env.submitter
+      - .env.submitter.tmp
     environment:
       - SUBMITTER_ID=dev-submitter
   
@@ -70,6 +70,6 @@ services:
       dockerfile: ./test_env/submitter/Dockerfile
     container_name: flag-submitter2
     env_file:
-      - .env.submitter
+      - .env.submitter.tmp
     environment:
       - SUBMITTER_ID=dev-submitter2
