@@ -1026,7 +1026,9 @@ func (r *Repository) OverviewMatrix(ctx context.Context, start, end time.Time) (
 			accum[targetID] = acc
 		}
 
-		success := run.Status == domain.RunStatusSucceeded && hasFlag && flag.Status == domain.FlagStatusAccepted
+		success := run.Status == domain.RunStatusSucceeded &&
+			hasFlag &&
+			(flag.Status == domain.FlagStatusAccepted || flag.Status == domain.FlagStatusDuplicated)
 		if success {
 			acc.success[exploitName] = struct{}{}
 			continue
@@ -1037,7 +1039,9 @@ func (r *Repository) OverviewMatrix(ctx context.Context, start, end time.Time) (
 		case domain.RunStatusFailed, domain.RunStatusTimeout, domain.RunStatusCanceled:
 			failure = true
 		}
-		if hasFlag && flag.Status != domain.FlagStatusAccepted {
+		if hasFlag &&
+			flag.Status != domain.FlagStatusAccepted &&
+			flag.Status != domain.FlagStatusDuplicated {
 			failure = true
 		}
 		if run.Status == domain.RunStatusSucceeded && !hasFlag {
@@ -1785,6 +1789,17 @@ func matchesRunFilter(run domain.Run, filter domain.RunFilter, repo *Repository)
 			name = target.TeamName
 		}
 		if name == "" || !strings.Contains(strings.ToLower(name), strings.ToLower(value)) {
+			return false
+		}
+	}
+	referenceTime := runReferenceTime(run)
+	if !filter.QueuedAfter.IsZero() {
+		if referenceTime.IsZero() || referenceTime.Before(filter.QueuedAfter) {
+			return false
+		}
+	}
+	if !filter.QueuedBefore.IsZero() {
+		if referenceTime.IsZero() || referenceTime.After(filter.QueuedBefore) {
 			return false
 		}
 	}

@@ -10,6 +10,8 @@ export interface RunQueryParams {
   exploitName?: string;
   targetName?: string;
   challengeId?: string;
+  start?: string;
+  end?: string;
 }
 
 export interface BulkRunCancelResponse {
@@ -42,6 +44,12 @@ export async function fetchRuns(params?: RunQueryParams): Promise<{
   }
   if (params?.challengeId) {
     query.set("challengeId", params.challengeId);
+  }
+  if (params?.start) {
+    query.set("start", params.start);
+  }
+  if (params?.end) {
+    query.set("end", params.end);
   }
   const url = query.toString() ? `${base}?${query.toString()}` : base;
   return fallback(

@@ -57,7 +57,7 @@ services:
   flag-submitter:
     build:
       context: ..
-      dockerfile: ./test_env/submitter/Dockerfile.tmp_build
+      dockerfile: ./test_env/submitter/Dockerfile
     container_name: flag-submitter
     env_file:
       - .env.submitter
@@ -65,7 +65,7 @@ services:
   flag-submitter2:
     build:
       context: ..
-      dockerfile: ./test_env/submitter/Dockerfile.tmp_build
+      dockerfile: ./test_env/submitter/Dockerfile
     container_name: flag-submitter2
     env_file:
       - .env.submitter

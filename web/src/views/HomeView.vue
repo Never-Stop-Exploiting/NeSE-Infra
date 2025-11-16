@@ -2,7 +2,7 @@
   <section class="dashboard">
     <div class="header">
       <h2>Platform Snapshot</h2>
-      <button class="refresh" @click="refreshAll" :disabled="busy">
+      <button type="button" class="refresh" @click="refreshAll" :disabled="busy">
         {{ busy ? "Refreshing..." : "Refresh" }}
       </button>
     </div>
@@ -61,9 +61,15 @@
               </option>
             </select>
           </label>
-          <button class="control" @click="shiftMatrix(-1)" :disabled="matrixLoading">←</button>
-          <button class="control" @click="shiftMatrix(1)" :disabled="matrixLoading">→</button>
-          <button class="control" @click="setMatrixNow" :disabled="matrixLoading">Now</button>
+          <label class="time-toggle">
+            <input type="checkbox" v-model="matrixTimeFilterEnabled" />
+            <span>Link Runs to time range</span>
+          </label>
+          <button type="button" class="control" @click="shiftMatrix(-1)" :disabled="matrixLoading">
+            ←
+          </button>
+          <button type="button" class="control" @click="shiftMatrix(1)" :disabled="matrixLoading">→</button>
+          <button type="button" class="control" @click="setMatrixNow" :disabled="matrixLoading">Now</button>
         </div>
       </div>
 
@@ -76,7 +82,12 @@
           <span>End</span>
           <input type="datetime-local" v-model="customEnd" />
         </div>
-        <button class="control primary" @click="applyCustomWindow" :disabled="matrixLoading">
+        <button
+          type="button"
+          class="control primary"
+          @click="applyCustomWindow"
+          :disabled="matrixLoading"
+        >
           Apply Window
         </button>
       </div>
@@ -160,20 +171,37 @@ const matrixLoading = ref(false);
 const matrixError = ref<string | null>(null);
 const matrixRangeOptions = [5, 15, 30, 60];
 
-const rangeMinutes = ref(15);
+const storedRange =
+  typeof window !== "undefined" ? Number.parseInt(localStorage.getItem("overviewRange") ?? "", 10) : NaN;
+const initialRange = Number.isFinite(storedRange) && storedRange > 0 ? storedRange : 15;
+const storedLink =
+  typeof window !== "undefined" ? localStorage.getItem("overviewRangeLink") === "1" : false;
+
+const rangeMinutes = ref(initialRange);
 const endTime = ref(new Date());
 const startTime = ref(new Date(endTime.value.getTime() - rangeMinutes.value * 60 * 1000));
 const customStart = ref("");
 const customEnd = ref("");
 const matrixInputError = ref<string | null>(null);
+const matrixTimeFilterEnabled = ref(storedLink);
 
 watch(rangeMinutes, (minutes, previous) => {
   if (previous === undefined) {
     return;
   }
+  if (typeof window !== "undefined") {
+    localStorage.setItem("overviewRange", String(minutes));
+  }
   const delta = minutes * 60 * 1000;
   startTime.value = new Date(endTime.value.getTime() - delta);
   loadMatrix();
+});
+
+watch(matrixTimeFilterEnabled, (value) => {
+  if (typeof window === "undefined") {
+    return;
+  }
+  localStorage.setItem("overviewRangeLink", value ? "1" : "0");
 });
 
 watch(
@@ -277,7 +305,12 @@ function tooltipLabel(cell: OverviewMatrixCell): string {
 }
 
 function goToRunsWithFilters(filters: RunFilters) {
-  runStore.primeFilters(filters);
+  const nextFilters: RunFilters = { ...filters };
+  if (matrixTimeFilterEnabled.value) {
+    nextFilters.start = startTime.value.toISOString();
+    nextFilters.end = endTime.value.toISOString();
+  }
+  runStore.primeFilters(nextFilters);
   router.push({ name: "runs" });
 }
 
@@ -529,6 +562,19 @@ article li div {
   align-items: center;
   gap: 0.25rem;
   font-size: 0.85rem;
+}
+
+.matrix-controls .time-toggle {
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  border-radius: 999px;
+  padding: 0.2rem 0.6rem;
+  font-size: 0.8rem;
+  color: #e2e8f0;
+}
+
+.matrix-controls .time-toggle input {
+  margin: 0;
 }
 
 .matrix-controls select {

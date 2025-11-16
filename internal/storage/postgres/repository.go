@@ -2016,7 +2016,8 @@ func (r *Repository) OverviewMatrix(ctx context.Context, start, end time.Time) (
 			accum[targetID] = acc
 		}
 
-		if runStatus == string(domain.RunStatusSucceeded) && flagStatus == string(domain.FlagStatusAccepted) {
+		if runStatus == string(domain.RunStatusSucceeded) &&
+			(flagStatus == string(domain.FlagStatusAccepted) || flagStatus == string(domain.FlagStatusDuplicated)) {
 			acc.success[exploitName] = struct{}{}
 			continue
 		}
@@ -2026,7 +2027,9 @@ func (r *Repository) OverviewMatrix(ctx context.Context, start, end time.Time) (
 		case string(domain.RunStatusFailed), string(domain.RunStatusTimeout), string(domain.RunStatusCanceled):
 			failure = true
 		}
-		if flagStatus != "" && flagStatus != string(domain.FlagStatusAccepted) {
+		if flagStatus != "" &&
+			flagStatus != string(domain.FlagStatusAccepted) &&
+			flagStatus != string(domain.FlagStatusDuplicated) {
 			failure = true
 		}
 		if runStatus == string(domain.RunStatusSucceeded) && flagStatus == "" {
@@ -2191,8 +2194,8 @@ func (r *Repository) AddFlagAttempt(ctx context.Context, flagID string, attempt 
 const runOrderingExpression = "COALESCE(queued_at, started_at, finished_at, TIMESTAMP '1970-01-01')"
 
 func buildRunFilterClause(filter domain.RunFilter, startIdx int) (string, []any) {
-	clauses := make([]string, 0, 6)
-	args := make([]any, 0, 6)
+	clauses := make([]string, 0, 8)
+	args := make([]any, 0, 8)
 
 	addEquality := func(value string, column string) {
 		value = strings.TrimSpace(value)
@@ -2230,6 +2233,16 @@ func buildRunFilterClause(filter domain.RunFilter, startIdx int) (string, []any)
 	addClause(filter.ChallengeID, "runs.target_id IN (SELECT id FROM targets WHERE challenge_id = $%d)")
 	addLike(filter.ExploitName, "runs.exploit_id IN (SELECT id FROM exploits WHERE LOWER(name) LIKE $%d)")
 	addLike(filter.TargetName, "runs.target_id IN (SELECT id FROM targets WHERE LOWER(team_name) LIKE $%d)")
+	if !filter.QueuedAfter.IsZero() {
+		position := startIdx + len(args)
+		clauses = append(clauses, fmt.Sprintf("(%s) >= $%d", runOrderingExpression, position))
+		args = append(args, filter.QueuedAfter.UTC())
+	}
+	if !filter.QueuedBefore.IsZero() {
+		position := startIdx + len(args)
+		clauses = append(clauses, fmt.Sprintf("(%s) <= $%d", runOrderingExpression, position))
+		args = append(args, filter.QueuedBefore.UTC())
+	}
 
 	if len(clauses) == 0 {
 		return "", nil

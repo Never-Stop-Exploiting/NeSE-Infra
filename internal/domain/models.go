@@ -123,12 +123,14 @@ type Run struct {
 
 // RunFilter captures query parameters for run listing.
 type RunFilter struct {
-	Status      string
-	ExploitID   string
-	TargetID    string
-	ChallengeID string
-	ExploitName string
-	TargetName  string
+	Status       string
+	ExploitID    string
+	TargetID     string
+	ChallengeID  string
+	ExploitName  string
+	TargetName   string
+	QueuedAfter  time.Time
+	QueuedBefore time.Time
 }
 
 // RunWorkItem aggregates the ready-to-dispatch exploit, target, and packaged artifact bytes.

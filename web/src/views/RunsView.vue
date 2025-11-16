@@ -39,6 +39,14 @@
             <label>Target</label>
             <input v-model.trim="filterDraft.targetName" type="text" placeholder="Target or team" />
           </div>
+          <div class="filter-group time-range">
+            <label>Time Range</label>
+            <div class="range-inputs">
+              <input type="datetime-local" v-model="startInput" aria-label="Start time" />
+              <span class="range-separator">→</span>
+              <input type="datetime-local" v-model="endInput" aria-label="End time" />
+            </div>
+          </div>
           <div class="filter-actions">
             <button type="submit" class="ghost" :disabled="!filterDirty">Apply</button>
             <button
@@ -268,6 +276,20 @@ const bulkError = ref<string | null>(null);
 const selectedRuns = ref<Set<string>>(new Set());
 const statusOptions = ["pending", "running", "succeeded", "failed", "timeout", "canceled"];
 const filterDraft = ref<RunFilters>(cloneFilters(runStore.filters as RunFilters));
+const startInput = computed({
+  get: () => formatDateTimeLocal(filterDraft.value.start),
+  set: (value: string) => {
+    const parsed = parseDateTimeLocal(value);
+    filterDraft.value.start = parsed ?? "";
+  }
+});
+const endInput = computed({
+  get: () => formatDateTimeLocal(filterDraft.value.end),
+  set: (value: string) => {
+    const parsed = parseDateTimeLocal(value);
+    filterDraft.value.end = parsed ?? "";
+  }
+});
 
 const flagPanelOpen = ref(false);
 const flagDetail = ref<FlagRecord | null>(null);
@@ -313,7 +335,14 @@ const flagAttempts = computed(() => flagDetail.value?.attempts ?? []);
 
 const hasActiveFilters = computed(() => {
   const value = runStore.filters as RunFilters;
-  return Boolean(value.status || value.exploitName || value.targetName || value.challengeId);
+  return Boolean(
+    value.status ||
+      value.exploitName ||
+      value.targetName ||
+      value.challengeId ||
+      value.start ||
+      value.end
+  );
 });
 
 const filterDirty = computed(
@@ -394,7 +423,14 @@ async function applyFilters() {
 }
 
 async function resetFilters() {
-  filterDraft.value = { status: "", exploitName: "", targetName: "", challengeId: "" };
+  filterDraft.value = {
+    status: "",
+    exploitName: "",
+    targetName: "",
+    challengeId: "",
+    start: "",
+    end: ""
+  };
   await runStore.setFilters({});
   selectedRuns.value = new Set();
 }
@@ -500,7 +536,9 @@ function cloneFilters(source?: RunFilters): RunFilters {
     status: source?.status ?? "",
     exploitName: source?.exploitName ?? "",
     targetName: source?.targetName ?? "",
-    challengeId: source?.challengeId ?? ""
+    challengeId: source?.challengeId ?? "",
+    start: source?.start ?? "",
+    end: source?.end ?? ""
   };
 }
 
@@ -518,6 +556,12 @@ function normalizeFilter(source: RunFilters): RunFilters {
   if (source.challengeId?.trim()) {
     target.challengeId = source.challengeId.trim();
   }
+  if (source.start?.trim()) {
+    target.start = source.start.trim();
+  }
+  if (source.end?.trim()) {
+    target.end = source.end.trim();
+  }
   return target;
 }
 
@@ -528,8 +572,35 @@ function filtersEqual(a: RunFilters, b: RunFilters) {
     (left.status ?? "") === (right.status ?? "") &&
     (left.exploitName ?? "") === (right.exploitName ?? "") &&
     (left.targetName ?? "") === (right.targetName ?? "") &&
-    (left.challengeId ?? "") === (right.challengeId ?? "")
+    (left.challengeId ?? "") === (right.challengeId ?? "") &&
+    (left.start ?? "") === (right.start ?? "") &&
+    (left.end ?? "") === (right.end ?? "")
   );
+}
+
+function formatDateTimeLocal(value?: string): string {
+  if (!value?.length) {
+    return "";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  const pad = (input: number) => input.toString().padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(
+    date.getHours()
+  )}:${pad(date.getMinutes())}`;
+}
+
+function parseDateTimeLocal(value?: string): string | undefined {
+  if (!value || !value.length) {
+    return undefined;
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return undefined;
+  }
+  return parsed.toISOString();
 }
 
 onMounted(() => {
@@ -591,6 +662,21 @@ onMounted(() => {
   padding: 0.4rem 0.6rem;
   color: #e2e8f0;
   min-width: 140px;
+}
+
+.time-range .range-inputs {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.time-range input {
+  min-width: 180px;
+}
+
+.range-separator {
+  color: #94a3b8;
+  font-size: 0.8rem;
 }
 
 .filter-actions {

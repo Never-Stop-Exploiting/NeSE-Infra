@@ -14,6 +14,8 @@ export interface RunFilters {
   exploitName?: string;
   targetName?: string;
   challengeId?: string;
+  start?: string;
+  end?: string;
 }
 
 export const useRunStore = defineStore("runs", () => {
@@ -47,6 +49,12 @@ export const useRunStore = defineStore("runs", () => {
     }
     if (filters.value.challengeId) {
       params.challengeId = filters.value.challengeId;
+    }
+    if (filters.value.start) {
+      params.start = filters.value.start;
+    }
+    if (filters.value.end) {
+      params.end = filters.value.end;
     }
     return params;
   }
@@ -162,6 +170,12 @@ export const useRunStore = defineStore("runs", () => {
     }
     if (input.challengeId?.trim()) {
       result.challengeId = input.challengeId.trim();
+    }
+    if (input.start?.trim()) {
+      result.start = input.start.trim();
+    }
+    if (input.end?.trim()) {
+      result.end = input.end.trim();
     }
     return result;
   }

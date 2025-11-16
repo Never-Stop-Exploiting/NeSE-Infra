@@ -1441,6 +1441,16 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 		ExploitName: strings.TrimSpace(query.Get("exploitName")),
 		TargetName:  strings.TrimSpace(query.Get("targetName")),
 	}
+	if raw := strings.TrimSpace(query.Get("start")); raw != "" {
+		if value, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+			filter.QueuedAfter = value
+		}
+	}
+	if raw := strings.TrimSpace(query.Get("end")); raw != "" {
+		if value, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+			filter.QueuedBefore = value
+		}
+	}
 	runs, nextCursor, err := s.repository.ListRuns(r.Context(), filter, limit, cursor)
 	if err != nil {
 		s.logger.Error("list runs failed", slog.Any("err", err))
