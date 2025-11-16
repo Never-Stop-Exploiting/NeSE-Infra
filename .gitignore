@@ -38,3 +38,4 @@ tmp/
 .gocache/
 **/__pycache__/
 .env
+**/*.tmp
