@@ -4,6 +4,8 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -451,6 +453,9 @@ func (a *Agent) registerSelf(ctx context.Context) error {
 
 func (a *Agent) resolveArtifact(ctx context.Context, payload jobs.JobPayload) (artifactPayload, error) {
 	if data, err := payload.ArtifactBytes(); err == nil {
+		if err := verifyArtifactBytesMD5(payload.ArtifactMD5, data); err != nil {
+			return artifactPayload{}, err
+		}
 		return artifactPayload{inline: data}, nil
 	} else if payload.ArtifactURI == "" {
 		return artifactPayload{}, err
@@ -459,13 +464,22 @@ func (a *Agent) resolveArtifact(ctx context.Context, payload jobs.JobPayload) (a
 		if cached, ok := a.artifactCache.get(payload.ArtifactMD5); ok {
 			file, err := os.Open(cached.path)
 			if err == nil {
-				return artifactPayload{file: file, size: cached.size}, nil
+				if err := verifyArtifactFileMD5(payload.ArtifactMD5, file); err == nil {
+					return artifactPayload{file: file, size: cached.size}, nil
+				}
+				a.log.Warn("artifact cache md5 mismatch",
+					slog.String("run_id", payload.RunID),
+					slog.String("artifact_md5", payload.ArtifactMD5),
+					slog.Any("err", err))
+				file.Close()
+				a.artifactCache.remove(payload.ArtifactMD5)
+			} else {
+				a.log.Warn("artifact cache file open failed",
+					slog.String("run_id", payload.RunID),
+					slog.String("artifact_md5", payload.ArtifactMD5),
+					slog.Any("err", err))
+				a.artifactCache.remove(payload.ArtifactMD5)
 			}
-			a.log.Warn("artifact cache file open failed",
-				slog.String("run_id", payload.RunID),
-				slog.String("artifact_md5", payload.ArtifactMD5),
-				slog.Any("err", err))
-			a.artifactCache.remove(payload.ArtifactMD5)
 		}
 	}
 	if a.controlClient == nil {
@@ -473,9 +487,16 @@ func (a *Agent) resolveArtifact(ctx context.Context, payload jobs.JobPayload) (a
 	}
 	downloadCtx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
+	a.log.Info("downloading artifact",
+		slog.String("run_id", payload.RunID),
+		slog.String("exploit_id", payload.ExploitID),
+		slog.String("artifact_uri", payload.ArtifactURI))
 	data, err := a.controlClient.DownloadArtifact(downloadCtx, payload.ArtifactURI)
 	if err != nil {
 		return artifactPayload{}, fmt.Errorf("download artifact: %w", err)
+	}
+	if err := verifyArtifactBytesMD5(payload.ArtifactMD5, data); err != nil {
+		return artifactPayload{}, err
 	}
 	if payload.ArtifactMD5 != "" && a.artifactCache != nil {
 		if cached, cacheErr := a.artifactCache.store(payload.ArtifactMD5, data); cacheErr == nil {
@@ -935,6 +956,48 @@ func (c *artifactCache) evictExpiredLocked() {
 			os.Remove(entry.path)
 		}
 	}
+}
+
+func verifyArtifactBytesMD5(expected string, data []byte) error {
+	expected = normalizeMD5(expected)
+	if expected == "" {
+		return nil
+	}
+	sum := md5.Sum(data)
+	actual := hex.EncodeToString(sum[:])
+	if actual != expected {
+		return fmt.Errorf("artifact md5 mismatch: expected %s, got %s", expected, actual)
+	}
+	return nil
+}
+
+func verifyArtifactFileMD5(expected string, file *os.File) error {
+	expected = normalizeMD5(expected)
+	if expected == "" || file == nil {
+		return nil
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("seek artifact file: %w", err)
+	}
+	hash := md5.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return fmt.Errorf("hash artifact file: %w", err)
+	}
+	actual := hex.EncodeToString(hash.Sum(nil))
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("rewind artifact file: %w", err)
+	}
+	if actual != expected {
+		return fmt.Errorf("artifact md5 mismatch: expected %s, got %s", expected, actual)
+	}
+	return nil
+}
+
+func normalizeMD5(value string) string {
+	if value == "" {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(value))
 }
 
 func (a *Agent) prepareWorkspace(runID string, artifact artifactPayload) (string, string, error) {

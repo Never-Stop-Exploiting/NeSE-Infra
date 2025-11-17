@@ -805,6 +805,10 @@ func (s *Server) handleExploitActions(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
+		s.logger.Info("artifact download requested",
+			slog.String("exploit_id", id),
+			slog.String("remote_addr", r.RemoteAddr),
+			slog.String("user_agent", r.UserAgent()))
 		data, err := s.repository.LatestExploitArtifact(r.Context(), id)
 		if err != nil {
 			writeError(w, http.StatusNotFound, "artifact not found")
