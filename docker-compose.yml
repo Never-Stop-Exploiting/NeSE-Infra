@@ -6,6 +6,8 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-awd}
       POSTGRES_USER: ${POSTGRES_USER:-awd}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-awd}
+    ports:
+      - "5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
 
@@ -47,6 +49,7 @@ services:
       APP_NAME: ${APP_NAME:-awd-infra}
       LOG_LEVEL: ${LOG_LEVEL:-debug}
       POSTGRES_DSN: ${POSTGRES_DSN:-postgres://awd:awd@postgres:5432/awd?sslmode=disable}
+      POSTGRES_ARTIFACT_DIR: ${POSTGRES_ARTIFACT_DIR:-/var/lib/awd/artifacts}
       REDIS_ADDR: ${REDIS_ADDR:-redis:6379}
       REDIS_PASSWORD: ${REDIS_PASSWORD:-dev-redis-password}
       CONTROL_PANEL_TOKEN: ${CONTROL_PANEL_TOKEN:-dev-admin-token}

@@ -39,3 +39,6 @@ tmp/
 **/__pycache__/
 .env
 **/*.tmp
+**/*.so.6
+test_env/exp/expe.py
+test_env/exp/exph.py

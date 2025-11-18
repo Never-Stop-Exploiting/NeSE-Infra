@@ -1,7 +1,7 @@
 from api_wraps import ControlPanelAPI
 import os
 
-os.environ["CONTROL_PANEL_TOKEN"] = "dev-admin-token"
+os.environ["CONTROL_PANEL_TOKEN"] = "adminadmin"
 
 cp = ControlPanelAPI()
 
@@ -42,11 +42,13 @@ teams = [
 
 ch1 = cp.create_challenge(name="easyweb", category="web")
 ch2 = cp.create_challenge(name="happyrequest", category="web")
-ch3 = cp.create_challenge(name="easypwn", category="pwn")
+ch3 = cp.create_challenge(name="easyheap", category="pwn")
+ch4 = cp.create_challenge(name="happyheap", category="pwn")
 
 for team in teams:
     cp.create_target(challenge_id=ch1["id"], team_name=team, ip="192.168.66.206", port=5001, concurrency_limit=10)
     cp.create_target(challenge_id=ch2["id"], team_name=team, ip="192.168.66.206", port=5001, concurrency_limit=10)
-    cp.create_target(challenge_id=ch3["id"], team_name=team, ip="192.168.66.206", port=49999, concurrency_limit=10)
+    cp.create_target(challenge_id=ch3["id"], team_name=team, ip="192.168.66.206", port=49992, concurrency_limit=10)
+    cp.create_target(challenge_id=ch4["id"], team_name=team, ip="192.168.66.206", port=49991, concurrency_limit=10)
 
 print("Targets created successfully.")
