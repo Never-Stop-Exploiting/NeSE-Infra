@@ -243,17 +243,24 @@ const matrixRows = computed(() => {
           challengeId: challenge.id,
           teamName: team.name,
           status: "none",
+          warningExploits: [],
           successExploits: [],
           failedExploits: []
         } as OverviewMatrixCell);
       const status: OverviewMatrixStatus =
-        baseCell.successExploits && baseCell.successExploits.length
-          ? "success"
-          : baseCell.failedExploits && baseCell.failedExploits.length
-            ? "failed"
-            : "none";
+        baseCell.status ??
+        (baseCell.warningExploits && baseCell.warningExploits.length
+          ? "warning"
+          : baseCell.successExploits && baseCell.successExploits.length
+            ? "success"
+            : baseCell.failedExploits && baseCell.failedExploits.length
+              ? "failed"
+              : "none");
       return {
         ...baseCell,
+        warningExploits: baseCell.warningExploits ?? [],
+        successExploits: baseCell.successExploits ?? [],
+        failedExploits: baseCell.failedExploits ?? [],
         status
       };
     });
@@ -285,6 +292,9 @@ function parseInputDate(value: string): Date | null {
 }
 
 function tooltipItems(cell: OverviewMatrixCell): string[] {
+  if (cell.warningExploits?.length) {
+    return cell.warningExploits;
+  }
   if (cell.successExploits?.length) {
     return cell.successExploits;
   }
@@ -295,6 +305,9 @@ function tooltipItems(cell: OverviewMatrixCell): string[] {
 }
 
 function tooltipLabel(cell: OverviewMatrixCell): string {
+  if (cell.warningExploits?.length) {
+    return "Warning EXP";
+  }
   if (cell.successExploits?.length) {
     return "Successful EXP";
   }
@@ -700,6 +713,11 @@ article li div {
 .status-cell[data-status="success"] {
   background: rgba(34, 197, 94, 0.85);
   color: #052e16;
+}
+
+.status-cell[data-status="warning"] {
+  background: rgba(251, 191, 36, 0.9);
+  color: #4b3200;
 }
 
 .status-cell[data-status="failed"] {

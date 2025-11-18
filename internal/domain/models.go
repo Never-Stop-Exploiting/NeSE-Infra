@@ -152,6 +152,7 @@ const (
 	RunStatusPending   RunStatus = "pending"
 	RunStatusRunning   RunStatus = "running"
 	RunStatusSucceeded RunStatus = "succeeded"
+	RunStatusWarning   RunStatus = "warning"
 	RunStatusFailed    RunStatus = "failed"
 	RunStatusTimeout   RunStatus = "timeout"
 	RunStatusCanceled  RunStatus = "canceled"
@@ -197,6 +198,7 @@ type DashboardStats struct {
 type OverviewMatrixStatus string
 
 const (
+	OverviewMatrixStatusWarning OverviewMatrixStatus = "warning"
 	OverviewMatrixStatusSuccess OverviewMatrixStatus = "success"
 	OverviewMatrixStatusFailed  OverviewMatrixStatus = "failed"
 	OverviewMatrixStatusNone    OverviewMatrixStatus = "none"
@@ -219,6 +221,7 @@ type OverviewMatrixCell struct {
 	TeamName        string               `json:"teamName"`
 	TargetID        string               `json:"targetId,omitempty"`
 	Status          OverviewMatrixStatus `json:"status"`
+	WarningExploits []string             `json:"warningExploits,omitempty"`
 	SuccessExploits []string             `json:"successExploits,omitempty"`
 	FailedExploits  []string             `json:"failedExploits,omitempty"`
 }

@@ -20,6 +20,13 @@ r = requests.get(f"http://{HOST}:{PORT}/flag?flag={random.choice(flags)}")
 print(r.status_code, flush=True)
 flag = r.json().get("flag")
 
+if random.randint(0, 10) == 1:
+    if random.randint(0, 1) == 0:
+        print("NeSE_WARNING: something went wrong! stderr", file=sys.stderr)
+    else:
+        print("NeSE_WARNING: something went wrong! stdout", flush=True)
+
+
 if random.randint(0, 1) == 0:
     print(r.text, flush=True)
 else:

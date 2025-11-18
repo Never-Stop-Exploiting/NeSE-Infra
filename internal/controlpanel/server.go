@@ -1641,6 +1641,8 @@ func (s *Server) handleRunFinish(w http.ResponseWriter, r *http.Request, runID s
 	switch statusValue {
 	case "succeeded", "success":
 		status = domain.RunStatusSucceeded
+	case "warning":
+		status = domain.RunStatusWarning
 	case "failed", "failure":
 		status = domain.RunStatusFailed
 	case "timeout":

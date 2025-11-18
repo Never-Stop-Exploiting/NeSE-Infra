@@ -1998,6 +1998,7 @@ func (r *Repository) OverviewMatrix(ctx context.Context, start, end time.Time) (
 	}
 
 	type cellAccumulator struct {
+		warning map[string]struct{}
 		success map[string]struct{}
 		failed  map[string]struct{}
 	}
@@ -2045,15 +2046,21 @@ func (r *Repository) OverviewMatrix(ctx context.Context, start, end time.Time) (
 		acc := accum[targetID]
 		if acc == nil {
 			acc = &cellAccumulator{
+				warning: make(map[string]struct{}),
 				success: make(map[string]struct{}),
 				failed:  make(map[string]struct{}),
 			}
 			accum[targetID] = acc
 		}
 
-		if runStatus == string(domain.RunStatusSucceeded) &&
+		successAllowed := runStatus == string(domain.RunStatusSucceeded) || runStatus == string(domain.RunStatusWarning)
+		if successAllowed &&
 			(flagStatus == string(domain.FlagStatusAccepted) || flagStatus == string(domain.FlagStatusDuplicated)) {
-			acc.success[exploitName] = struct{}{}
+			if runStatus == string(domain.RunStatusWarning) {
+				acc.warning[exploitName] = struct{}{}
+			} else {
+				acc.success[exploitName] = struct{}{}
+			}
 			continue
 		}
 
@@ -2067,7 +2074,7 @@ func (r *Repository) OverviewMatrix(ctx context.Context, start, end time.Time) (
 			flagStatus != string(domain.FlagStatusDuplicated) {
 			failure = true
 		}
-		if runStatus == string(domain.RunStatusSucceeded) && flagStatus == "" {
+		if successAllowed && flagStatus == "" {
 			failure = true
 		}
 
@@ -2095,10 +2102,14 @@ func (r *Repository) OverviewMatrix(ctx context.Context, start, end time.Time) (
 			}
 			if targetID != "" {
 				if acc := accum[targetID]; acc != nil {
-					if len(acc.success) > 0 {
+					switch {
+					case len(acc.warning) > 0:
+						cell.Status = domain.OverviewMatrixStatusWarning
+						cell.WarningExploits = toSortedSlice(acc.warning)
+					case len(acc.success) > 0:
 						cell.Status = domain.OverviewMatrixStatusSuccess
 						cell.SuccessExploits = toSortedSlice(acc.success)
-					} else if len(acc.failed) > 0 {
+					case len(acc.failed) > 0:
 						cell.Status = domain.OverviewMatrixStatusFailed
 						cell.FailedExploits = toSortedSlice(acc.failed)
 					}

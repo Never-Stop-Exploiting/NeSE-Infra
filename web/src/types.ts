@@ -59,7 +59,7 @@ export interface RunSummary {
   targetId: string;
   targetLabel?: string;
   runnerId?: string;
-  status: "pending" | "running" | "succeeded" | "failed" | "timeout" | "canceled";
+  status: "pending" | "running" | "succeeded" | "warning" | "failed" | "timeout" | "canceled";
   queuedAt: string;
   startedAt?: string;
   finishedAt?: string;
@@ -99,7 +99,7 @@ export interface OverviewStats {
   flagStatuses: Record<string, number>;
 }
 
-export type OverviewMatrixStatus = "success" | "failed" | "none";
+export type OverviewMatrixStatus = "warning" | "success" | "failed" | "none";
 
 export interface OverviewMatrixChallenge {
   id: string;
@@ -115,6 +115,7 @@ export interface OverviewMatrixCell {
   teamName: string;
   targetId?: string;
   status: OverviewMatrixStatus;
+  warningExploits?: string[];
   successExploits?: string[];
   failedExploits?: string[];
 }

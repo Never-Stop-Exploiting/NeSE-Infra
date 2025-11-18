@@ -274,7 +274,7 @@ const detailRefreshing = ref(false);
 const bulkCanceling = ref(false);
 const bulkError = ref<string | null>(null);
 const selectedRuns = ref<Set<string>>(new Set());
-const statusOptions = ["pending", "running", "succeeded", "failed", "timeout", "canceled"];
+const statusOptions = ["pending", "running", "succeeded", "warning", "failed", "timeout", "canceled"];
 const filterDraft = ref<RunFilters>(cloneFilters(runStore.filters as RunFilters));
 const startInput = computed({
   get: () => formatDateTimeLocal(filterDraft.value.start),
@@ -310,14 +310,13 @@ const cancelActionLabel = computed(() => {
 });
 
 const showCancelButton = computed(() => cancelActionLabel.value.length > 0);
-const showFlagDetail = computed(
-  () =>
-    !!(
-      runStore.selectedRun &&
-      runStore.selectedRun.flagValue &&
-      runStore.selectedRun.status === "succeeded"
-    )
-);
+const showFlagDetail = computed(() => {
+  const run = runStore.selectedRun;
+  if (!run || !run.flagValue) {
+    return false;
+  }
+  return run.status === "succeeded" || run.status === "warning";
+});
 const flagSourceLabel = computed(() => {
   const source =
     flagDetail.value?.flagSource?.toLowerCase() ??
@@ -749,6 +748,11 @@ tr.active {
 .status[data-status="succeeded"] {
   background: rgba(34, 197, 94, 0.2);
   color: #4ade80;
+}
+
+.status[data-status="warning"] {
+  background: rgba(251, 191, 36, 0.2);
+  color: #fbbf24;
 }
 
 .status[data-status="failed"],

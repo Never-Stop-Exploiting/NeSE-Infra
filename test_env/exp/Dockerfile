@@ -4,7 +4,7 @@ FROM python:3.12-slim AS base
 # Install any needed packages specified in requirements.txt
 RUN pip install --no-cache-dir requests
 
-FROM ghcr.io/never-stop-exploiting/runner:latest
+FROM ghcr.io/never-stop-exploiting/runner:dev
 
 COPY --from=base / /env
 # FROM golang:1.25 AS builder

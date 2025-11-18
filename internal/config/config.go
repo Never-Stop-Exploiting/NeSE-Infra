@@ -74,6 +74,7 @@ type RunnerConfig struct {
 	DefaultFlagRegex      string
 	DefaultTimeout        time.Duration
 	Tags                  []string
+	WarningPatterns       []string
 	ArtifactCacheTTL      time.Duration
 	ArtifactCacheDir      string
 	ArtifactCacheMaxBytes int64
@@ -197,6 +198,7 @@ func loadRunner() RunnerConfig {
 		DefaultFlagRegex:      getenv("RUNNER_FLAG_REGEX", domain.DefaultFlagRegex),
 		DefaultTimeout:        getenvDuration("RUNNER_DEFAULT_TIMEOUT", time.Second*120),
 		Tags:                  splitAndTrim(getenv("RUNNER_TAGS", "")),
+		WarningPatterns:       splitAndTrim(getenv("RUNNER_WARNING_PATTERNS", "NeSE_WARNING")),
 		ArtifactCacheTTL:      getenvDuration("RUNNER_ARTIFACT_CACHE_TTL", time.Minute*30),
 		ArtifactCacheDir:      cacheDir,
 		ArtifactCacheMaxBytes: getenvInt64("RUNNER_ARTIFACT_CACHE_MAX_BYTES", 2*1024*1024*1024),

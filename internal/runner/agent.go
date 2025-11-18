@@ -34,18 +34,19 @@ import (
 
 // Agent consumes run jobs and executes exploits in an isolated workspace.
 type Agent struct {
-	cfg           config.Config
-	log           *slog.Logger
-	broker        queue.Broker
-	controlClient *ControlPanelClient
-	hostname      string
-	activeJobs    atomic.Int32
-	lastHeartbeat time.Time
-	brokerStatus  string
-	baseLabels    map[string]string
-	runnerTagsSet map[string]struct{}
-	artifactCache *artifactCache
-	instanceMu    sync.RWMutex
+	cfg             config.Config
+	log             *slog.Logger
+	broker          queue.Broker
+	controlClient   *ControlPanelClient
+	hostname        string
+	activeJobs      atomic.Int32
+	lastHeartbeat   time.Time
+	brokerStatus    string
+	baseLabels      map[string]string
+	runnerTagsSet   map[string]struct{}
+	artifactCache   *artifactCache
+	instanceMu      sync.RWMutex
+	warningMatchers []*regexp.Regexp
 }
 
 var errJobDiscard = errors.New("runner job discarded")
@@ -64,15 +65,25 @@ func New(cfg config.Config, log *slog.Logger, broker queue.Broker, control *Cont
 		log.Warn("artifact cache disabled", slog.Any("err", err))
 		cache = nil
 	}
+	var warningMatchers []*regexp.Regexp
+	for _, pattern := range cfg.Runner.WarningPatterns {
+		re, compileErr := regexp.Compile(pattern)
+		if compileErr != nil {
+			log.Warn("ignore invalid warning pattern", slog.String("pattern", pattern), slog.Any("err", compileErr))
+			continue
+		}
+		warningMatchers = append(warningMatchers, re)
+	}
 	return &Agent{
-		cfg:           cfg,
-		log:           log,
-		broker:        broker,
-		controlClient: control,
-		brokerStatus:  brokerStatus,
-		baseLabels:    map[string]string{"broker": brokerStatus},
-		runnerTagsSet: tagSet,
-		artifactCache: cache,
+		cfg:             cfg,
+		log:             log,
+		broker:          broker,
+		controlClient:   control,
+		brokerStatus:    brokerStatus,
+		baseLabels:      map[string]string{"broker": brokerStatus},
+		runnerTagsSet:   tagSet,
+		artifactCache:   cache,
+		warningMatchers: warningMatchers,
 	}
 }
 
@@ -315,6 +326,21 @@ func (a *Agent) handleMessage(ctx context.Context, msg queue.Message) error {
 			errorMessage = flagErr.Error()
 		} else {
 			errorMessage = fmt.Sprintf("%s; %s", errorMessage, flagErr.Error())
+		}
+	}
+	warningReason := ""
+	if status == "succeeded" {
+		warningReason = a.detectWarning(stdout, stderr)
+		if warningReason != "" {
+			status = "warning"
+			if errorMessage == "" {
+				errorMessage = warningReason
+			} else {
+				errorMessage = fmt.Sprintf("%s; %s", errorMessage, warningReason)
+			}
+			a.log.Warn("warning pattern matched",
+				slog.String("run_id", runID),
+				slog.String("reason", warningReason))
 		}
 	}
 
@@ -649,6 +675,27 @@ func (a *Agent) fetchRunInfo(ctx context.Context, runID string) (RunInfo, error)
 	return a.controlClient.GetRun(requestCtx, runID)
 }
 
+func (a *Agent) detectWarning(stdout, stderr []byte) string {
+	if len(a.warningMatchers) == 0 {
+		return ""
+	}
+	if len(stdout) > 0 {
+		for _, matcher := range a.warningMatchers {
+			if matcher.Match(stdout) {
+				return fmt.Sprintf("stdout matched warning pattern %q", matcher.String())
+			}
+		}
+	}
+	if len(stderr) > 0 {
+		for _, matcher := range a.warningMatchers {
+			if matcher.Match(stderr) {
+				return fmt.Sprintf("stderr matched warning pattern %q", matcher.String())
+			}
+		}
+	}
+	return ""
+}
+
 func (a *Agent) trimOutputString(data []byte) string {
 	text := strings.TrimSpace(string(data))
 	if text == "" {
@@ -758,6 +805,9 @@ func (a *Agent) heartbeatConfig() map[string]string {
 	}
 	if queueName := a.runQueueName(); queueName != "" {
 		add("RUN_QUEUE_NAME", queueName)
+	}
+	if len(a.cfg.Runner.WarningPatterns) > 0 {
+		add("RUNNER_WARNING_PATTERNS", strings.Join(a.cfg.Runner.WarningPatterns, ","))
 	}
 	if len(cfg) == 0 {
 		return nil
