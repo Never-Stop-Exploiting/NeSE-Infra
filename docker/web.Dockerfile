@@ -8,6 +8,7 @@ COPY web/src ./web/src
 RUN corepack enable && corepack prepare pnpm@latest --activate && pnpm install --filter ./web && pnpm --filter ./web build
 
 FROM nginx:1.25-alpine
+LABEL org.opencontainers.image.source=https://github.com/Never-Stop-Exploiting/NeSE-Infra
 COPY --from=build /app/web/dist /usr/share/nginx/html
 COPY docker/web.nginx.conf /etc/nginx/conf.d/default.conf
 EXPOSE 80

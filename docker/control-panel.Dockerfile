@@ -6,6 +6,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/control-panel ./cmd/control-panel
 
 FROM alpine:3.19
+LABEL org.opencontainers.image.source=https://github.com/Never-Stop-Exploiting/NeSE-Infra
 WORKDIR /app
 COPY --from=builder /out/control-panel /usr/local/bin/control-panel
 ENV APP_NAME=control-panel

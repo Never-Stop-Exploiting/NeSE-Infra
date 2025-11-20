@@ -19,6 +19,7 @@ services:
       - "6379:6379"
 
   control-panel:
+    image: ghcr.io/never-stop-exploiting/control-panel:${VERSION:-dev}
     build:
       context: .
       dockerfile: docker/control-panel.Dockerfile
@@ -42,6 +43,7 @@ services:
       - "8080:8080"
 
   scheduler:
+    image: ghcr.io/never-stop-exploiting/scheduler:${VERSION:-dev}
     build:
       context: .
       dockerfile: docker/scheduler.Dockerfile
@@ -61,6 +63,7 @@ services:
       - control-panel
 
   dispatcher:
+    image: ghcr.io/never-stop-exploiting/dispatcher:${VERSION:-dev}
     build:
       context: .
       dockerfile: docker/dispatcher.Dockerfile
@@ -74,6 +77,7 @@ services:
     depends_on:
       - scheduler
   web:
+    image: ghcr.io/never-stop-exploiting/web:${VERSION:-dev}
     build:
       context: .
       dockerfile: docker/web.Dockerfile
