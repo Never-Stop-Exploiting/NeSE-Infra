@@ -1,7 +1,26 @@
 <template>
   <section class="dashboard">
     <div class="header">
-      <h2>Platform Snapshot</h2>
+      <div class="header-left">
+        <h2>Platform Snapshot</h2>
+        <div class="auto-refresh">
+          <label class="toggle">
+            <input type="checkbox" v-model="autoRefreshEnabled" />
+            <span>Auto refresh</span>
+          </label>
+          <label class="delay">
+            <span>Delay</span>
+            <input
+              type="number"
+              min="5"
+              step="5"
+              v-model.number="autoRefreshDelaySeconds"
+              :disabled="!autoRefreshEnabled"
+            />
+            <span class="suffix">s</span>
+          </label>
+        </div>
+      </div>
       <button type="button" class="refresh" @click="refreshAll" :disabled="busy">
         {{ busy ? "Refreshing..." : "Refresh" }}
       </button>
@@ -137,7 +156,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { fetchOverviewStats, fetchOverviewMatrix } from "@/api/overview";
 import type {
@@ -176,6 +195,18 @@ const storedRange =
 const initialRange = Number.isFinite(storedRange) && storedRange > 0 ? storedRange : 15;
 const storedLink =
   typeof window !== "undefined" ? localStorage.getItem("overviewRangeLink") === "1" : false;
+const storedAutoRefreshEnabled =
+  typeof window !== "undefined"
+    ? localStorage.getItem("overviewAutoRefreshEnabled") === "1"
+    : false;
+const storedAutoRefreshDelay =
+  typeof window !== "undefined"
+    ? Number.parseInt(localStorage.getItem("overviewAutoRefreshDelaySeconds") ?? "", 10)
+    : NaN;
+const initialAutoRefreshDelay =
+  Number.isFinite(storedAutoRefreshDelay) && storedAutoRefreshDelay >= 5
+    ? storedAutoRefreshDelay
+    : 30;
 
 const rangeMinutes = ref(initialRange);
 const endTime = ref(new Date());
@@ -184,6 +215,9 @@ const customStart = ref("");
 const customEnd = ref("");
 const matrixInputError = ref<string | null>(null);
 const matrixTimeFilterEnabled = ref(storedLink);
+const autoRefreshEnabled = ref(storedAutoRefreshEnabled);
+const autoRefreshDelaySeconds = ref(initialAutoRefreshDelay);
+let autoRefreshTimer: number | null = null;
 
 watch(rangeMinutes, (minutes, previous) => {
   if (previous === undefined) {
@@ -204,6 +238,27 @@ watch(matrixTimeFilterEnabled, (value) => {
   localStorage.setItem("overviewRangeLink", value ? "1" : "0");
 });
 
+watch(autoRefreshEnabled, (value) => {
+  if (typeof window !== "undefined") {
+    localStorage.setItem("overviewAutoRefreshEnabled", value ? "1" : "0");
+  }
+  configureAutoRefresh();
+});
+
+watch(autoRefreshDelaySeconds, (value, previous) => {
+  const fallback = Number.isFinite(previous) ? previous : 30;
+  const safeValue = Number.isFinite(value) ? value : fallback;
+  const clamped = Math.max(5, Math.round(safeValue));
+  if (clamped !== value) {
+    autoRefreshDelaySeconds.value = clamped;
+    return;
+  }
+  if (typeof window !== "undefined") {
+    localStorage.setItem("overviewAutoRefreshDelaySeconds", String(clamped));
+  }
+  configureAutoRefresh();
+});
+
 watch(
   () => [startTime.value.getTime(), endTime.value.getTime()],
   () => {
@@ -212,6 +267,26 @@ watch(
   },
   { immediate: true }
 );
+
+function configureAutoRefresh() {
+  clearAutoRefreshTimer();
+  if (!autoRefreshEnabled.value) {
+    return;
+  }
+  autoRefreshTimer = window.setInterval(() => {
+    if (busy.value) {
+      return;
+    }
+    refreshAll();
+  }, autoRefreshDelaySeconds.value * 1000);
+}
+
+function clearAutoRefreshTimer() {
+  if (autoRefreshTimer !== null) {
+    clearInterval(autoRefreshTimer);
+    autoRefreshTimer = null;
+  }
+}
 
 const exploitCount = computed(() => overview.value.exploitCount);
 const targetCount = computed(() => overview.value.targetCount);
@@ -410,20 +485,33 @@ function applyCustomWindow() {
 }
 
 async function refreshAll() {
+  if (busy.value) {
+    return;
+  }
   busy.value = true;
-  await Promise.all([
-    exploitStore.load(),
-    targetStore.load(),
-    runStore.refresh(),
-    runnerStore.load(),
-    loadOverviewStats(),
-    loadMatrix()
-  ]);
-  busy.value = false;
+  try {
+    await Promise.all([
+      exploitStore.load(),
+      targetStore.load(),
+      runStore.refresh(),
+      runnerStore.load(),
+      loadOverviewStats(),
+      loadMatrix()
+    ]);
+  } catch (err) {
+    console.error("Failed to refresh overview", err);
+  } finally {
+    busy.value = false;
+  }
 }
 
 onMounted(() => {
   refreshAll();
+  configureAutoRefresh();
+});
+
+onUnmounted(() => {
+  clearAutoRefreshTimer();
 });
 </script>
 
@@ -442,6 +530,49 @@ onMounted(() => {
   border-radius: 12px;
   padding: 1rem 1.5rem;
   border: 1px solid rgba(148, 163, 184, 0.25);
+}
+
+.header-left {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.auto-refresh {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  color: #cbd5f5;
+  font-size: 0.9rem;
+}
+
+.auto-refresh .toggle,
+.auto-refresh .delay {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 999px;
+  padding: 0.25rem 0.7rem;
+}
+
+.auto-refresh input[type="checkbox"] {
+  margin: 0;
+}
+
+.auto-refresh input[type="number"] {
+  width: 90px;
+  background: rgba(15, 23, 42, 0.9);
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  border-radius: 8px;
+  padding: 0.3rem 0.45rem;
+  color: #e2e8f0;
+}
+
+.auto-refresh .suffix {
+  color: #94a3b8;
 }
 
 .refresh {
