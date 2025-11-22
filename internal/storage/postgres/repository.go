@@ -2009,10 +2009,8 @@ func (r *Repository) OverviewMatrix(ctx context.Context, start, end time.Time) (
 		FROM runs r
 		JOIN exploits e ON e.id = r.exploit_id
 		LEFT JOIN flags f ON f.run_id = r.id
-		WHERE r.target_id IS NOT NULL AND (
-			(COALESCE(r.finished_at, r.started_at, r.queued_at) BETWEEN $1 AND $2)
-			OR (f.id IS NOT NULL AND COALESCE(f.last_submitted_at, f.created_at, r.finished_at, r.started_at, r.queued_at) BETWEEN $1 AND $2)
-		)
+		WHERE r.target_id IS NOT NULL
+			AND COALESCE(r.queued_at, r.started_at, r.finished_at, TIMESTAMP '1970-01-01') BETWEEN $1 AND $2
 	`, start, end)
 	if err != nil {
 		return matrix, err
